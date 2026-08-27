@@ -19,6 +19,7 @@ type RecognizeFinanceBillOptions = {
   appCode: string
   endpoint?: string
   fetchImpl?: typeof fetch
+  timeoutMs?: number
 }
 
 function normalizedReceiptText(content: string) {
@@ -70,21 +71,31 @@ export async function recognizeFinanceBill({
   imageDataUrl,
   appCode,
   endpoint = defaultEndpoint,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  timeoutMs = 10_000
 }: RecognizeFinanceBillOptions): Promise<InvoiceOcrResult> {
   if (!appCode.trim()) throw new Error('未配置发票 OCR 服务端认证信息')
   if (imageDataUrl.length > maxImageDataUrlLength) throw new Error('发票图片大小不能超过 5MB')
   const match = supportedImageDataUrl.exec(imageDataUrl)
   if (!match) throw new Error('发票识别仅支持 PNG、JPG、JPEG 或 BMP 图片')
 
-  const response = await fetchImpl(endpoint, {
-    method: 'POST',
-    headers: {
-      Authorization: `APPCODE ${appCode.trim()}`,
-      'Content-Type': 'application/json; charset=UTF-8'
-    },
-    body: JSON.stringify({ img: match[1] })
-  })
+  let response: Response
+  try {
+    response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `APPCODE ${appCode.trim()}`,
+        'Content-Type': 'application/json; charset=UTF-8'
+      },
+      body: JSON.stringify({ img: match[1] }),
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+  } catch (error) {
+    if (error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name)) {
+      throw new Error('发票识别服务请求超时')
+    }
+    throw error
+  }
 
   let payload: unknown
   try {

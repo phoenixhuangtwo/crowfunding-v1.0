@@ -9,13 +9,15 @@ type FetchProcurementPageOptions = {
   token: string
   projectName?: string
   fetchImpl?: typeof fetch
+  timeoutMs?: number
 }
 
 export async function fetchProcurementPage({
   baseUrl,
   token,
   projectName,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  timeoutMs = 10_000
 }: FetchProcurementPageOptions): Promise<ProcurementPageResult> {
   if (!token.trim()) throw new Error('未配置采购系统认证信息，请先配置服务端令牌')
 
@@ -28,9 +30,18 @@ export async function fetchProcurementPage({
   url.searchParams.set('recycleFlag', '0')
   if (projectName?.trim()) url.searchParams.set('projectName', projectName.trim())
 
-  const response = await fetchImpl(url, {
-    headers: { Authorization: token }
-  })
+  let response: Response
+  try {
+    response = await fetchImpl(url, {
+      headers: { Authorization: token },
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+  } catch (error) {
+    if (error instanceof Error && ['AbortError', 'TimeoutError'].includes(error.name)) {
+      throw new Error('采购系统请求超时')
+    }
+    throw error
+  }
 
   if (response.status === 401 || response.status === 403) {
     throw new Error('采购系统认证失败，请更新服务端令牌')

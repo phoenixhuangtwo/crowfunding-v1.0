@@ -111,3 +111,41 @@ test('repeating the same settlement idempotency key does not add the amount twic
   assert.equal(project.settledAmount, 10000)
   assert.equal(project.settlementInvoices.length, 1)
 })
+
+test('settlement confirmation rejects projects outside the settlement lifecycle without mutation', () => {
+  for (const status of ['未开放', '未满额', '已中断']) {
+    const project = { ...projectFixture(), status, settlementInvoices: [] }
+    assert.throws(() => confirmProjectSettlement(project, {
+      idempotencyKey: `SETTLEMENT-${status}`,
+      amount: 100,
+      fileName: '非法状态回单.png',
+      imageUrl: 'data:image/png;base64,INVALID',
+      transactionDate: '2026年08月21日',
+      payer: '付款方',
+      payee: '收款方',
+      operator: 'finance01 · 财务'
+    }, '2026-08-26 18:00:00'), /当前状态不允许确认结算/)
+
+    assert.equal(project.status, status)
+    assert.equal(project.settledAmount, 0)
+    assert.equal(project.settlementInvoices.length, 0)
+  }
+})
+
+test('settlement confirmation rejects amounts below the smallest currency unit', () => {
+  const project = projectFixture()
+  assert.throws(() => confirmProjectSettlement(project, {
+    idempotencyKey: 'SETTLEMENT-SUB-CENT',
+    amount: 0.001,
+    fileName: '小数金额回单.png',
+    imageUrl: 'data:image/png;base64,SUBCENT',
+    transactionDate: '2026年08月21日',
+    payer: '付款方',
+    payee: '收款方',
+    operator: 'finance01 · 财务'
+  }, '2026-08-26 18:00:00'), /交易金额不能低于 0.01 元/)
+
+  assert.equal(project.status, '已满额')
+  assert.equal(project.settledAmount, 0)
+  assert.equal(project.settlementInvoices.length, 0)
+})

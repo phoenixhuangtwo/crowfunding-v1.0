@@ -5,6 +5,9 @@ import { fetchProcurementPage } from './procurement.ts'
 import { mapProcurementOrderToDetail, mapProcurementOrderToProject, mergeProcurementProject } from './procurement-project.ts'
 import { recognizeFinanceBill } from './invoice-ocr.ts'
 import { confirmProjectSettlement, type SettlementInvoiceRecord } from './project-settlement.ts'
+import { DEFAULT_JSON_BODY_LIMIT, readJsonBody, RequestBodyError } from './http-json-body.ts'
+import { OcrProofStore } from './ocr-proof.ts'
+import { hasImageStorageCapacity, ResourceLimitError, SlidingWindowQuota } from './resource-limits.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -719,8 +722,28 @@ const state = loadState()
 const { projects, subscriptions, auditLogs, riskEvents, rules, receivingCodes } = state
 
 const maxImageDataUrlLength = Math.ceil(5 * 1024 * 1024 * 4 / 3) + 128
+const maxStoredImageDataUrlChars = 100 * 1024 * 1024
+const maxPaymentImagesPerSubscription = 10
+const maxSettlementInvoicesPerProject = 20
+const maxReceivingCodes = 100
 const supportedImageDataUrl = /^data:image\/(?:png|jpeg|bmp|webp);base64,[A-Za-z0-9+/]+={0,2}$/
 const supportedPaymentImageDataUrl = /^data:image\/(?:png|jpeg|bmp);base64,[A-Za-z0-9+/]+={0,2}$/
+const ocrProofStore = new OcrProofStore()
+const ocrQuota = new SlidingWindowQuota({ limit: 30, windowMs: 60_000 })
+
+function storedImageDataUrlChars() {
+  return receivingCodes.reduce((sum, item) => sum + (item.imageUrl?.length ?? 0), 0)
+    + subscriptions.reduce((sum, item) => sum
+      + (item.paymentImageUrl?.length ?? 0)
+      + (item.paymentImages ?? []).reduce((imageSum, image) => imageSum + (image.paymentImageUrl?.length ?? 0), 0), 0)
+    + projects.reduce((sum, item) => sum + (item.settlementInvoices ?? []).reduce((imageSum, invoice) => imageSum + (invoice.imageUrl?.length ?? 0), 0), 0)
+}
+
+function ensureImageStorageCapacity(res: ServerResponse, incomingImageUrl: string, replacedImageUrl = '', incomingCopies = 1) {
+  if (hasImageStorageCapacity(storedImageDataUrlChars(), replacedImageUrl.length, incomingImageUrl.length * incomingCopies, maxStoredImageDataUrlChars)) return true
+  send(res, 429, { error: 'IMAGE_STORAGE_LIMIT_EXCEEDED', message: '本地图片存储已达上限，请先清理历史图片' })
+  return false
+}
 
 function validateImagePayload(body: Record<string, unknown>, res: ServerResponse, errorPrefix: string) {
   const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : ''
@@ -775,13 +798,6 @@ function send(res: ServerResponse, status: number, payload: unknown) {
     'Content-Type': 'application/json; charset=utf-8'
   })
   res.end(JSON.stringify(payload))
-}
-
-async function readBody(req: IncomingMessage) {
-  const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(Buffer.from(chunk))
-  const raw = Buffer.concat(chunks).toString('utf8')
-  return raw ? JSON.parse(raw) : {}
 }
 
 async function routeGet(url: URL, res: ServerResponse) {
@@ -885,24 +901,36 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
 }
 
 async function routePost(pathname: string, req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req)
+  const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
 
   if (pathname === '/api/invoices/ocr') {
     const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl.trim() : ''
     const fileName = typeof body.fileName === 'string' ? body.fileName.trim() : ''
+    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''
+    const project = projects.find(item => item.id === projectId)
+    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    if (!['已满额', '已截止', '部分已结算'].includes(project.status)) {
+      return send(res, 409, { error: 'PROJECT_NOT_SETTLEMENT_ELIGIBLE', message: '项目当前状态不允许发起结算识别' })
+    }
     if (!fileName || fileName.length > 255) {
       return send(res, 400, { error: 'INVOICE_IMAGE_NAME_INVALID', message: '发票图片文件名无效' })
     }
+    if (!ensureImageStorageCapacity(res, imageDataUrl)) return
     try {
+      ocrQuota.take('ocr')
       const data = await recognizeFinanceBill({
         imageDataUrl,
         appCode: process.env.INVOICE_OCR_APPCODE ?? '',
         endpoint: process.env.INVOICE_OCR_API_URL,
       })
-      return send(res, 200, { data, message: '发票 OCR 识别完成' })
+      if (!Number.isFinite(data.amount) || Number(data.amount) < 0.01) {
+        return send(res, 200, { data, message: 'OCR 已完成，但未识别到可结算金额' })
+      }
+      const proof = ocrProofStore.create({ projectId, imageDataUrl, fileName, result: data })
+      return send(res, 200, { data: { ...data, settlementProofId: proof.proofId, proofExpiresAt: proof.expiresAt }, message: '发票 OCR 识别完成' })
     } catch (error) {
       const message = error instanceof Error ? error.message : '发票识别失败'
-      const status = message.startsWith('未配置') ? 503 : message.includes('仅支持') || message.includes('5MB') ? 400 : 502
+      const status = error instanceof ResourceLimitError ? 429 : message.startsWith('未配置') ? 503 : message.includes('仅支持') || message.includes('5MB') ? 400 : message.includes('凭证已达上限') ? 422 : 502
       return send(res, status, { error: 'INVOICE_OCR_FAILED', message })
     }
   }
@@ -959,10 +987,14 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!subject || !accountNote || !codeName) {
       return send(res, 400, { error: 'RECEIVING_CODE_FIELDS_REQUIRED', message: '请完整填写收款主体、账户说明和收款码名称' })
     }
+    if (receivingCodes.length >= maxReceivingCodes) {
+      return send(res, 429, { error: 'RECEIVING_CODE_LIMIT_EXCEEDED', message: '收款码数量已达上限' })
+    }
     let image: { imageUrl: string; imageName: string } | null = null
     if (body.imageUrl || body.imageName) {
       image = validateImagePayload(body, res, 'RECEIVING_CODE')
       if (!image) return
+      if (!ensureImageStorageCapacity(res, image.imageUrl)) return
     }
     const record: ReceivingCode = {
       id: `RCV-${Date.now()}`,
@@ -986,6 +1018,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!receivingCode) return send(res, 404, { error: 'RECEIVING_CODE_NOT_FOUND', message: '项目收款码不存在' })
     const image = validateImagePayload(body, res, 'RECEIVING_CODE')
     if (!image) return
+    if (!ensureImageStorageCapacity(res, image.imageUrl, receivingCode.imageUrl ?? '')) return
     const before = { imageName: receivingCode.imageName, updatedBy: receivingCode.updatedBy, updatedAt: receivingCode.updatedAt }
     receivingCode.imageUrl = image.imageUrl
     receivingCode.imageName = image.imageName
@@ -1028,6 +1061,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!body.idempotencyKey) return send(res, 400, { error: 'IDEMPOTENCY_KEY_REQUIRED', message: '缺少 idempotency_key（幂等键）' })
     const existing = subscriptions.find(item => item.idempotencyKey === body.idempotencyKey)
     if (existing) return send(res, 200, { data: existing, message: '重复请求已按幂等键返回原认购记录' })
+    if (typeof body.amount !== 'number' || !Number.isFinite(amount)) return send(res, 400, { error: 'AMOUNT_INVALID', message: '认购金额必须是有效数字' })
     if (amount < 100) return send(res, 400, { error: 'AMOUNT_TOO_SMALL', message: '认购金额不能低于 100 元' })
     if (amount > project.remain) return send(res, 409, { error: 'INSUFFICIENT_REMAINING_AMOUNT', message: '剩余可认购金额不足' })
 
@@ -1443,16 +1477,24 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!subscription) {
       return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
+    if (['已缴款', '已收款'].includes(subscription.pay)) {
+      return send(res, 409, { error: 'PAYMENT_ALREADY_COMPLETED', message: '该认购已完成缴款，不能继续上传支付截图' })
+    }
     if (!paymentImageUrl || !supportedPaymentImageDataUrl.test(paymentImageUrl) || paymentImageUrl.length > maxImageDataUrlLength) {
       return send(res, 400, { error: 'PAYMENT_IMAGE_INVALID', message: '支付截图仅支持 PNG、JPG 或 BMP 格式，且大小不能超过 5MB' })
     }
     if (!paymentImageName || paymentImageName.length > 255) {
       return send(res, 400, { error: 'PAYMENT_IMAGE_NAME_INVALID', message: '支付截图文件名无效' })
     }
+    if ((subscription.paymentImages?.length ?? 0) >= maxPaymentImagesPerSubscription) {
+      return send(res, 429, { error: 'PAYMENT_IMAGE_LIMIT_EXCEEDED', message: `每笔认购最多保留 ${maxPaymentImagesPerSubscription} 张支付截图` })
+    }
+    if (!ensureImageStorageCapacity(res, paymentImageUrl, subscription.paymentImageUrl ?? '', 2)) return
     const expectedAmount = Number(subscription.amount)
     let recognizedAmount = 0
     let recognitionFailure = ''
     try {
+      ocrQuota.take('ocr')
       const recognition = await recognizeFinanceBill({
         imageDataUrl: paymentImageUrl,
         appCode: process.env.INVOICE_OCR_APPCODE ?? '',
@@ -1464,6 +1506,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         recognitionFailure = '未识别到有效交易金额'
       }
     } catch (error) {
+      if (error instanceof ResourceLimitError) {
+        return send(res, 429, { error: error.code, message: error.message })
+      }
       recognitionFailure = error instanceof Error ? error.message : '支付截图识别失败'
     }
     const recognized = !recognitionFailure
@@ -1524,25 +1569,40 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const projectId = decodeURIComponent(settlementConfirmMatch[1])
     const project = projects.find(item => item.id === projectId)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
-    const amount = Number(body.amount)
+    const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : ''
     const image = validateImagePayload({ imageUrl: body.imageUrl, imageName: body.fileName }, res, 'SETTLEMENT_INVOICE')
     if (!image) return
+    const duplicateInvoice = project.settlementInvoices?.find(invoice => invoice.id === idempotencyKey)
+    if (!duplicateInvoice && (project.settlementInvoices?.length ?? 0) >= maxSettlementInvoicesPerProject) {
+      return send(res, 429, { error: 'SETTLEMENT_INVOICE_LIMIT_EXCEEDED', message: `每个项目最多保留 ${maxSettlementInvoicesPerProject} 条结算凭证` })
+    }
+    if (!duplicateInvoice && !ensureImageStorageCapacity(res, image.imageUrl)) return
+    const proofId = typeof body.settlementProofId === 'string' ? body.settlementProofId.trim() : ''
     const before = {
       status: project.status,
       settledAmount: Number(project.settledAmount ?? 0),
       remainingAmount: Number((project.salesAmount - Number(project.settledAmount ?? 0)).toFixed(2))
     }
     try {
+      const trustedProof = duplicateInvoice ? null : ocrProofStore.verify({
+        proofId,
+        projectId,
+        imageDataUrl: image.imageUrl,
+        fileName: image.imageName
+      })
+      const trustedResult = trustedProof?.result
+      const trustedField = (key: string) => trustedResult?.fields.find(field => field.key === key)?.value ?? '未识别'
       const result = confirmProjectSettlement(project, {
-        idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '',
-        amount,
+        idempotencyKey,
+        amount: duplicateInvoice?.amount ?? Number(trustedResult?.amount),
         fileName: image.imageName,
         imageUrl: image.imageUrl,
-        transactionDate: typeof body.transactionDate === 'string' ? body.transactionDate.trim() : '未识别',
-        payer: typeof body.payer === 'string' ? body.payer.trim() : '未识别',
-        payee: typeof body.payee === 'string' ? body.payee.trim() : '未识别',
+        transactionDate: duplicateInvoice?.transactionDate ?? trustedField('transactionDate'),
+        payer: duplicateInvoice?.payer ?? trustedField('payer'),
+        payee: duplicateInvoice?.payee ?? trustedField('payee'),
         operator: typeof body.operator === 'string' ? body.operator.trim() : 'finance01 · 财务'
       }, now())
+      if (!result.duplicate) ocrProofStore.remove(proofId)
       pushAudit({
         actor: typeof body.operator === 'string' ? body.operator : 'finance01 · 财务',
         role: 'finance',
@@ -1563,7 +1623,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : '确认结算失败'
-      const status = message.includes('超过') || message.includes('已完结') ? 409 : 400
+      const status = message.includes('超过') || message.includes('已完结') || message.includes('当前状态') || message.includes('OCR 凭证') ? 409 : 400
       return send(res, status, { error: 'PROJECT_SETTLEMENT_CONFIRM_FAILED', message })
     }
   }
@@ -1621,14 +1681,17 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1:4100')
   try {
     if (req.method === 'GET') return await routeGet(url, res)
-    if (req.method === 'POST') return routePost(url.pathname, req, res)
+    if (req.method === 'POST') return await routePost(url.pathname, req, res)
     return send(res, 405, { error: 'METHOD_NOT_ALLOWED' })
   } catch (error) {
+    if (error instanceof RequestBodyError) return send(res, error.status, { error: error.code, message: error.message })
     return send(res, 500, { error: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : '未知错误' })
   }
 })
 
 const port = Number(process.env.API_PORT ?? 4100)
+server.requestTimeout = 15_000
+server.headersTimeout = 10_000
 server.listen(port, '127.0.0.1', () => {
   console.log(`subscription-api listening on http://127.0.0.1:${port}`)
 })

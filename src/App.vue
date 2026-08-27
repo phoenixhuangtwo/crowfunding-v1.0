@@ -91,6 +91,8 @@ type PaymentImage = {
 type InvoiceOcrResult = {
   amount?: number
   taskNo?: string
+  settlementProofId?: string
+  proofExpiresAt?: number
   fields: Array<{ key: string; label: string; value: string }>
 }
 type Subscription = {
@@ -1798,7 +1800,11 @@ function runInvoiceOcr(file: UploadFile) {
     try {
       const payload = await api<{ data: InvoiceOcrResult; message: string }>('/api/invoices/ocr', {
         method: 'POST',
-        body: JSON.stringify({ imageDataUrl: reader.result, fileName: raw.name })
+        body: JSON.stringify({
+          projectId: selectedProject.value.id,
+          imageDataUrl: reader.result,
+          fileName: raw.name
+        })
       })
       if (requestId !== invoiceOcrRequestId.value) return
       invoiceOcrResult.value = payload.data
@@ -1841,7 +1847,7 @@ function removePendingInvoice() {
 }
 
 async function confirmSettlementInvoice() {
-  if (!currentInvoiceCanConfirm.value || currentInvoiceAmount.value === undefined) {
+  if (!currentInvoiceCanConfirm.value || currentInvoiceAmount.value === undefined || !invoiceOcrResult.value?.settlementProofId) {
     ElMessage.warning(currentInvoiceExceedsRemaining.value ? '交易金额超过项目剩余待结算金额' : '当前识别结果没有可确认的交易金额')
     return
   }
@@ -1854,12 +1860,9 @@ async function confirmSettlementInvoice() {
       method: 'POST',
       body: JSON.stringify({
         idempotencyKey: invoiceSettlementKey.value,
-        amount: currentInvoiceAmount.value,
+        settlementProofId: invoiceOcrResult.value.settlementProofId,
         fileName: invoiceImageName.value,
         imageUrl: invoiceImageUrl.value,
-        transactionDate: invoiceFieldValue('transactionDate'),
-        payer: invoiceFieldValue('payer'),
-        payee: invoiceFieldValue('payee'),
         operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
       })
     })

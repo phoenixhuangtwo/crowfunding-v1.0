@@ -28,7 +28,7 @@ test('admin project actions keep at most three primary buttons and move risky ac
   })
   assert.deepEqual(getAdminProjectActionLayout!({ status: '未满额', remain: 100 }), {
     showPayReview: true,
-    showSettlement: true,
+    showSettlement: false,
     showOpen: false,
     showTerminate: true,
     showTakeover: true,
@@ -36,7 +36,7 @@ test('admin project actions keep at most three primary buttons and move risky ac
   })
   assert.deepEqual(getAdminProjectActionLayout!({ status: '未满额', remain: 0 }), {
     showPayReview: true,
-    showSettlement: true,
+    showSettlement: false,
     showOpen: false,
     showTerminate: true,
     showTakeover: false,
@@ -50,4 +50,6 @@ test('admin project actions keep at most three primary buttons and move risky ac
     showTakeover: false,
     showMore: false
   })
+  assert.equal(getAdminProjectActionLayout!({ status: '已中断', remain: 100 }).showSettlement, false)
+  assert.equal(getAdminProjectActionLayout!({ status: '部分已结算', remain: 0 }).showSettlement, true)
 })

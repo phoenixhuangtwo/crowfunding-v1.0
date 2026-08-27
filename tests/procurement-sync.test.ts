@@ -65,6 +65,7 @@ test('fetchProcurementPage sends the fixed page query and returns a count summar
         'https://procurement.example.test/admin-api/erp/offline-order/page?pageNo=1&pageSize=10&queryFromPage=N&exchangeSellOrder=&extraSellOrder=&recycleFlag=0'
       )
       assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer test-token')
+      assert.ok(init?.signal instanceof AbortSignal)
       return new Response(JSON.stringify(upstreamBody), {
         status: 200,
         headers: { 'content-type': 'application/json' }
@@ -202,4 +203,20 @@ test('mapProcurementOrderToProject falls back to selling price when transaction 
 test('mapProcurementOrderToProject skips orders without a positive cost', () => {
   assert.equal(mapProcurementOrderToProject({ ...upstreamBody.data.list[0], totalCostPrice: null }), null)
   assert.equal(mapProcurementOrderToProject({ ...upstreamBody.data.list[0], totalCostPrice: 0 }), null)
+})
+
+test('fetchProcurementPage aborts a stalled upstream request at the configured timeout', async () => {
+  const fetchImpl: typeof fetch = async (_input, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+  })
+
+  await assert.rejects(
+    fetchProcurementPage({
+      baseUrl: 'https://procurement.example.test/admin-api/erp/offline-order/page',
+      token: 'Bearer test-token',
+      fetchImpl,
+      timeoutMs: 1
+    }),
+    /采购系统请求超时/
+  )
 })

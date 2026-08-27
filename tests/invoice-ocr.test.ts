@@ -36,6 +36,7 @@ test('advanced OCR returns the fixed transaction date, payer, payee and amount f
 
   assert.equal(requestUrl, 'https://gjbsb.market.alicloudapi.com/ocrservice/advanced')
   assert.equal(requestInit?.method, 'POST')
+  assert.ok(requestInit?.signal instanceof AbortSignal)
   assert.deepEqual(requestInit?.headers, {
     Authorization: 'APPCODE server-only-code',
     'Content-Type': 'application/json; charset=UTF-8'
@@ -123,4 +124,20 @@ test('finance invoice OCR rejects unsupported or oversized image data before cal
     /PNG、JPG、JPEG 或 BMP/
   )
   assert.equal(called, false)
+})
+
+test('finance invoice OCR aborts a stalled upstream request at the configured timeout', async () => {
+  const fetchImpl: typeof fetch = async (_input, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true })
+  })
+
+  await assert.rejects(
+    recognizeFinanceBill({
+      imageDataUrl: 'data:image/png;base64,aGVsbG8=',
+      appCode: 'server-only-code',
+      fetchImpl,
+      timeoutMs: 1
+    }),
+    /发票识别服务请求超时/
+  )
 })

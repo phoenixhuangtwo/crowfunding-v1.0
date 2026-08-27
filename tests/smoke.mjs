@@ -62,13 +62,18 @@ function startProcurementServer(requests) {
 
 function startInvoiceOcrServer(requests) {
   return new Promise((resolveServer, reject) => {
+    let defaultRequestNumber = 0
     const server = createHttpServer(async (req, res) => {
       const chunks = []
       for await (const chunk of req) chunks.push(Buffer.from(chunk))
       const body = Buffer.concat(chunks).toString('utf8')
       requests.push({ authorization: req.headers.authorization, contentType: req.headers['content-type'], body })
-      const requestNumber = requests.length
-      const amount = requestNumber === 1 ? 24530.18 : requestNumber === 2 ? 40 : requestNumber === 3 ? 60 : undefined
+      const decodedImage = (() => {
+        try { return Buffer.from(String(JSON.parse(body).img ?? ''), 'base64').toString('utf8') } catch { return '' }
+      })()
+      const explicitAmount = decodedImage.startsWith('amount:') ? Number(decodedImage.slice('amount:'.length)) : undefined
+      if (explicitAmount === undefined) defaultRequestNumber += 1
+      const amount = explicitAmount ?? (defaultRequestNumber === 1 ? 24530.18 : defaultRequestNumber === 2 ? 40 : defaultRequestNumber === 3 ? 60 : undefined)
       const amountText = amount === undefined ? '' : `\n金额（小写）：CNY${amount.toFixed(2)}`
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({
@@ -164,12 +169,16 @@ try {
   const health = await waitForApi(baseUrl, child, logs)
   assert(health.service === 'subscription-api', 'health check should expose subscription-api service name')
 
+  const initialProjects = (await requestJson(baseUrl, '/api/projects')).data
+  const settlementProject = initialProjects.find(project => project.status === '已满额' && project.salesAmount > 0 && !project.settledAmount)
+  assert(settlementProject, 'state should include an unsettled full project for settlement confirmation')
   const invoiceOcrImageUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
   const invoiceOcrPayload = await requestJson(baseUrl, '/api/invoices/ocr', {
     method: 'POST',
-    body: JSON.stringify({ imageDataUrl: invoiceOcrImageUrl, fileName: '发票.png' })
+    body: JSON.stringify({ projectId: settlementProject.id, imageDataUrl: invoiceOcrImageUrl, fileName: '发票.png' })
   })
   assert(invoiceOcrPayload.data?.amount === 24530.18, 'invoice OCR route should return the recognized invoice amount')
+  assert(invoiceOcrPayload.data?.settlementProofId, 'invoice OCR route should issue a server-bound settlement proof')
   assert(JSON.stringify(invoiceOcrPayload.data?.fields) === JSON.stringify([
     { key: 'transactionDate', label: '交易日期', value: '2026年08月21日' },
     { key: 'payer', label: '付款人', value: '冒烟付款公司' },
@@ -190,35 +199,62 @@ try {
   assert(migratedTargetPayments.length === 3, 'target project should keep its three historical payment records')
   assert(migratedTargetPayments.every(item => item.pay === '待复核'), 'historical unreviewed target payments should migrate to pending review')
 
-  const settlementProject = state.projects.find(project => project.status === '已满额' && project.salesAmount > 0 && !project.settledAmount)
-  assert(settlementProject, 'state should include an unsettled full project for settlement confirmation')
   const firstSettlementAmount = Number((settlementProject.salesAmount / 2).toFixed(2))
   const secondSettlementAmount = Number((settlementProject.salesAmount - firstSettlementAmount).toFixed(2))
+  const firstSettlementImageUrl = `data:image/png;base64,${Buffer.from(`amount:${firstSettlementAmount}`).toString('base64')}`
+  const firstRecognition = await requestJson(baseUrl, '/api/invoices/ocr', {
+    method: 'POST',
+    body: JSON.stringify({ projectId: settlementProject.id, imageDataUrl: firstSettlementImageUrl, fileName: '第一次回单.png' })
+  })
+  const legacySettlementResponse = await fetch(`${baseUrl}/api/projects/${settlementProject.id}/settlements/confirm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      idempotencyKey: 'SMOKE-SETTLEMENT-LEGACY',
+      amount: settlementProject.salesAmount,
+      fileName: '第一次回单.png',
+      imageUrl: firstSettlementImageUrl,
+      transactionDate: '伪造日期',
+      payer: '伪造付款方',
+      payee: '伪造收款方'
+    })
+  })
+  assert(legacySettlementResponse.status === 409, 'settlement confirmation should reject client OCR claims without a server proof')
+  const tamperedSettlementResponse = await fetch(`${baseUrl}/api/projects/${settlementProject.id}/settlements/confirm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      idempotencyKey: 'SMOKE-SETTLEMENT-TAMPERED',
+      settlementProofId: firstRecognition.data.settlementProofId,
+      fileName: '第一次回单.png',
+      imageUrl: 'data:image/png;base64,VEFNUEVSRUQ='
+    })
+  })
+  assert(tamperedSettlementResponse.status === 409, 'settlement confirmation should reject an image that does not match the OCR proof')
   const firstSettlement = await requestJson(baseUrl, `/api/projects/${settlementProject.id}/settlements/confirm`, {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: 'SMOKE-SETTLEMENT-001',
-      amount: firstSettlementAmount,
+      settlementProofId: firstRecognition.data.settlementProofId,
       fileName: '第一次回单.png',
-      imageUrl: invoiceOcrImageUrl,
-      transactionDate: '2026年08月21日',
-      payer: '冒烟付款方',
-      payee: '冒烟收款方',
+      imageUrl: firstSettlementImageUrl,
       operator: 'finance-smoke · 财务'
     })
   })
   assert(firstSettlement.data?.project?.status === '部分已结算', 'first settlement below sales income should mark the project partially settled')
   assert(firstSettlement.data?.canUploadMore === true, 'partial settlement should keep invoice upload available')
+  const secondSettlementImageUrl = `data:image/png;base64,${Buffer.from(`amount:${secondSettlementAmount}`).toString('base64')}`
+  const secondRecognition = await requestJson(baseUrl, '/api/invoices/ocr', {
+    method: 'POST',
+    body: JSON.stringify({ projectId: settlementProject.id, imageDataUrl: secondSettlementImageUrl, fileName: '第二次回单.png' })
+  })
   const finalSettlement = await requestJson(baseUrl, `/api/projects/${settlementProject.id}/settlements/confirm`, {
     method: 'POST',
     body: JSON.stringify({
       idempotencyKey: 'SMOKE-SETTLEMENT-002',
-      amount: secondSettlementAmount,
+      settlementProofId: secondRecognition.data.settlementProofId,
       fileName: '第二次回单.png',
-      imageUrl: invoiceOcrImageUrl,
-      transactionDate: '2026年08月22日',
-      payer: '冒烟付款方',
-      payee: '冒烟收款方',
+      imageUrl: secondSettlementImageUrl,
       operator: 'finance-smoke · 财务'
     })
   })
@@ -227,7 +263,7 @@ try {
   const settledProjects = (await requestJson(baseUrl, '/api/projects')).data
   const persistedSettledProject = settledProjects.find(project => project.id === settlementProject.id)
   assert(persistedSettledProject?.status === '已完结' && persistedSettledProject?.settlementInvoices?.length === 2, 'settlement confirmations should persist with the project')
-  assert(persistedSettledProject?.settlementInvoices?.[0]?.imageUrl === invoiceOcrImageUrl, 'settlement recognition history should persist the uploaded image')
+  assert(persistedSettledProject?.settlementInvoices?.[0]?.imageUrl === firstSettlementImageUrl, 'settlement recognition history should persist the OCR-bound uploaded image')
   assert(persistedSettledProject?.settlementInvoices?.[0]?.resultStatus === '部分已结算', 'partial settlement history should persist its result')
   assert(persistedSettledProject?.settlementInvoices?.[1]?.resultStatus === '已完结', 'final settlement history should persist its completed result')
   const settlementAuditLogs = (await requestJson(baseUrl, '/api/audit-logs')).data
@@ -369,6 +405,15 @@ try {
     idempotencyKey
   }
 
+  const subscriptionsBeforeInvalidAmount = (await requestJson(baseUrl, '/api/subscriptions')).data.length
+  const invalidAmountResponse = await fetch(`${baseUrl}/api/subscriptions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...createBody, amount: 'NaN', idempotencyKey: `${idempotencyKey}-invalid` })
+  })
+  assert(invalidAmountResponse.status === 400, 'subscription create should reject non-finite amounts')
+  assert((await requestJson(baseUrl, '/api/subscriptions')).data.length === subscriptionsBeforeInvalidAmount, 'invalid amount should not create a subscription')
+
   const firstCreate = await requestJson(baseUrl, '/api/subscriptions', {
     method: 'POST',
     body: JSON.stringify(createBody)
@@ -382,6 +427,22 @@ try {
   assert(secondCreate.data?.id === firstCreate.data.id, 'same idempotency key should return the same subscription')
 
   const paymentImageUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+  const invalidPaymentImageResponse = await fetch(`${baseUrl}/api/payments/ocr`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      state: 'ok',
+      paymentId: 'PAY-SMOKE-INVALID-IMAGE',
+      subscriptionId: firstCreate.data.id,
+      expectedAmount: 100,
+      paymentImageUrl: 'data:image/svg+xml;base64,PHN2Zy8+',
+      paymentImageName: 'unsafe.svg'
+    })
+  })
+  assert(invalidPaymentImageResponse.status === 400, 'OCR upload should reject unsupported payment screenshot formats')
+  const paymentAfterInvalidUpload = (await requestJson(baseUrl, '/api/subscriptions')).data.find(item => item.id === firstCreate.data.id)
+  assert((paymentAfterInvalidUpload?.paymentImages?.length ?? 0) === 0, 'invalid screenshot upload should not append or overwrite persisted payment images')
+
   const firstPaymentOcr = await requestJson(baseUrl, '/api/payments/ocr', {
     method: 'POST',
     body: JSON.stringify({
@@ -417,8 +478,8 @@ try {
   assert(paymentSubscription?.paymentImages?.map(item => item.paymentImageName).join(',') === 'smoke-payment-1.png,smoke-payment-2.png', 'payment screenshot order and names should persist')
   assert(paymentSubscription?.recognizedPaidAmount === 100, 'recognized amounts from multiple screenshots should accumulate')
   assert(paymentSubscription?.pay === '待复核', 'matching the subscription amount should wait for finance review')
-  assert(invoiceOcrRequests.length === 3, 'each payment upload should call the configured OCR supplier once')
-  assert(invoiceOcrRequests.slice(1).every(item => item.authorization === 'APPCODE smoke-invoice-code'), 'payment OCR should keep AppCode authentication on the server')
+  assert(invoiceOcrRequests.length === 5, 'each settlement and payment OCR request should call the configured supplier once')
+  assert(invoiceOcrRequests.every(item => item.authorization === 'APPCODE smoke-invoice-code'), 'all OCR paths should keep AppCode authentication on the server')
 
   const passedPaymentReview = await requestJson(baseUrl, `/api/subscriptions/${firstCreate.data.id}/review`, {
     method: 'POST',
@@ -487,6 +548,35 @@ try {
   assert(reviewSubscriptionAfterDeletion?.recognizedPaidAmount === 0, 'deleting a failed screenshot should keep the cumulative recognized amount unchanged')
   assert(reviewSubscriptionAfterDeletion?.pay === '未缴款', 'deleting the only failed screenshot should restore the unpaid state')
 
+  const ocrCallsBeforeQuotaUploads = invoiceOcrRequests.length
+  for (let index = 0; index < 10; index += 1) {
+    await requestJson(baseUrl, '/api/payments/ocr', {
+      method: 'POST',
+      body: JSON.stringify({
+        paymentId: `PAY-SMOKE-QUOTA-${index}`,
+        subscriptionId: reviewCreate.data.id,
+        expectedAmount: 100,
+        paymentImageUrl,
+        paymentImageName: `smoke-payment-quota-${index}.png`
+      })
+    })
+  }
+  const ocrCallsAtQuota = invoiceOcrRequests.length
+  assert(ocrCallsAtQuota === ocrCallsBeforeQuotaUploads + 10, 'accepted payment images should each consume one OCR call')
+  const overImageQuotaResponse = await fetch(`${baseUrl}/api/payments/ocr`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      paymentId: 'PAY-SMOKE-QUOTA-OVER',
+      subscriptionId: reviewCreate.data.id,
+      expectedAmount: 100,
+      paymentImageUrl,
+      paymentImageName: 'smoke-payment-quota-over.png'
+    })
+  })
+  assert(overImageQuotaResponse.status === 429, 'payment image upload should reject the N+1 image at the retention limit')
+  assert(invoiceOcrRequests.length === ocrCallsAtQuota, 'rejected N+1 image should not consume an OCR call')
+
   const recognizedPaymentImageId = paymentSubscription?.paymentImages?.[0]?.id
   const recognizedImageDeleteResponse = await fetch(`${baseUrl}/api/payments/images/delete`, {
     method: 'POST',
@@ -501,23 +591,13 @@ try {
   const paymentAfterRejectedDeletion = subscriptionsAfterRejectedDeletion.data.find(item => item.id === firstCreate.data.id)
   assert(paymentAfterRejectedDeletion?.paymentImages?.length === 2, 'rejected deletion should preserve recognized payment screenshots')
 
-  const invalidPaymentImageResponse = await fetch(`${baseUrl}/api/payments/ocr`, {
+  const oversizedBodyResponse = await fetch(`${baseUrl}/api/subscriptions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      state: 'ok',
-      paymentId: 'PAY-SMOKE-INVALID-IMAGE',
-      subscriptionId: firstCreate.data.id,
-      expectedAmount: 100,
-      paymentImageUrl: 'data:image/svg+xml;base64,PHN2Zy8+',
-      paymentImageName: 'unsafe.svg'
-    })
+    body: JSON.stringify({ padding: 'x'.repeat(8 * 1024 * 1024) })
   })
-  assert(invalidPaymentImageResponse.status === 400, 'OCR upload should reject unsupported payment screenshot formats')
-
-  const subscriptionsAfterInvalidPayment = await requestJson(baseUrl, '/api/subscriptions')
-  const paymentAfterInvalidUpload = subscriptionsAfterInvalidPayment.data.find(item => item.id === firstCreate.data.id)
-  assert(paymentAfterInvalidUpload?.paymentImages?.length === 2, 'invalid screenshot upload should not append or overwrite persisted payment images')
+  assert(oversizedBodyResponse.status === 413, 'oversized JSON requests should be rejected before parsing')
+  assert((await requestJson(baseUrl, '/api/health')).ok === true, 'API should remain healthy after rejecting an oversized request')
 
   const persistedState = JSON.parse(await readFile(statePath, 'utf8'))
   const persistedReceivingCode = persistedState.receivingCodes.find(item => item.id === receivingCodeFixture.id)
