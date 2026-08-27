@@ -253,7 +253,6 @@ const procurementOrderDetail = ref<ProcurementOrderDetail>()
 const ocrState = ref<'none' | 'loading' | 'ok' | 'mismatch' | 'fail'>('none')
 const paymentUploadRef = ref<UploadInstance>()
 const localPaymentImageUrl = ref('')
-const simulatedRecognizedAmount = ref<number | undefined>()
 const lastOcrResult = ref<{ recognizedTotal: number; remainingAmount: number; imageCount: number }>()
 const invoiceOcrState = ref<'none' | 'loading' | 'ok' | 'fail'>('none')
 const invoiceImageUrl = ref('')
@@ -677,7 +676,7 @@ const activeReviewRecognizedAmount = computed(() => Number((activeReviewSubscrip
 const pendingPaymentReviewCount = computed(() => paymentReviewSubscriptions.value.filter(item => subscriptionDisplayPay(item) === '待复核').length)
 const activeReviewIsPending = computed(() => activeReviewSubscription.value ? subscriptionDisplayPay(activeReviewSubscription.value) === '待复核' : false)
 const activeReviewReadOnlyText = computed(() => activeReviewSubscription.value
-  ? `当前记录状态为“${subscriptionDisplayPay(activeReviewSubscription.value)}”，仅供查看，不能重复复核。`
+  ? `当前记录状态为“${subscriptionPayLabel(activeReviewSubscription.value)}”，仅供查看，不能重复复核。`
   : '当前没有可查看的缴款记录。')
 const activeReviewPaymentId = computed(() => activeReviewSubscription.value ? reviewPaymentId(activeReviewSubscription.value) : 'PAY-20260705-0092')
 const employeeNameMap: Record<string, string> = {
@@ -909,7 +908,6 @@ function paymentRemaining(subscription: Subscription) {
 function openPayment(subscription: Subscription) {
   activePaymentSubscriptionId.value = subscription.id
   localPaymentImageUrl.value = ''
-  simulatedRecognizedAmount.value = Math.max(0, Number((subscription.amount - Number(subscription.recognizedPaidAmount ?? 0)).toFixed(2)))
   lastOcrResult.value = undefined
   paymentUploadRef.value?.clearFiles()
   go('payment')
@@ -1072,6 +1070,14 @@ function isExpiredUnpaidSubscription(subscription: Subscription) {
 
 function subscriptionDisplayPay(subscription: Subscription) {
   return isExpiredUnpaidSubscription(subscription) ? '已释放' : subscription.pay
+}
+
+function subscriptionPayLabel(subscription: Subscription) {
+  const pay = subscriptionDisplayPay(subscription)
+  if (pay === '待复核') return '已缴款待审核'
+  if (pay === '已缴款') return '缴款成功'
+  if (pay === '复核驳回') return '缴款被驳回'
+  return pay
 }
 
 function subscriptionPayTagType(subscription: Subscription) {
@@ -1656,36 +1662,34 @@ async function confirmSubscribe() {
   }
 }
 
-async function runOcr(
-  state: typeof ocrState.value = 'ok',
-  paymentImage?: { url: string; name: string },
-  recognizedAmount = simulatedRecognizedAmount.value ?? activePaymentRemainingAmount.value
-) {
+async function submitPaymentImage(paymentImage: { url: string; name: string }) {
   ocrState.value = 'loading'
   try {
-    const payload = await api<{ data: { status: string; recognized_total: number; remaining_amount: number; image_count: number } }>('/api/payments/ocr', {
+    const payload = await api<{ data: { status: string; ocr_status: string; recognized_total: number; remaining_amount: number; image_count: number; reason?: string } }>('/api/payments/ocr', {
       method: 'POST',
       body: JSON.stringify({
-        state,
         paymentId: 'PAY-20260705-0092',
         subscriptionId: activePaymentSubscription.value?.id,
-        expectedAmount: activePaymentAmount.value,
-        recognizedAmount,
-        paymentImageUrl: paymentImage?.url,
-        paymentImageName: paymentImage?.name
+        paymentImageUrl: paymentImage.url,
+        paymentImageName: paymentImage.name
       })
     })
-    window.setTimeout(async () => {
-      await loadData()
-      lastOcrResult.value = {
-        recognizedTotal: payload.data.recognized_total,
-        remainingAmount: payload.data.remaining_amount,
-        imageCount: payload.data.image_count
-      }
-      simulatedRecognizedAmount.value = payload.data.remaining_amount
-      ocrState.value = state === 'fail' ? 'fail' : payload.data.recognized_total === activePaymentAmount.value ? 'ok' : 'mismatch'
+    await loadData()
+    lastOcrResult.value = {
+      recognizedTotal: payload.data.recognized_total,
+      remainingAmount: payload.data.remaining_amount,
+      imageCount: payload.data.image_count
+    }
+    ocrState.value = payload.data.ocr_status === '待财务复核'
+      ? 'fail'
+      : payload.data.recognized_total === activePaymentAmount.value
+        ? 'ok'
+        : 'mismatch'
+    if (payload.data.ocr_status === '待财务复核') {
+      ElMessage.warning('未识别到有效交易金额，截图已保存并转入财务复核')
+    } else {
       ElMessage.success(payload.data.remaining_amount === 0 ? '累计识别金额已匹配认购金额' : `本次截图已保存，仍需识别 ${formatMoney(payload.data.remaining_amount)}`)
-    }, 600)
+    }
   } catch (error) {
     ocrState.value = 'fail'
     if (paymentImage) {
@@ -1695,12 +1699,45 @@ async function runOcr(
   }
 }
 
+async function deleteFailedPaymentImage(image: PaymentImage) {
+  if (image.status !== '识别失败' || !activePaymentSubscription.value) return
+  try {
+    await ElMessageBox.confirm(`确认删除识别失败的截图「${image.paymentImageName}」？`, '删除支付截图', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await api('/api/payments/images/delete', {
+      method: 'POST',
+      body: JSON.stringify({
+        subscriptionId: activePaymentSubscription.value.id,
+        imageId: image.id,
+        operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
+      })
+    })
+    await loadData()
+    localPaymentImageUrl.value = ''
+    lastOcrResult.value = undefined
+    ocrState.value = activePaymentImages.value.some(item => item.status === '识别失败')
+      ? 'fail'
+      : activePaymentImages.value.length === 0
+        ? 'none'
+        : activePaymentRecognizedAmount.value >= activePaymentAmount.value
+          ? 'ok'
+          : 'mismatch'
+    ElMessage.success('识别失败的支付截图已删除')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '删除支付截图失败')
+  }
+}
+
 async function handlePaymentImageChange(file: UploadFile) {
   const raw = file.raw
-  const supportedTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
+  const supportedTypes = new Set(['image/png', 'image/jpeg', 'image/bmp'])
   if (!raw || !supportedTypes.has(raw.type)) {
     paymentUploadRef.value?.clearFiles()
-    ElMessage.warning('支付截图仅支持 PNG、JPG 或 WebP 图片')
+    ElMessage.warning('支付截图仅支持 PNG、JPG 或 BMP 图片')
     return
   }
   if (raw.size > 5 * 1024 * 1024) {
@@ -1718,7 +1755,7 @@ async function handlePaymentImageChange(file: UploadFile) {
     if (typeof reader.result !== 'string') return
     localPaymentImageUrl.value = reader.result
     paymentUploadRef.value?.clearFiles()
-    await runOcr('ok', { url: reader.result, name: raw.name }, simulatedRecognizedAmount.value ?? activePaymentRemainingAmount.value)
+    await submitPaymentImage({ url: reader.result, name: raw.name })
   }
   reader.readAsDataURL(raw)
 }
@@ -1874,8 +1911,8 @@ async function submitPaymentReview(result: 'pass' | 'reject' | 'partial') {
     return
   }
   const config = {
-    pass: { title: '复核通过', message: '确认该笔支付有效，状态将更新为已缴款。' },
-    reject: { title: '复核驳回', message: '驳回后员工需重新上传支付截图。' },
+    pass: { title: '复核通过', message: '确认该笔支付有效？确认后员工缴款状态将更新为“缴款成功”。' },
+    reject: { title: '复核驳回', message: '确认驳回该笔支付？确认后员工缴款状态将更新为“缴款被驳回”，并需重新上传支付截图。' },
     partial: { title: '标记部分缴款', message: '确认后将生成待补款提示。' }
   }[result]
   try {
@@ -2184,11 +2221,11 @@ onMounted(loadData)
             <el-select v-model="mineFilters.pay" placeholder="状态" style="width: 150px">
               <el-option label="状态：全部" value="全部" />
               <el-option label="未缴款" value="未缴款" />
-              <el-option label="待复核" value="待复核" />
-              <el-option label="复核驳回" value="复核驳回" />
+              <el-option label="已缴款待审核" value="待复核" />
+              <el-option label="缴款被驳回" value="复核驳回" />
               <el-option label="待确认收款" value="待确认收款" />
               <el-option label="已收款" value="已收款" />
-              <el-option label="已缴款" value="已缴款" />
+              <el-option label="缴款成功" value="已缴款" />
               <el-option label="已释放" value="已释放" />
             </el-select>
             <el-input-number
@@ -2225,7 +2262,7 @@ onMounted(loadData)
               <el-table-column label="申请认购金额" width="130"><template #default="{ row }">{{ formatMoney(row.amount) }}</template></el-table-column>
               <el-table-column label="状态" width="190">
                 <template #default="{ row }">
-                  <el-tag :type="subscriptionPayTagType(row)">{{ subscriptionDisplayPay(row) }}</el-tag>
+                  <el-tag :type="subscriptionPayTagType(row)">{{ subscriptionPayLabel(row) }}</el-tag>
                   <el-tooltip
                     v-if="subscriptionDisplayPay(row) === '复核驳回'"
                     :content="row.rejectReason || '支付截图信息不完整，请重新上传支付成功截图。'"
@@ -2300,16 +2337,6 @@ onMounted(loadData)
                 <div><span>已识别累计金额</span><strong>{{ formatMoney(activePaymentRecognizedAmount) }}</strong></div>
                 <div><span>剩余待识别金额</span><strong :class="{ ok: activePaymentRemainingAmount === 0 }">{{ formatMoney(activePaymentRemainingAmount) }}</strong></div>
               </div>
-              <div class="payment-ocr-simulator">
-                <span>本张模拟识别金额</span>
-                <el-input-number
-                  v-model="simulatedRecognizedAmount"
-                  :min="0"
-                  :precision="2"
-                  :disabled="paymentRecognitionComplete"
-                />
-                <small>本地 OCR 模拟值；生产环境由实际识别结果自动回填</small>
-              </div>
               <el-upload
                 ref="paymentUploadRef"
                 drag
@@ -2323,11 +2350,6 @@ onMounted(loadData)
                 <el-icon class="upload-icon"><Upload /></el-icon>
                 <div>{{ paymentRecognitionComplete ? '累计识别金额已达到认购金额' : '拖拽截图到此处，或点击选择本地转账截图' }}</div>
               </el-upload>
-              <div class="ocr-actions">
-                <el-button @click="runOcr('ok')">模拟识别通过</el-button>
-                <el-button @click="runOcr('mismatch')">模拟金额不匹配</el-button>
-                <el-button @click="runOcr('fail')">模拟识别失败</el-button>
-              </div>
               <div v-if="activePaymentImages.length" class="payment-image-list">
                 <div v-for="(image, index) in activePaymentImages" :key="image.id" class="payment-preview">
                   <div class="payment-preview__image payment-preview__image--actual">
@@ -2340,10 +2362,18 @@ onMounted(loadData)
                       fit="contain"
                     />
                   </div>
-                  <div>
+                  <div class="payment-preview__content">
                     <strong>支付截图 {{ index + 1 }}</strong>
                     <p>{{ image.paymentImageName }} · {{ image.uploadedAt }}</p>
                     <p>识别金额 {{ formatMoney(image.recognizedAmount) }} · {{ image.status }}</p>
+                    <el-button
+                      v-if="image.status === '识别失败'"
+                      class="payment-preview__delete"
+                      type="danger"
+                      plain
+                      size="small"
+                      @click="deleteFailedPaymentImage(image)"
+                    >删除</el-button>
                   </div>
                 </div>
               </div>
@@ -2363,9 +2393,9 @@ onMounted(loadData)
               </div>
               <el-skeleton v-if="ocrState === 'loading'" :rows="3" animated />
               <el-result v-if="ocrState === 'none'" icon="info" title="等待上传" sub-title="上传截图后自动进行 OCR 识别与金额匹配" />
-              <el-result v-if="ocrState === 'ok'" icon="success" title="累计金额匹配" :sub-title="`已识别 ${formatMoney(activePaymentRecognizedAmount)}，共 ${activePaymentImages.length} 张截图，状态已更新为已缴款`" />
+              <el-result v-if="ocrState === 'ok'" icon="success" title="累计金额匹配" :sub-title="`已识别 ${formatMoney(activePaymentRecognizedAmount)}，共 ${activePaymentImages.length} 张截图，状态已更新为已缴款待审核`" />
               <el-result v-if="ocrState === 'mismatch'" icon="warning" title="继续上传支付截图" :sub-title="`已识别 ${formatMoney(activePaymentRecognizedAmount)}，剩余 ${formatMoney(activePaymentRemainingAmount)}`" />
-              <el-result v-if="ocrState === 'fail'" icon="error" title="识别失败" sub-title="图片模糊或不含支付信息，请重新上传" />
+              <el-result v-if="ocrState === 'fail'" icon="warning" title="待财务复核" sub-title="未识别到有效交易金额，截图已保存；你可以继续上传其他支付截图" />
             </section>
           </div>
         </template>
@@ -2744,7 +2774,7 @@ onMounted(loadData)
           <div class="page-head">
             <div>
               <h1>支付复核</h1>
-              <p>目标项目：{{ paymentReviewTargetLabel }} · 缴款记录 {{ paymentReviewSubscriptions.length }} 笔，其中待复核 {{ pendingPaymentReviewCount }} 笔</p>
+              <p>目标项目：{{ paymentReviewTargetLabel }} · 缴款记录 {{ paymentReviewSubscriptions.length }} 笔，其中待审核 {{ pendingPaymentReviewCount }} 笔</p>
             </div>
             <div class="page-head-actions">
               <el-button @click="backToAdminProjects">返回项目管理</el-button>
@@ -2763,7 +2793,7 @@ onMounted(loadData)
                 <strong>{{ reviewPaymentId(item) }}</strong>
                 <span>{{ employeeNameMap[item.userId ?? 'employee01'] ?? '员工' }} · {{ formatMoney(item.amount) }}</span>
                 <small>上传时间：{{ formatDateTime(item.paymentUploadedAt) }}</small>
-                <el-tag :type="subscriptionPayTagType(item)" size="small">{{ subscriptionDisplayPay(item) }}</el-tag>
+                <el-tag :type="subscriptionPayTagType(item)" size="small">{{ subscriptionPayLabel(item) }}</el-tag>
               </div>
               <el-empty v-if="!paymentReviewSubscriptions.length" :description="`${selectedProject?.title ?? '当前项目'}暂无缴款记录`" />
             </section>

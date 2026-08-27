@@ -990,7 +990,6 @@ h2 {
   color: var(--primary);
 }
 
-.ocr-actions,
 .actions-row {
   display: flex;
   flex-wrap: wrap;
@@ -1019,21 +1018,16 @@ h2 {
   margin-bottom: 14px;
 }
 
-.payment-ocr-simulator {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 12px;
-  color: var(--muted);
-}
-
-.payment-ocr-simulator small {
-  flex-basis: 100%;
-}
-
 .payment-preview p {
   margin-top: 4px;
+}
+
+.payment-preview__content {
+  min-width: 0;
+}
+
+.payment-preview__delete {
+  margin-top: 12px;
 }
 
 .review-payment-preview {

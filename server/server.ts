@@ -606,8 +606,11 @@ function normalizeSubscription(subscription: Omit<Subscription, 'createdAt' | 'p
   const paymentDeadlineAt = subscription.paymentDeadlineAt && subscription.paymentDeadlineAt !== 'Invalid Date'
     ? formatDateTime(parseDateTime(subscription.paymentDeadlineAt))
     : addHours(createdAt, 12)
-  const action = subscription.pay === '未缴款' ? '去支付' : subscription.action
-  const rejectReason = subscription.pay === '复核驳回'
+  const pay = subscription.projectId === 'PRJ-FSY-OFFLINE-368' && subscription.pay === '已缴款' && !subscription.reviewedAt
+    ? '待复核'
+    : subscription.pay
+  const action = pay === '未缴款' ? '去支付' : subscription.action
+  const rejectReason = pay === '复核驳回'
     ? subscription.rejectReason || '支付截图信息不完整，请重新上传包含金额、收款方与交易流水的支付成功截图。'
     : undefined
   const legacyRecognizedAmount = subscription.pay === '已缴款' || subscription.pay === '已收款'
@@ -630,6 +633,7 @@ function normalizeSubscription(subscription: Omit<Subscription, 'createdAt' | 'p
     .reduce((sum, image) => sum + Number(image.recognizedAmount || 0), 0).toFixed(2))
   return {
     ...subscription,
+    pay,
     action,
     rejectReason,
     createdAt,
@@ -715,7 +719,8 @@ const state = loadState()
 const { projects, subscriptions, auditLogs, riskEvents, rules, receivingCodes } = state
 
 const maxImageDataUrlLength = Math.ceil(5 * 1024 * 1024 * 4 / 3) + 128
-const supportedImageDataUrl = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/
+const supportedImageDataUrl = /^data:image\/(?:png|jpeg|bmp|webp);base64,[A-Za-z0-9+/]+={0,2}$/
+const supportedPaymentImageDataUrl = /^data:image\/(?:png|jpeg|bmp);base64,[A-Za-z0-9+/]+={0,2}$/
 
 function validateImagePayload(body: Record<string, unknown>, res: ServerResponse, errorPrefix: string) {
   const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : ''
@@ -1124,7 +1129,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       result: '成功'
     })
     saveState()
-    const message = result === 'pass' ? '复核通过，状态已更新为已缴款' : result === 'reject' ? '复核驳回，已记录复核人员与操作时间' : '已标记部分缴款，并记录复核人员与操作时间'
+    const message = result === 'pass' ? '复核通过，员工缴款状态已更新为缴款成功' : result === 'reject' ? '复核驳回，员工缴款状态已更新为缴款被驳回' : '已标记部分缴款，并记录复核人员与操作时间'
     return send(res, 200, { data: subscription, message })
   }
 
@@ -1369,79 +1374,142 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     return send(res, 200, { data: project, message: project.refundNotice })
   }
 
+  if (pathname === '/api/payments/images/delete') {
+    const subscription = subscriptions.find(item => item.id === body.subscriptionId)
+    if (!subscription) {
+      return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    }
+    const imageId = typeof body.imageId === 'string' ? body.imageId.trim() : ''
+    const imageIndex = subscription.paymentImages?.findIndex(item => item.id === imageId) ?? -1
+    if (imageIndex < 0) {
+      return send(res, 404, { error: 'PAYMENT_IMAGE_NOT_FOUND', message: '支付截图不存在' })
+    }
+    const image = subscription.paymentImages![imageIndex]
+    if (image.status !== '识别失败') {
+      return send(res, 409, { error: 'PAYMENT_IMAGE_DELETE_FORBIDDEN', message: '仅识别失败的支付截图支持删除' })
+    }
+
+    const before = { ...image }
+    subscription.paymentImages!.splice(imageIndex, 1)
+    const remainingImages = subscription.paymentImages!
+    const latestImage = remainingImages.at(-1)
+    const recognizedTotal = Number(remainingImages
+      .filter(item => item.status === '已识别')
+      .reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
+    const hasFailedImage = remainingImages.some(item => item.status === '识别失败')
+    subscription.paymentImageUrl = latestImage?.paymentImageUrl
+    subscription.paymentImageName = latestImage?.paymentImageName
+    subscription.paymentUploadedAt = latestImage?.uploadedAt
+    subscription.paymentSuccessAt = [...remainingImages].reverse().find(item => item.status === '已识别')?.uploadedAt
+    subscription.recognizedPaidAmount = recognizedTotal
+    subscription.pay = hasFailedImage
+      ? '待复核'
+      : recognizedTotal === 0
+        ? '未缴款'
+        : recognizedTotal === subscription.amount
+          ? '待复核'
+          : recognizedTotal < subscription.amount
+            ? '部分缴款'
+            : '待复核'
+    subscription.action = subscription.pay === '未缴款'
+      ? '去支付'
+      : recognizedTotal === subscription.amount && !hasFailedImage
+        ? '查看支付'
+        : '重新上传截图'
+    pushAudit({
+      actor: body.operator ?? 'employee01 · 员工',
+      role: 'employee',
+      action: '删除识别失败支付截图',
+      target: image.id,
+      before,
+      after: null
+    })
+    saveState()
+    return send(res, 200, {
+      data: {
+        status: subscription.pay,
+        recognized_total: recognizedTotal,
+        remaining_amount: Math.max(0, Number((subscription.amount - recognizedTotal).toFixed(2))),
+        image_count: remainingImages.length
+      },
+      message: '识别失败的支付截图已删除'
+    })
+  }
+
   if (pathname === '/api/payments/ocr') {
-    const state = body.state as 'ok' | 'mismatch' | 'fail'
     const subscription = subscriptions.find(item => item.id === body.subscriptionId)
     const paymentImageUrl = typeof body.paymentImageUrl === 'string' ? body.paymentImageUrl.trim() : undefined
     const paymentImageName = typeof body.paymentImageName === 'string' ? body.paymentImageName.trim() : undefined
-    if (paymentImageUrl && (!supportedImageDataUrl.test(paymentImageUrl) || paymentImageUrl.length > maxImageDataUrlLength)) {
-      return send(res, 400, { error: 'PAYMENT_IMAGE_INVALID', message: '支付截图仅支持 PNG、JPG 或 WebP 格式，且大小不能超过 5MB' })
+    if (!subscription) {
+      return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
-    if (paymentImageUrl && (!paymentImageName || paymentImageName.length > 255)) {
+    if (!paymentImageUrl || !supportedPaymentImageDataUrl.test(paymentImageUrl) || paymentImageUrl.length > maxImageDataUrlLength) {
+      return send(res, 400, { error: 'PAYMENT_IMAGE_INVALID', message: '支付截图仅支持 PNG、JPG 或 BMP 格式，且大小不能超过 5MB' })
+    }
+    if (!paymentImageName || paymentImageName.length > 255) {
       return send(res, 400, { error: 'PAYMENT_IMAGE_NAME_INVALID', message: '支付截图文件名无效' })
     }
-    const expectedAmount = Number(body.expectedAmount ?? subscription?.amount ?? 12000)
-    const currentRecognizedAmount = Number(subscription?.recognizedPaidAmount ?? 0)
-    const defaultRecognizedAmount = state === 'fail'
-      ? 0
-      : state === 'mismatch'
-        ? Math.max(100, Math.round(expectedAmount * 0.1))
-        : Math.max(0, expectedAmount - currentRecognizedAmount)
-    const recognizedAmount = Number(body.recognizedAmount ?? defaultRecognizedAmount)
-    if (!Number.isFinite(recognizedAmount) || recognizedAmount < 0 || recognizedAmount > 1_000_000_000) {
-      return send(res, 400, { error: 'OCR_AMOUNT_INVALID', message: 'OCR 识别金额必须是有效的非负金额' })
-    }
-    const uploadedAt = now()
-    const paymentSuccessAt = typeof body.paymentSuccessAt === 'string' && body.paymentSuccessAt.trim()
-      ? body.paymentSuccessAt
-      : uploadedAt
-    let recognizedTotal = currentRecognizedAmount
-    let paymentImageCount = subscription?.paymentImages?.length ?? 0
-    if (subscription) {
-      subscription.paymentUploadedAt = uploadedAt
-      if (paymentImageUrl && paymentImageName) {
-        const image: PaymentImage = {
-          id: `PAYIMG-${Date.now()}-${paymentImageCount + 1}`,
-          paymentImageUrl,
-          paymentImageName,
-          recognizedAmount: Number(recognizedAmount.toFixed(2)),
-          uploadedAt,
-          status: state === 'fail' ? '识别失败' : '已识别'
-        }
-        subscription.paymentImages ??= []
-        subscription.paymentImages.push(image)
-        subscription.paymentImageUrl = paymentImageUrl
-        subscription.paymentImageName = paymentImageName
-        recognizedTotal = Number(subscription.paymentImages
-          .filter(item => item.status === '已识别')
-          .reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
-        subscription.recognizedPaidAmount = recognizedTotal
-        paymentImageCount = subscription.paymentImages.length
+    const expectedAmount = Number(subscription.amount)
+    let recognizedAmount = 0
+    let recognitionFailure = ''
+    try {
+      const recognition = await recognizeFinanceBill({
+        imageDataUrl: paymentImageUrl,
+        appCode: process.env.INVOICE_OCR_APPCODE ?? '',
+        endpoint: process.env.INVOICE_OCR_API_URL,
+      })
+      if (recognition.amount !== undefined && Number.isFinite(recognition.amount) && recognition.amount > 0 && recognition.amount <= 1_000_000_000) {
+        recognizedAmount = recognition.amount
+      } else {
+        recognitionFailure = '未识别到有效交易金额'
       }
-      if (state !== 'fail') subscription.paymentSuccessAt = paymentSuccessAt
-      subscription.pay = state === 'fail'
-        ? '复核驳回'
-        : recognizedTotal === expectedAmount
-          ? '已缴款'
-          : recognizedTotal < expectedAmount
-            ? '部分缴款'
-            : '待复核'
-      subscription.action = state === 'fail' || recognizedTotal < expectedAmount ? '重新上传截图' : '查看支付'
-      saveState()
+    } catch (error) {
+      recognitionFailure = error instanceof Error ? error.message : '支付截图识别失败'
     }
+    const recognized = !recognitionFailure
+    const uploadedAt = now()
+    subscription.paymentUploadedAt = uploadedAt
+    subscription.paymentImages ??= []
+    subscription.paymentImages.push({
+      id: `PAYIMG-${Date.now()}-${subscription.paymentImages.length + 1}`,
+      paymentImageUrl,
+      paymentImageName,
+      recognizedAmount: Number(recognizedAmount.toFixed(2)),
+      uploadedAt,
+      status: recognized ? '已识别' : '识别失败'
+    })
+    subscription.paymentImageUrl = paymentImageUrl
+    subscription.paymentImageName = paymentImageName
+    const recognizedTotal = Number(subscription.paymentImages
+      .filter(item => item.status === '已识别')
+      .reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
+    subscription.recognizedPaidAmount = recognizedTotal
+    if (recognized) subscription.paymentSuccessAt = uploadedAt
+    subscription.pay = !recognized
+      ? '待复核'
+      : recognizedTotal === expectedAmount
+        ? '待复核'
+        : recognizedTotal < expectedAmount
+          ? '部分缴款'
+          : '待复核'
+    subscription.action = !recognized || recognizedTotal < expectedAmount ? '重新上传截图' : '查看支付'
+    saveState()
+    const paymentImageCount = subscription.paymentImages.length
+    const remainingAmount = Math.max(0, Number((expectedAmount - recognizedTotal).toFixed(2)))
     const after = {
-      status: subscription?.pay ?? (state === 'fail' ? '复核驳回' : '待复核'),
+      status: subscription.pay,
+      ocr_status: recognized ? '已识别' : '待财务复核',
       ocr_amount: Number(recognizedAmount.toFixed(2)),
       recognized_total: recognizedTotal,
       expected_amount: expectedAmount,
-      remaining_amount: Math.max(0, Number((expectedAmount - recognizedTotal).toFixed(2))),
+      remaining_amount: remainingAmount,
       image_count: paymentImageCount,
-      confidence: state === 'fail' ? 0 : state === 'mismatch' ? 0.91 : 0.98,
-      payment_success_at: state === 'fail' ? undefined : paymentSuccessAt,
-      reason: state === 'fail' ? '图片模糊或不含支付信息' : undefined
+      confidence: recognized ? 0.98 : 0,
+      payment_success_at: recognized ? uploadedAt : undefined,
+      reason: recognitionFailure || undefined
     }
     pushAudit({ actor: 'OCR 适配层', role: 'system', action: 'OCR 支付校验', target: body.paymentId ?? 'PAY-20260705-0092', before: { status: '待识别' }, after })
-    return send(res, 200, { data: after })
+    return send(res, 200, { data: after, message: recognized ? '支付截图 OCR 识别完成，等待财务审核' : '支付截图已保存，等待财务审核' })
   }
 
   if (pathname === '/api/settlements/calc') {

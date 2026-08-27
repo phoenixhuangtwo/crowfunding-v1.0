@@ -67,16 +67,19 @@ function startInvoiceOcrServer(requests) {
       for await (const chunk of req) chunks.push(Buffer.from(chunk))
       const body = Buffer.concat(chunks).toString('utf8')
       requests.push({ authorization: req.headers.authorization, contentType: req.headers['content-type'], body })
+      const requestNumber = requests.length
+      const amount = requestNumber === 1 ? 24530.18 : requestNumber === 2 ? 40 : requestNumber === 3 ? 60 : undefined
+      const amountText = amount === undefined ? '' : `\n金额（小写）：CNY${amount.toFixed(2)}`
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
       res.end(JSON.stringify({
-        content: '交易日期：2026年08月21日\n付款人：冒烟付款公司 付款开户行：测试银行\n收款人：冒烟收款公司 收款方开户行：测试银行\n金额（小写）：CNY24,530.18',
+        content: `交易日期：2026年08月21日\n付款人：冒烟付款公司 付款开户行：测试银行\n收款人：冒烟收款公司 收款方开户行：测试银行${amountText}`,
         prism_version: '1.0.9',
         prism_wnum: 4,
         prism_wordsInfo: [
           { word: '交易日期：2026年08月21日', prob: 99 },
           { word: '付款人：冒烟付款公司 付款开户行：测试银行', prob: 98 },
           { word: '收款人：冒烟收款公司 收款方开户行：测试银行', prob: 99 },
-          { word: '金额（小写）：CNY24,530.18', prob: 97 }
+          ...(amount === undefined ? [] : [{ word: `金额（小写）：CNY${amount.toFixed(2)}`, prob: 97 }])
         ]
       }))
     })
@@ -183,6 +186,9 @@ try {
   assert(Array.isArray(state.projects) && state.projects.length > 0, 'state should include projects')
   assert(Array.isArray(state.subscriptions), 'state should include subscriptions')
   assert(Array.isArray(state.auditLogs), 'state should include audit logs')
+  const migratedTargetPayments = state.subscriptions.filter(item => item.projectId === 'PRJ-FSY-OFFLINE-368' && item.paymentImages?.length)
+  assert(migratedTargetPayments.length === 3, 'target project should keep its three historical payment records')
+  assert(migratedTargetPayments.every(item => item.pay === '待复核'), 'historical unreviewed target payments should migrate to pending review')
 
   const settlementProject = state.projects.find(project => project.status === '已满额' && project.salesAmount > 0 && !project.settledAmount)
   assert(settlementProject, 'state should include an unsettled full project for settlement confirmation')
@@ -376,18 +382,17 @@ try {
   assert(secondCreate.data?.id === firstCreate.data.id, 'same idempotency key should return the same subscription')
 
   const paymentImageUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
-  await requestJson(baseUrl, '/api/payments/ocr', {
+  const firstPaymentOcr = await requestJson(baseUrl, '/api/payments/ocr', {
     method: 'POST',
     body: JSON.stringify({
-      state: 'ok',
       paymentId: 'PAY-SMOKE-IMAGE-1',
       subscriptionId: firstCreate.data.id,
       expectedAmount: 100,
-      recognizedAmount: 40,
       paymentImageUrl,
       paymentImageName: 'smoke-payment-1.png'
     })
   })
+  assert(firstPaymentOcr.data?.ocr_amount === 40, 'payment OCR route should use the supplier-recognized amount')
 
   const subscriptionsAfterFirstPayment = await requestJson(baseUrl, '/api/subscriptions')
   const firstPartialPayment = subscriptionsAfterFirstPayment.data.find(item => item.id === firstCreate.data.id)
@@ -398,11 +403,9 @@ try {
   await requestJson(baseUrl, '/api/payments/ocr', {
     method: 'POST',
     body: JSON.stringify({
-      state: 'ok',
       paymentId: 'PAY-SMOKE-IMAGE-2',
       subscriptionId: firstCreate.data.id,
       expectedAmount: 100,
-      recognizedAmount: 60,
       paymentImageUrl,
       paymentImageName: 'smoke-payment-2.png'
     })
@@ -413,7 +416,90 @@ try {
   assert(paymentSubscription?.paymentImages?.length === 2, 'second OCR upload should append instead of overwriting the first screenshot')
   assert(paymentSubscription?.paymentImages?.map(item => item.paymentImageName).join(',') === 'smoke-payment-1.png,smoke-payment-2.png', 'payment screenshot order and names should persist')
   assert(paymentSubscription?.recognizedPaidAmount === 100, 'recognized amounts from multiple screenshots should accumulate')
-  assert(paymentSubscription?.pay === '已缴款', 'matching the subscription amount should mark the payment complete')
+  assert(paymentSubscription?.pay === '待复核', 'matching the subscription amount should wait for finance review')
+  assert(invoiceOcrRequests.length === 3, 'each payment upload should call the configured OCR supplier once')
+  assert(invoiceOcrRequests.slice(1).every(item => item.authorization === 'APPCODE smoke-invoice-code'), 'payment OCR should keep AppCode authentication on the server')
+
+  const passedPaymentReview = await requestJson(baseUrl, `/api/subscriptions/${firstCreate.data.id}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ result: 'pass', operator: 'smoke-finance · 财务' })
+  })
+  assert(passedPaymentReview.data?.pay === '已缴款', 'passing finance review should finalize the payment')
+  assert(passedPaymentReview.data?.reviewedBy === 'smoke-finance · 财务', 'passing finance review should persist the reviewer')
+  const repeatedPassedReview = await fetch(`${baseUrl}/api/subscriptions/${firstCreate.data.id}/review`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ result: 'pass', operator: 'smoke-finance · 财务' })
+  })
+  assert(repeatedPassedReview.status === 409, 'a completed payment review should not be processed twice')
+
+  const reviewCreate = await requestJson(baseUrl, '/api/subscriptions', {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId: project.id,
+      userId: 'smoke-review-user',
+      amount: 100,
+      agreementsConfirmed: true,
+      idempotencyKey: `smoke-review-${Date.now()}`
+    })
+  })
+  const reviewPaymentOcr = await requestJson(baseUrl, '/api/payments/ocr', {
+    method: 'POST',
+    body: JSON.stringify({
+      paymentId: 'PAY-SMOKE-REVIEW',
+      subscriptionId: reviewCreate.data.id,
+      expectedAmount: 100,
+      paymentImageUrl,
+      paymentImageName: 'smoke-payment-review.png'
+    })
+  })
+  assert(reviewPaymentOcr.data?.ocr_status === '待财务复核', 'missing OCR amount should route the screenshot to finance review')
+  const subscriptionsAfterReviewUpload = await requestJson(baseUrl, '/api/subscriptions')
+  const reviewSubscription = subscriptionsAfterReviewUpload.data.find(item => item.id === reviewCreate.data.id)
+  assert(reviewSubscription?.paymentImages?.length === 1, 'unrecognized payment screenshot should still be persisted')
+  assert(reviewSubscription?.paymentImages?.[0]?.status === '识别失败', 'unrecognized payment screenshot should be marked as failed')
+  assert(reviewSubscription?.recognizedPaidAmount === 0, 'unrecognized payment screenshot should not increase the cumulative amount')
+  assert(reviewSubscription?.pay === '待复核', 'unrecognized payment screenshot should leave the subscription pending finance review')
+
+  const rejectedPaymentReview = await requestJson(baseUrl, `/api/subscriptions/${reviewCreate.data.id}/review`, {
+    method: 'POST',
+    body: JSON.stringify({
+      result: 'reject',
+      rejectReason: '支付凭证无法识别，请重新上传',
+      operator: 'smoke-finance · 财务'
+    })
+  })
+  assert(rejectedPaymentReview.data?.pay === '复核驳回', 'rejecting finance review should persist the rejected payment state')
+  assert(rejectedPaymentReview.data?.rejectReason === '支付凭证无法识别，请重新上传', 'rejecting finance review should persist the rejection reason')
+
+  const failedPaymentImageId = reviewSubscription?.paymentImages?.[0]?.id
+  assert(failedPaymentImageId, 'failed payment screenshot should expose a persisted image id for deletion')
+  await requestJson(baseUrl, '/api/payments/images/delete', {
+    method: 'POST',
+    body: JSON.stringify({
+      subscriptionId: reviewCreate.data.id,
+      imageId: failedPaymentImageId
+    })
+  })
+  const subscriptionsAfterFailedImageDeletion = await requestJson(baseUrl, '/api/subscriptions')
+  const reviewSubscriptionAfterDeletion = subscriptionsAfterFailedImageDeletion.data.find(item => item.id === reviewCreate.data.id)
+  assert(reviewSubscriptionAfterDeletion?.paymentImages?.length === 0, 'deleting a failed screenshot should remove it from persisted payment images')
+  assert(reviewSubscriptionAfterDeletion?.recognizedPaidAmount === 0, 'deleting a failed screenshot should keep the cumulative recognized amount unchanged')
+  assert(reviewSubscriptionAfterDeletion?.pay === '未缴款', 'deleting the only failed screenshot should restore the unpaid state')
+
+  const recognizedPaymentImageId = paymentSubscription?.paymentImages?.[0]?.id
+  const recognizedImageDeleteResponse = await fetch(`${baseUrl}/api/payments/images/delete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      subscriptionId: firstCreate.data.id,
+      imageId: recognizedPaymentImageId
+    })
+  })
+  assert(recognizedImageDeleteResponse.status === 409, 'deleting a recognized payment screenshot should be rejected')
+  const subscriptionsAfterRejectedDeletion = await requestJson(baseUrl, '/api/subscriptions')
+  const paymentAfterRejectedDeletion = subscriptionsAfterRejectedDeletion.data.find(item => item.id === firstCreate.data.id)
+  assert(paymentAfterRejectedDeletion?.paymentImages?.length === 2, 'rejected deletion should preserve recognized payment screenshots')
 
   const invalidPaymentImageResponse = await fetch(`${baseUrl}/api/payments/ocr`, {
     method: 'POST',
