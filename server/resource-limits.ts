@@ -33,3 +33,7 @@ export class SlidingWindowQuota {
 export function hasImageStorageCapacity(currentChars: number, replacedChars: number, incomingChars: number, maxChars: number) {
   return currentChars - replacedChars + incomingChars <= maxChars
 }
+
+export function hasImageByteCapacity(currentBytes: number, replacedBytes: number, incomingBytes: number, maxBytes: number) {
+  return currentBytes - replacedBytes + incomingBytes <= maxBytes
+}
