@@ -54,6 +54,12 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
   ],
   receiving_codes: [
     { name: 'uniq_receiving_codes_id', key: { id: 1 }, unique: true },
+    {
+      name: 'uniq_receiving_codes_create_request_id',
+      key: { createRequestId: 1 },
+      unique: true,
+      partialFilterExpression: { createRequestId: { $gt: '' } }
+    },
     { name: 'idx_receiving_codes_status', key: { status: 1 } }
   ],
   audit_logs: [
@@ -155,8 +161,10 @@ export async function ensureSchema(db: Db, prefix = '') {
     for (const definition of indexDefinitions[base]) {
       await db.collection(name).createIndex(definition.key, {
         name: definition.name,
-        unique: definition.unique,
-        partialFilterExpression: definition.partialFilterExpression
+        ...(definition.unique === undefined ? {} : { unique: definition.unique }),
+        ...(definition.partialFilterExpression
+          ? { partialFilterExpression: definition.partialFilterExpression }
+          : {})
       })
     }
   }

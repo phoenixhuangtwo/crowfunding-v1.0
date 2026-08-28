@@ -21,6 +21,7 @@ import { getAdminProjectActionLayout } from './admin-project-actions'
 import { validateInvoiceImage } from './invoice-image'
 import { filterTargetProjectPaymentReviews } from './payment-review'
 import { projectSettlementStatus } from './project-settlement-status'
+import { sortProjectsByCreatedAtDesc } from './project-sort'
 import { filterSubscriptionRules } from './subscription-rule-filter'
 import { settlementPaymentTime, settlementSubscriberLabel } from './settlement-detail'
 import { beginSettlement } from './settlement-flow'
@@ -44,6 +45,8 @@ type Project = {
   id: string
   title: string
   source: string
+  offlineSalesOrder?: string
+  createdAt?: string
   projectOwner?: string
   status: '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
@@ -302,6 +305,8 @@ const receivingCodeForm = reactive({
 const receivingCodeImageUrl = ref('')
 const receivingCodeImageName = ref('')
 const receivingCodeImageFile = ref<File>()
+const receivingCodeCreateRequestId = ref('')
+const receivingCodeSubmitting = ref(false)
 const receivingCodeUploadRef = ref<UploadInstance>()
 const receivingCodeImageUploadRef = ref<UploadInstance>()
 const editingReceivingCodeId = ref('')
@@ -781,6 +786,8 @@ const filteredAdminProjects = computed(() => {
       '截止认购时间',
       project.title,
       project.id,
+      project.offlineSalesOrder ?? '',
+      project.createdAt ?? '',
       project.status,
       projectSettlementStatus(project.status),
       getProjectSubscriptionStatus(project.id),
@@ -812,7 +819,7 @@ const filteredAdminProjects = computed(() => {
     const direction = projectSort.order === 'ascending' ? 1 : -1
     return [...matchedProjects].sort((left, right) => (projectRemainAmount(left) - projectRemainAmount(right)) * direction)
   }
-  return matchedProjects
+  return sortProjectsByCreatedAtDesc(matchedProjects)
 })
 const pagedAdminProjects = computed(() => {
   const start = (adminProjectPage.value - 1) * adminProjectPageSize
@@ -1521,6 +1528,8 @@ function openReceivingCodeCreate() {
   receivingCodeImageUrl.value = ''
   receivingCodeImageName.value = ''
   receivingCodeImageFile.value = undefined
+  receivingCodeCreateRequestId.value = crypto.randomUUID()
+  receivingCodeSubmitting.value = false
   receivingCodeUploadRef.value?.clearFiles()
   receivingCodeCreateVisible.value = true
 }
@@ -1553,31 +1562,40 @@ function currentDateTimeText() {
 }
 
 async function createReceivingCode() {
+  if (receivingCodeSubmitting.value) return
   if (!receivingCodeForm.subject.trim() || !receivingCodeForm.accountNote.trim() || !receivingCodeForm.codeName.trim()) {
     ElMessage.error('请完整填写收款主体、账户说明和收款码名称')
     return
   }
+  receivingCodeSubmitting.value = true
   try {
-    const payload = await api<{ data: ReceivingCode; message: string }>('/api/receiving-codes', {
-      method: 'POST',
-      body: JSON.stringify({
+    let body: FormData | string
+    if (receivingCodeImageFile.value) {
+      const form = new FormData()
+      form.set('subject', receivingCodeForm.subject.trim())
+      form.set('accountNote', receivingCodeForm.accountNote.trim())
+      form.set('codeName', receivingCodeForm.codeName.trim())
+      form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
+      form.set('createRequestId', receivingCodeCreateRequestId.value)
+      form.set('image', receivingCodeImageFile.value, receivingCodeImageFile.value.name)
+      body = form
+    } else {
+      body = JSON.stringify({
         subject: receivingCodeForm.subject.trim(),
         accountNote: receivingCodeForm.accountNote.trim(),
         codeName: receivingCodeForm.codeName.trim(),
-        operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
+        operator: `${roleMeta.value.account} · ${roleMeta.value.label}`,
+        createRequestId: receivingCodeCreateRequestId.value
       })
-    })
-    if (receivingCodeImageFile.value) {
-      const form = new FormData()
-      form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
-      form.set('image', receivingCodeImageFile.value, receivingCodeImageFile.value.name)
-      await api(`/api/receiving-codes/${encodeURIComponent(payload.data.id)}/image`, { method: 'POST', body: form })
     }
+    const payload = await api<{ data: ReceivingCode; message: string }>('/api/receiving-codes', { method: 'POST', body })
     await loadData()
     receivingCodeCreateVisible.value = false
     ElMessage.success(payload.message)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '收款码创建失败')
+  } finally {
+    receivingCodeSubmitting.value = false
   }
 }
 
@@ -2083,7 +2101,6 @@ onMounted(loadData)
               <el-table-column label="项目名称" min-width="260">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="goProjectDetail(row.id)">{{ row.title }}</el-button>
-                  <div class="muted">{{ row.id }}</div>
                 </template>
               </el-table-column>
               <el-table-column label="项目状态" align="center" header-align="center" min-width="220">
@@ -2422,7 +2439,7 @@ onMounted(loadData)
         <template v-if="currentPage === 'adminProjects'">
           <div class="page-head"><div><h1>项目管理</h1><p>MCP 同步、发布与规则配置入口</p></div><el-button type="primary" @click="syncMcp">同步采购系统（MCP）</el-button></div>
           <section class="panel filter-panel">
-            <el-input v-model="adminProjectKeyword" clearable placeholder="搜索项目、项目状态、金额" />
+            <el-input v-model="adminProjectKeyword" clearable placeholder="搜索项目、线下销售单号、创建时间、状态、金额" />
             <el-select v-model="adminProjectStatus" placeholder="项目状态" style="width: 150px">
               <el-option label="项目状态：全部" value="全部" />
               <el-option label="未开放" value="未开放" />
@@ -2450,18 +2467,23 @@ onMounted(loadData)
                 <el-table-column label="序号" width="80">
                   <template #default="{ $index }">{{ (adminProjectPage - 1) * adminProjectPageSize + $index + 1 }}</template>
                 </el-table-column>
+                <el-table-column label="线下销售单号" width="180">
+                  <template #default="{ row }">{{ row.offlineSalesOrder || '-' }}</template>
+                </el-table-column>
                 <el-table-column label="项目" min-width="260">
                   <template #default="{ row }">
                     <div>{{ row.title }}</div>
-                    <div class="muted">{{ row.id }}</div>
                   </template>
                 </el-table-column>
                 <el-table-column label="项目负责人" prop="projectOwner" width="130">
                   <template #default="{ row }">{{ row.projectOwner || '-' }}</template>
                 </el-table-column>
-              <el-table-column label="项目状态" min-width="220">
-                <template #default="{ row }">
-                  <el-tag :type="row.statusType">{{ row.status }}</el-tag>
+                <el-table-column label="创建时间" width="170">
+                  <template #default="{ row }">{{ row.createdAt || '-' }}</template>
+                </el-table-column>
+                <el-table-column label="项目状态" min-width="220">
+                  <template #default="{ row }">
+                    <el-tag :type="row.statusType">{{ row.status }}</el-tag>
                   <el-tooltip
                     v-if="row.status === '已中断'"
                     placement="top-start"
@@ -3278,8 +3300,10 @@ onMounted(loadData)
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="receivingCodeCreateVisible = false">取消</el-button>
-        <el-button type="primary" @click="createReceivingCode">创建</el-button>
+        <el-button :disabled="receivingCodeSubmitting" @click="receivingCodeCreateVisible = false">取消</el-button>
+        <el-button type="primary" :loading="receivingCodeSubmitting" @click="createReceivingCode">
+          {{ receivingCodeSubmitting ? '创建中…' : '创建' }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -3329,7 +3353,7 @@ onMounted(loadData)
     <el-dialog v-model="ruleCreateVisible" :title="ruleDialogTitle" width="720px">
       <el-form label-width="150px" :disabled="ruleReadonly">
         <el-form-item label="所属项目" required>
-          <el-select v-model="ruleForm.projectId" placeholder="请选择尚未配置认购规则的项目" style="width: 100%">
+          <el-select v-model="ruleForm.projectId" filterable placeholder="请选择尚未配置认购规则的项目" style="width: 100%">
             <el-option
               v-for="project in projects"
               :key="project.id"

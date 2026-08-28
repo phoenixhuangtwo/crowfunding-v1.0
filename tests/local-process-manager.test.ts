@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -40,6 +40,35 @@ test('local process manager exposes start, restart, stop, and status commands', 
   assert.match(result.stdout, /status/)
 })
 
+test('local process manager waits for remote-backed API initialization beyond six seconds', async () => {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'crowdfunding-slow-start-test-'))
+  const apiPort = await freePort()
+  const webPort = await freePort()
+  const delayedApi = join(runtimeDir, 'delayed-api.mjs')
+  writeFileSync(delayedApi, `
+    import { createServer } from 'node:http'
+    setTimeout(() => createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"ok":true}')
+    }).listen(Number(process.env.API_PORT), '127.0.0.1'), 12000)
+  `)
+  const env = {
+    ...process.env,
+    API_PORT: String(apiPort),
+    WEB_PORT: String(webPort),
+    LOCAL_RUNTIME_DIR: runtimeDir,
+    LOCAL_API_ENTRY: delayedApi
+  }
+
+  try {
+    const started = run('start', env)
+    assert.equal(started.status, 0, started.stderr || started.stdout)
+  } finally {
+    run('stop', env)
+    rmSync(runtimeDir, { recursive: true, force: true })
+  }
+})
+
 test('local process manager completes an isolated start, restart, status, and stop lifecycle', async () => {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'crowdfunding-process-test-'))
   const apiPort = await freePort()
@@ -57,6 +86,11 @@ test('local process manager completes an isolated start, restart, status, and st
     assert.equal(started.status, 0, started.stderr || started.stdout)
     assert.match(started.stdout, /前端.*运行中/)
     assert.match(started.stdout, /API.*运行中/)
+
+    const startedAgain = run('start', env)
+    assert.equal(startedAgain.status, 0, startedAgain.stderr || startedAgain.stdout)
+    assert.match(startedAgain.stdout, /前端.*已在运行/)
+    assert.match(startedAgain.stdout, /API.*已在运行/)
 
     const firstStatus = run('status', env)
     assert.equal(firstStatus.status, 0, firstStatus.stderr || firstStatus.stdout)

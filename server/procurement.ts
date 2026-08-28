@@ -4,10 +4,26 @@ export type ProcurementPageResult = {
   total: number
 }
 
+export type ProcurementSyncSummary = {
+  fetched: number
+  total: number
+  created: number
+  updated: number
+  skipped: number
+  skippedByReason: {
+    missingId: number
+    missingTitle: number
+    nonPositiveCost: number
+    protectedUnchanged: number
+  }
+}
+
 type FetchProcurementPageOptions = {
   baseUrl: string
   token: string
   projectName?: string
+  pageNo?: number
+  pageSize?: number
   fetchImpl?: typeof fetch
   timeoutMs?: number
 }
@@ -16,14 +32,16 @@ export async function fetchProcurementPage({
   baseUrl,
   token,
   projectName,
+  pageNo = 1,
+  pageSize = 10,
   fetchImpl = fetch,
   timeoutMs = 10_000
 }: FetchProcurementPageOptions): Promise<ProcurementPageResult> {
   if (!token.trim()) throw new Error('未配置采购系统认证信息，请先配置服务端令牌')
 
   const url = new URL(baseUrl)
-  url.searchParams.set('pageNo', '1')
-  url.searchParams.set('pageSize', '10')
+  url.searchParams.set('pageNo', String(pageNo))
+  url.searchParams.set('pageSize', String(pageSize))
   url.searchParams.set('queryFromPage', 'N')
   url.searchParams.set('exchangeSellOrder', '')
   url.searchParams.set('extraSellOrder', '')
@@ -71,4 +89,23 @@ export async function fetchProcurementPage({
     fetched: data.list.length,
     total: data.total
   }
+}
+
+export async function fetchAllProcurementPages(options: FetchProcurementPageOptions): Promise<ProcurementPageResult> {
+  const pageSize = options.pageSize ?? 10
+  const firstPage = await fetchProcurementPage({ ...options, pageNo: 1, pageSize })
+  const items = [...firstPage.items]
+  const pageCount = Math.ceil(firstPage.total / pageSize)
+
+  for (let pageNo = 2; pageNo <= pageCount; pageNo += 1) {
+    const page = await fetchProcurementPage({ ...options, pageNo, pageSize })
+    items.push(...page.items)
+  }
+
+  return { items, fetched: items.length, total: firstPage.total }
+}
+
+export function formatProcurementSyncMessage(summary: ProcurementSyncSummary) {
+  const reasons = summary.skippedByReason
+  return `采购订单同步完成：拉取 ${summary.fetched}/${summary.total} 条，新增 ${summary.created} 条，更新 ${summary.updated} 条，跳过 ${summary.skipped} 条（缺少编号 ${reasons.missingId}、缺少名称 ${reasons.missingTitle}、成本无效 ${reasons.nonPositiveCost}、受保护且无变化 ${reasons.protectedUnchanged}）`
 }

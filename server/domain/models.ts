@@ -19,6 +19,8 @@ export type Project = {
   id: string
   title: string
   source: string
+  offlineSalesOrder?: string
+  createdAt?: string
   projectOwner?: string
   status: ProjectStatus
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
@@ -99,6 +101,7 @@ export type SubscriptionRule = {
 
 export type ReceivingCode = {
   id: string
+  createRequestId?: string
   subject: string
   accountNote: string
   codeName: string

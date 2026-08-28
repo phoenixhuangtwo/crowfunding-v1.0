@@ -58,7 +58,7 @@ is_project_process() {
 
 wait_for_url() {
   local url="$1"
-  local attempts=60
+  local attempts=300
   while (( attempts > 0 )); do
     if curl -fsS "$url" >/dev/null 2>&1; then
       return 0
@@ -102,7 +102,7 @@ start_api() {
     fi
     ensure_runtime
     echo "$pid" > "$API_PID_FILE"
-    echo "API 已在运行（PID ${pid}，端口 $API_PORT）"
+    echo "API 已在运行（PID ${pid}，端口 ${API_PORT}）"
     return 0
   fi
 
@@ -129,7 +129,7 @@ start_web() {
     fi
     ensure_runtime
     echo "$pid" > "$WEB_PID_FILE"
-    echo "前端已在运行（PID ${pid}，端口 $WEB_PORT）"
+    echo "前端已在运行（PID ${pid}，端口 ${WEB_PORT}）"
     return 0
   fi
 

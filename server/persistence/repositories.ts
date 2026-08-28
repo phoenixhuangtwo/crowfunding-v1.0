@@ -1,4 +1,4 @@
-import type { ClientSession, Db, Filter, Sort } from 'mongodb'
+import type { AnyBulkWriteOperation, ClientSession, Db, Filter, Sort } from 'mongodb'
 import type {
   AuditLog,
   FileAsset,
@@ -16,6 +16,7 @@ export interface EntityRepository<T extends { id: string }> {
   getById(id: string, session?: ClientSession): Promise<T | null>
   insert(document: T, session?: ClientSession): Promise<void>
   replace(document: T, session?: ClientSession): Promise<void>
+  sync(documents: T[], session?: ClientSession): Promise<void>
   deleteById(id: string, session?: ClientSession): Promise<boolean>
   count(filter?: Filter<T>, session?: ClientSession): Promise<number>
 }
@@ -61,6 +62,29 @@ function createEntityRepository<T extends { id: string }>(db: Db, name: string):
     async replace(document, session) {
       const result = await collection.replaceOne({ id: document.id } as Filter<T>, document, { session, upsert: false })
       if (result.matchedCount !== 1) throw new Error(`记录不存在：${document.id}`)
+    },
+    async sync(documents, session) {
+      if (documents.length === 0) return
+      const ids = documents.map(document => document.id)
+      const stored = await collection.find({ id: { $in: ids } } as Filter<T>, { session }).toArray()
+      const existingById = new Map(stored.map(document => {
+        const entity = withoutMongoId<T>(document as unknown as Record<string, unknown>)
+        return [entity.id, entity]
+      }))
+      const operations: AnyBulkWriteOperation<T>[] = []
+      for (const document of documents) {
+        const existing = existingById.get(document.id)
+        if (!existing || entitiesDiffer(existing, document)) {
+          operations.push({
+            replaceOne: {
+              filter: { id: document.id } as Filter<T>,
+              replacement: document,
+              upsert: true
+            }
+          })
+        }
+      }
+      if (operations.length > 0) await collection.bulkWrite(operations, { session, ordered: false })
     },
     async deleteById(id, session) {
       const result = await collection.deleteOne({ id } as Filter<T>, { session })

@@ -78,6 +78,66 @@ test('fetchProcurementPage sends the fixed page query and returns a count summar
   assert.equal(result.items[0]?.id, 1024)
 })
 
+test('fetchAllProcurementPages loads every page before returning the merged result', async () => {
+  const procurement = await import('../server/procurement.ts') as {
+    fetchAllProcurementPages?: (options: Record<string, unknown>) => Promise<{
+      items: Array<Record<string, unknown>>
+      fetched: number
+      total: number
+    }>
+  }
+  assert.equal(typeof procurement.fetchAllProcurementPages, 'function')
+
+  const requestedPages: number[] = []
+  const pages = [
+    [{ id: 1 }, { id: 2 }],
+    [{ id: 3 }, { id: 4 }],
+    [{ id: 5 }]
+  ]
+  const result = await procurement.fetchAllProcurementPages!({
+    baseUrl: 'https://procurement.example.test/admin-api/erp/offline-order/page',
+    token: 'Bearer test-token',
+    pageSize: 2,
+    fetchImpl: async (input: URL | RequestInfo) => {
+      const url = new URL(String(input))
+      const pageNo = Number(url.searchParams.get('pageNo'))
+      requestedPages.push(pageNo)
+      assert.equal(url.searchParams.get('pageSize'), '2')
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { list: pages[pageNo - 1], total: 5 },
+        msg: ''
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+  })
+
+  assert.deepEqual(requestedPages, [1, 2, 3])
+  assert.deepEqual(result.items.map(item => item.id), [1, 2, 3, 4, 5])
+  assert.equal(result.fetched, 5)
+  assert.equal(result.total, 5)
+})
+
+test('formatProcurementSyncMessage exposes every skip reason and fetched coverage', async () => {
+  const procurement = await import('../server/procurement.ts') as {
+    formatProcurementSyncMessage?: (summary: Record<string, unknown>) => string
+  }
+  assert.equal(typeof procurement.formatProcurementSyncMessage, 'function')
+
+  assert.equal(procurement.formatProcurementSyncMessage!({
+    fetched: 256,
+    total: 256,
+    created: 97,
+    updated: 3,
+    skipped: 156,
+    skippedByReason: {
+      missingId: 1,
+      missingTitle: 2,
+      nonPositiveCost: 150,
+      protectedUnchanged: 3
+    }
+  }), '采购订单同步完成：拉取 256/256 条，新增 97 条，更新 3 条，跳过 156 条（缺少编号 1、缺少名称 2、成本无效 150、受保护且无变化 3）')
+})
+
 test('fetchProcurementPage includes the project name when loading order details', async () => {
   const options = {
     baseUrl: 'https://procurement.example.test/admin-api/erp/offline-order/page',
@@ -150,6 +210,8 @@ test('mapProcurementOrderToProject converts cents and matches the existing proje
     id: 'PRJ-FSY-OFFLINE-1024',
     title: '会议屏采购',
     source: '采购系统 · XS-20260825-001',
+    offlineSalesOrder: 'XS-20260825-001',
+    createdAt: '2026-08-25 08:00:00',
     projectOwner: '2',
     status: '未开放',
     statusType: 'info',
@@ -169,7 +231,7 @@ test('mapProcurementOrderToProject converts cents and matches the existing proje
   })
 })
 
-test('mergeProcurementProject only backfills the creator for protected projects', async () => {
+test('mergeProcurementProject only backfills source metadata for protected projects', async () => {
   const { mergeProcurementProject } = await import('../server/procurement-project.ts') as {
     mergeProcurementProject?: (existing: Record<string, unknown>, mapped: Record<string, unknown>, protectedProject: boolean) => string
   }
@@ -177,13 +239,17 @@ test('mergeProcurementProject only backfills the creator for protected projects'
     ...mapProcurementOrderToProject(upstreamBody.data.list[0])!,
     title: '已配置规则的内部项目名称',
     status: '已满额' as const,
-    projectOwner: undefined
+    projectOwner: undefined,
+    offlineSalesOrder: undefined,
+    createdAt: undefined
   }
   const mapped = mapProcurementOrderToProject(upstreamBody.data.list[0])!
 
   assert.equal(typeof mergeProcurementProject, 'function')
   assert.equal(mergeProcurementProject!(existing, mapped, true), 'updated')
   assert.equal(existing.projectOwner, '2')
+  assert.equal(existing.offlineSalesOrder, 'XS-20260825-001')
+  assert.equal(existing.createdAt, '2026-08-25 08:00:00')
   assert.equal(existing.title, '已配置规则的内部项目名称')
   assert.equal(existing.status, '已满额')
 })
@@ -200,9 +266,40 @@ test('mapProcurementOrderToProject falls back to selling price when transaction 
   assert.equal(project?.profitAmount, 17292.18)
 })
 
+test('mapProcurementOrderToProject formats numeric creation time in Asia Shanghai', () => {
+  const project = mapProcurementOrderToProject({
+    ...upstreamBody.data.list[0],
+    createTime: 1_787_109_721_000
+  })
+
+  assert.equal(project?.createdAt, '2026-08-19 11:22:01')
+})
+
 test('mapProcurementOrderToProject skips orders without a positive cost', () => {
   assert.equal(mapProcurementOrderToProject({ ...upstreamBody.data.list[0], totalCostPrice: null }), null)
   assert.equal(mapProcurementOrderToProject({ ...upstreamBody.data.list[0], totalCostPrice: 0 }), null)
+})
+
+test('procurementOrderSkipReason distinguishes missing identity, title, and positive cost', async () => {
+  const procurementProject = await import('../server/procurement-project.ts') as {
+    procurementOrderSkipReason?: (order: Record<string, unknown>) => string | null
+  }
+  assert.equal(typeof procurementProject.procurementOrderSkipReason, 'function')
+
+  assert.equal(procurementProject.procurementOrderSkipReason!({
+    ...upstreamBody.data.list[0],
+    id: null
+  }), 'missingId')
+  assert.equal(procurementProject.procurementOrderSkipReason!({
+    ...upstreamBody.data.list[0],
+    projectName: '',
+    sellOrder: ''
+  }), 'missingTitle')
+  assert.equal(procurementProject.procurementOrderSkipReason!({
+    ...upstreamBody.data.list[0],
+    totalCostPrice: 0
+  }), 'nonPositiveCost')
+  assert.equal(procurementProject.procurementOrderSkipReason!(upstreamBody.data.list[0]), null)
 })
 
 test('fetchProcurementPage aborts a stalled upstream request at the configured timeout', async () => {

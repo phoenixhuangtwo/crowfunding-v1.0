@@ -1,7 +1,7 @@
 import { createServer, IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { fetchProcurementPage } from './procurement.ts'
-import { mapProcurementOrderToDetail, mapProcurementOrderToProject, mergeProcurementProject } from './procurement-project.ts'
+import { fetchAllProcurementPages, fetchProcurementPage, formatProcurementSyncMessage } from './procurement.ts'
+import { mapProcurementOrderToDetail, mapProcurementOrderToProject, mergeProcurementProject, procurementOrderSkipReason } from './procurement-project.ts'
 import { recognizeFinanceBill } from './invoice-ocr.ts'
 import { confirmProjectSettlement, type SettlementInvoiceRecord } from './project-settlement.ts'
 import { DEFAULT_JSON_BODY_LIMIT, readJsonBody, RequestBodyError } from './http-json-body.ts'
@@ -9,9 +9,10 @@ import { OcrProofStore } from './ocr-proof.ts'
 import { hasImageStorageCapacity, ResourceLimitError, SlidingWindowQuota } from './resource-limits.ts'
 import { loadAppConfig } from './config.ts'
 import { connectMongo } from './persistence/mongo.ts'
-import { createRepositories, entitiesDiffer } from './persistence/repositories.ts'
+import { createRepositories } from './persistence/repositories.ts'
 import { ensureSchema } from './persistence/schema.ts'
 import { QueryService, presentReceivingCode } from './services/query-service.ts'
+import { createReceivingCodeOnce } from './services/receiving-code-creation.ts'
 import { readSingleImageMultipart } from './http-multipart.ts'
 import { validateImageFile, type ValidatedImage } from './image-file.ts'
 import { TencentCosObjectStorage } from './storage/object-storage.ts'
@@ -36,6 +37,8 @@ type Project = {
   id: string
   title: string
   source: string
+  offlineSalesOrder?: string
+  createdAt?: string
   projectOwner?: string
   status: ProjectStatus
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
@@ -775,18 +778,12 @@ function validateImagePayload(body: Record<string, unknown>, res: ServerResponse
 
 async function persistRepository<T extends { id: string }>(
   repository: {
-    getById(id: string, session?: import('mongodb').ClientSession): Promise<T | null>
-    insert(document: T, session?: import('mongodb').ClientSession): Promise<void>
-    replace(document: T, session?: import('mongodb').ClientSession): Promise<void>
+    sync(documents: T[], session?: import('mongodb').ClientSession): Promise<void>
   },
   documents: T[],
   session: import('mongodb').ClientSession
 ) {
-  for (const document of documents) {
-    const existing = await repository.getById(document.id, session)
-    if (!existing) await repository.insert(document, session)
-    else if (entitiesDiffer(existing, document)) await repository.replace(document, session)
-  }
+  await repository.sync(documents, session)
 }
 
 async function persistState() {
@@ -987,6 +984,49 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
 }
 
 async function routePost(pathname: string, req: IncomingMessage, res: ServerResponse) {
+  if (pathname === '/api/receiving-codes' && String(req.headers['content-type'] ?? '').toLowerCase().startsWith('multipart/form-data;')) {
+    const { fields, image } = await readValidatedUpload(
+      req,
+      ['subject', 'accountNote', 'codeName', 'operator', 'createRequestId'],
+      ['image/png', 'image/jpeg', 'image/webp']
+    )
+    const subject = fields.subject?.trim() ?? ''
+    const accountNote = fields.accountNote?.trim() ?? ''
+    const codeName = fields.codeName?.trim() ?? ''
+    const createRequestId = fields.createRequestId?.trim() ?? ''
+    if (!subject || !accountNote || !codeName) {
+      return send(res, 400, { error: 'RECEIVING_CODE_FIELDS_REQUIRED', message: '请完整填写收款主体、账户说明和收款码名称' })
+    }
+    if (!createRequestId) {
+      return send(res, 400, { error: 'RECEIVING_CODE_REQUEST_ID_REQUIRED', message: '缺少收款码创建请求标识，请重新打开创建窗口' })
+    }
+    const existing = await repositories.receivingCodes.findOne({ createRequestId } as never)
+    if (!existing && await repositories.receivingCodes.count() >= maxReceivingCodes) {
+      return send(res, 429, { error: 'RECEIVING_CODE_LIMIT_EXCEEDED', message: '收款码数量已达上限' })
+    }
+    const result = await createReceivingCodeOnce({
+      createRequestId,
+      subject,
+      accountNote,
+      codeName,
+      operator: fields.operator?.trim() || 'finance01 · 财务',
+      image
+    }, {
+      receivingCodes: repositories.receivingCodes,
+      auditLogs: repositories.auditLogs,
+      files: fileAssetService,
+      mongo,
+      idFactory: () => `RCV-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      auditIdFactory: () => `AUD-${Date.now()}-${randomUUID()}`,
+      now
+    })
+    if (!receivingCodes.some(item => item.id === result.record.id)) receivingCodes.unshift(result.record as ReceivingCode)
+    return send(res, result.created ? 201 : 200, {
+      data: presentReceivingCode(result.record),
+      message: result.created ? '收款码及图片已创建并保存' : '重复请求已返回原收款码'
+    })
+  }
+
   const multipartReceivingCodeImageMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/image$/)
   if (multipartReceivingCodeImageMatch) {
     const receivingCodeId = decodeURIComponent(multipartReceivingCodeImageMatch[1])
@@ -1192,17 +1232,28 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/mcp/sync') {
-    const result = await fetchProcurementPage({
+    const result = await fetchAllProcurementPages({
       baseUrl: process.env.PROCUREMENT_API_URL ?? 'https://prod-api-admin.fushangyunfu.com/admin-api/erp/offline-order/page',
       token: process.env.PROCUREMENT_TOKEN ?? ''
     })
     let created = 0
     let updated = 0
     let skipped = 0
+    const skippedByReason = {
+      missingId: 0,
+      missingTitle: 0,
+      nonPositiveCost: 0,
+      protectedUnchanged: 0
+    }
     for (const order of result.items) {
+      const skipReason = procurementOrderSkipReason(order)
+      if (skipReason) {
+        skippedByReason[skipReason] += 1
+        skipped += 1
+        continue
+      }
       const mapped = mapProcurementOrderToProject(order)
       if (!mapped) {
-        skipped += 1
         continue
       }
 
@@ -1217,22 +1268,24 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const hasSubscription = subscriptions.some(subscription => subscription.projectId === existing.id)
       const mergeResult = mergeProcurementProject(existing, mapped, existing.status !== '未开放' || hasRule || hasSubscription)
       if (mergeResult === 'skipped') {
+        skippedByReason.protectedUnchanged += 1
         skipped += 1
         continue
       }
       updated += 1
     }
+    const summary = { fetched: result.fetched, total: result.total, created, updated, skipped, skippedByReason }
     await pushAudit({
       actor: '系统',
       role: 'system',
       action: '采购订单分页拉取',
       target: 'procurement-offline-order-page',
       before: null,
-      after: { fetched: result.fetched, total: result.total, created, updated, skipped }
+      after: summary
     })
     return send(res, 200, {
-      data: { fetched: result.fetched, total: result.total, created, updated, skipped },
-      message: `采购订单同步完成：拉取 ${result.fetched} 条，新增 ${created} 条，更新 ${updated} 条，跳过 ${skipped} 条，共 ${result.total} 条`
+      data: summary,
+      message: formatProcurementSyncMessage(summary)
     })
   }
 
@@ -1240,24 +1293,37 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subject = String(body.subject ?? '').trim()
     const accountNote = String(body.accountNote ?? '').trim()
     const codeName = String(body.codeName ?? '').trim()
+    const createRequestId = String(body.createRequestId ?? '').trim()
     if (!subject || !accountNote || !codeName) {
       return send(res, 400, { error: 'RECEIVING_CODE_FIELDS_REQUIRED', message: '请完整填写收款主体、账户说明和收款码名称' })
     }
-    if (receivingCodes.length >= maxReceivingCodes) {
+    if (!createRequestId) {
+      return send(res, 400, { error: 'RECEIVING_CODE_REQUEST_ID_REQUIRED', message: '缺少收款码创建请求标识，请重新打开创建窗口' })
+    }
+    const existing = await repositories.receivingCodes.findOne({ createRequestId } as never)
+    if (!existing && await repositories.receivingCodes.count() >= maxReceivingCodes) {
       return send(res, 429, { error: 'RECEIVING_CODE_LIMIT_EXCEEDED', message: '收款码数量已达上限' })
     }
-    const record: ReceivingCode = {
-      id: `RCV-${Date.now()}`,
+    const result = await createReceivingCodeOnce({
+      createRequestId,
       subject,
       accountNote,
       codeName,
-      status: '启用',
-      updatedBy: String(body.operator ?? 'finance01 · 财务'),
-      updatedAt: now()
-    }
-    receivingCodes.unshift(record)
-    await pushAudit({ actor: record.updatedBy, role: 'finance', action: '创建收款码', target: record.id, before: null, after: record })
-    return send(res, 201, { data: record, message: '收款码已创建并保存' })
+      operator: String(body.operator ?? 'finance01 · 财务')
+    }, {
+      receivingCodes: repositories.receivingCodes,
+      auditLogs: repositories.auditLogs,
+      files: fileAssetService,
+      mongo,
+      idFactory: () => `RCV-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      auditIdFactory: () => `AUD-${Date.now()}-${randomUUID()}`,
+      now
+    })
+    if (!receivingCodes.some(item => item.id === result.record.id)) receivingCodes.unshift(result.record as ReceivingCode)
+    return send(res, result.created ? 201 : 200, {
+      data: presentReceivingCode(result.record),
+      message: result.created ? '收款码已创建并保存' : '重复请求已返回原收款码'
+    })
   }
 
   const receivingCodeImageMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/image$/)
