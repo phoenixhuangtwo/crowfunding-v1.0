@@ -1,6 +1,5 @@
 import { createServer, IncomingMessage, ServerResponse } from 'node:http'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fetchProcurementPage } from './procurement.ts'
 import { mapProcurementOrderToDetail, mapProcurementOrderToProject, mergeProcurementProject } from './procurement-project.ts'
 import { recognizeFinanceBill } from './invoice-ocr.ts'
@@ -8,6 +7,11 @@ import { confirmProjectSettlement, type SettlementInvoiceRecord } from './projec
 import { DEFAULT_JSON_BODY_LIMIT, readJsonBody, RequestBodyError } from './http-json-body.ts'
 import { OcrProofStore } from './ocr-proof.ts'
 import { hasImageStorageCapacity, ResourceLimitError, SlidingWindowQuota } from './resource-limits.ts'
+import { loadAppConfig } from './config.ts'
+import { connectMongo } from './persistence/mongo.ts'
+import { createRepositories } from './persistence/repositories.ts'
+import { ensureSchema } from './persistence/schema.ts'
+import { QueryService } from './services/query-service.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -130,8 +134,6 @@ type AppState = {
   rules: SubscriptionRule[]
   receivingCodes: ReceivingCode[]
 }
-
-const statePath = resolve(process.cwd(), 'data/dev-state.json')
 
 const mockProjects: Project[] = [
   {
@@ -705,20 +707,19 @@ function isRuleLocked(ruleId: string) {
   return getRuleProjectIds(ruleId).some(projectId => hasRealUserSubscriptions(projectId))
 }
 
-function loadState(): AppState {
-  try {
-    const raw = readFileSync(statePath, 'utf8')
-    const loaded = normalizeState(JSON.parse(raw) as Partial<AppState>)
-    writeFileSync(statePath, JSON.stringify(loaded, null, 2))
-    return loaded
-  } catch {
-    mkdirSync(dirname(statePath), { recursive: true })
-    writeFileSync(statePath, JSON.stringify(seedState, null, 2))
-    return structuredClone(seedState)
-  }
+const appConfig = loadAppConfig()
+const mongo = await connectMongo(appConfig.mongodb)
+await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
+const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
+const queryService = new QueryService(repositories)
+const state: AppState = {
+  projects: await repositories.projects.list() as Project[],
+  subscriptions: await repositories.subscriptions.list() as Subscription[],
+  auditLogs: await repositories.auditLogs.list() as AuditLog[],
+  riskEvents: await repositories.riskEvents.list() as RiskEvent[],
+  rules: await repositories.rules.list() as SubscriptionRule[],
+  receivingCodes: await repositories.receivingCodes.list() as ReceivingCode[]
 }
-
-const state = loadState()
 const { projects, subscriptions, auditLogs, riskEvents, rules, receivingCodes } = state
 
 const maxImageDataUrlLength = Math.ceil(5 * 1024 * 1024 * 4 / 3) + 128
@@ -759,9 +760,31 @@ function validateImagePayload(body: Record<string, unknown>, res: ServerResponse
   return { imageUrl, imageName }
 }
 
-function saveState() {
-  mkdirSync(dirname(statePath), { recursive: true })
-  writeFileSync(statePath, JSON.stringify(state, null, 2))
+async function persistRepository<T extends { id: string }>(
+  repository: {
+    getById(id: string, session?: import('mongodb').ClientSession): Promise<T | null>
+    insert(document: T, session?: import('mongodb').ClientSession): Promise<void>
+    replace(document: T, session?: import('mongodb').ClientSession): Promise<void>
+  },
+  documents: T[],
+  session: import('mongodb').ClientSession
+) {
+  for (const document of documents) {
+    if (await repository.getById(document.id, session)) await repository.replace(document, session)
+    else await repository.insert(document, session)
+  }
+}
+
+async function persistState() {
+  await mongo.withTransaction(async session => {
+    await persistRepository(repositories.projects, projects as never[], session)
+    await persistRepository(repositories.subscriptions, subscriptions as never[], session)
+    await persistRepository(repositories.auditLogs, auditLogs as never[], session)
+    await persistRepository(repositories.riskEvents, riskEvents as never[], session)
+    await persistRepository(repositories.rules, rules as never[], session)
+    await persistRepository(repositories.receivingCodes, receivingCodes as never[], session)
+    return true
+  })
 }
 
 function formatDateTime(date = new Date()) {
@@ -785,9 +808,9 @@ function addHours(datetime: string, hours: number) {
   return formatDateTime(date)
 }
 
-function pushAudit(entry: Omit<AuditLog, 'time' | 'result'> & { result?: AuditLog['result'] }) {
-  auditLogs.unshift({ time: now(), result: entry.result ?? '成功', ...entry })
-  saveState()
+async function pushAudit(entry: Omit<AuditLog, 'time' | 'result'> & { result?: AuditLog['result'] }) {
+  auditLogs.unshift({ id: `AUD-${Date.now()}-${randomUUID()}`, time: now(), result: entry.result ?? '成功', ...entry } as AuditLog)
+  await persistState()
 }
 
 function send(res: ServerResponse, status: number, payload: unknown) {
@@ -802,10 +825,10 @@ function send(res: ServerResponse, status: number, payload: unknown) {
 
 async function routeGet(url: URL, res: ServerResponse) {
   const { pathname, searchParams } = url
-  if (pathname === '/api/health') return send(res, 200, { ok: true, service: 'subscription-api', persistence: statePath, time: new Date().toISOString() })
-  if (pathname === '/api/state') return send(res, 200, { data: state, persistence: statePath })
-  if (pathname === '/api/projects') return send(res, 200, { data: projects })
-  if (pathname === '/api/receiving-codes') return send(res, 200, { data: receivingCodes })
+  if (pathname === '/api/health') return send(res, 200, { ok: true, service: 'subscription-api', persistence: 'mongodb', database: appConfig.mongodb.database, time: new Date().toISOString() })
+  if (pathname === '/api/state') return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
+  if (pathname === '/api/projects') return send(res, 200, { data: await queryService.listProjects() })
+  if (pathname === '/api/receiving-codes') return send(res, 200, { data: await queryService.listReceivingCodes() })
   const procurementDetailMatch = pathname.match(/^\/api\/procurement\/orders\/([^/]+)$/)
   if (procurementDetailMatch) {
     const projectId = decodeURIComponent(procurementDetailMatch[1])
@@ -837,9 +860,9 @@ async function routeGet(url: URL, res: ServerResponse) {
     })
     return send(res, 200, { data: filtered })
   }
-  if (pathname === '/api/subscriptions') return send(res, 200, { data: subscriptions })
-  if (pathname === '/api/audit-logs') return send(res, 200, { data: auditLogs })
-  if (pathname === '/api/risk-events') return send(res, 200, { data: riskEvents })
+  if (pathname === '/api/subscriptions') return send(res, 200, { data: await queryService.listSubscriptions() })
+  if (pathname === '/api/audit-logs') return send(res, 200, { data: await repositories.auditLogs.list({}, { sort: { time: -1 } }) })
+  if (pathname === '/api/risk-events') return send(res, 200, { data: await repositories.riskEvents.list({}, { sort: { time: -1 } }) })
   if (pathname === '/api/rbac') {
     return send(res, 200, {
       data: [
@@ -966,7 +989,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       }
       updated += 1
     }
-    pushAudit({
+    await pushAudit({
       actor: '系统',
       role: 'system',
       action: '采购订单分页拉取',
@@ -1007,7 +1030,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       ...(image ?? {})
     }
     receivingCodes.unshift(record)
-    pushAudit({ actor: record.updatedBy, role: 'finance', action: '创建收款码', target: record.id, before: null, after: { ...record, imageUrl: image ? '[已保存图片]' : undefined } })
+    await pushAudit({ actor: record.updatedBy, role: 'finance', action: '创建收款码', target: record.id, before: null, after: { ...record, imageUrl: image ? '[已保存图片]' : undefined } })
     return send(res, 201, { data: record, message: '收款码已创建并保存' })
   }
 
@@ -1024,7 +1047,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     receivingCode.imageName = image.imageName
     receivingCode.updatedBy = String(body.operator ?? 'finance01 · 财务')
     receivingCode.updatedAt = now()
-    pushAudit({
+    await pushAudit({
       actor: receivingCode.updatedBy,
       role: 'finance',
       action: before.imageName ? '更换收款码图片' : '上传收款码图片',
@@ -1048,7 +1071,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     receivingCode.disabledReason = reason
     receivingCode.updatedBy = String(body.operator ?? 'finance01 · 财务')
     receivingCode.updatedAt = now()
-    pushAudit({ actor: receivingCode.updatedBy, role: 'finance', action: '禁用收款码', target: receivingCode.id, before, after: { status: receivingCode.status, disabledReason: reason } })
+    await pushAudit({ actor: receivingCode.updatedBy, role: 'finance', action: '禁用收款码', target: receivingCode.id, before, after: { status: receivingCode.status, disabledReason: reason } })
     return send(res, 200, { data: receivingCode, message: '收款码已禁用并保存' })
   }
 
@@ -1089,8 +1112,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       paymentDeadlineAt: addHours(createdAt, 12)
     }
     subscriptions.unshift(record)
-    pushAudit({ actor: `${record.userId} · 员工`, role: 'employee', action: '创建认购', target: record.id, before, after: { subscribed: project.subscribed, remain: project.remain, subscription: record.id } })
-    saveState()
+    await pushAudit({ actor: `${record.userId} · 员工`, role: 'employee', action: '创建认购', target: record.id, before, after: { subscribed: project.subscribed, remain: project.remain, subscription: record.id } })
+    await persistState()
     return send(res, 201, { data: record })
   }
 
@@ -1105,7 +1128,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const before = { pay: subscription.pay, action: subscription.action }
     subscription.pay = '已收款'
     subscription.action = '查看支付'
-    pushAudit({
+    await pushAudit({
       actor: body.operator ?? `${subscription.userId} · 员工`,
       role: 'employee',
       action: '确认收款',
@@ -1114,7 +1137,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       after: { pay: subscription.pay, action: subscription.action },
       result: '成功'
     })
-    saveState()
+    await persistState()
     return send(res, 200, { data: subscription, message: '已确认收款，状态已更新为已收款' })
   }
 
@@ -1147,7 +1170,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     subscription.reviewedBy = reviewedBy
     subscription.reviewedAt = reviewedAt
     subscription.rejectReason = result === 'reject' ? rejectReason : undefined
-    pushAudit({
+    await pushAudit({
       actor: subscription.reviewedBy,
       role: 'finance',
       action: result === 'pass' ? '支付复核 · 通过' : result === 'reject' ? '支付复核 · 驳回' : '支付复核 · 标记部分缴款',
@@ -1162,7 +1185,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       },
       result: '成功'
     })
-    saveState()
+    await persistState()
     const message = result === 'pass' ? '复核通过，员工缴款状态已更新为缴款成功' : result === 'reject' ? '复核驳回，员工缴款状态已更新为缴款被驳回' : '已标记部分缴款，并记录复核人员与操作时间'
     return send(res, 200, { data: subscription, message })
   }
@@ -1202,8 +1225,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       updatedAt: now()
     }
     rules.unshift(record)
-    pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '创建认购规则', target: record.id, before: null, after: record })
-    saveState()
+    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '创建认购规则', target: record.id, before: null, after: record })
+    await persistState()
     return send(res, 201, { data: record })
   }
 
@@ -1243,8 +1266,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     rule.startAt = String(body.startAt ?? '')
     rule.endAt = String(body.endAt ?? '')
     rule.updatedAt = now()
-    pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '修改认购规则', target: rule.id, before, after: rule })
-    saveState()
+    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '修改认购规则', target: rule.id, before, after: rule })
+    await persistState()
     return send(res, 200, { data: rule, message: '认购规则已修改' })
   }
 
@@ -1271,8 +1294,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const before = { ...rule }
     rule.status = nextStatus
     rule.updatedAt = now()
-    pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: nextStatus === '已启用' ? '启用认购规则' : '停用认购规则', target: rule.id, before, after: rule })
-    saveState()
+    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: nextStatus === '已启用' ? '启用认购规则' : '停用认购规则', target: rule.id, before, after: rule })
+    await persistState()
     return send(res, 200, { data: rule, message: nextStatus === '已启用' ? '认购规则已启用' : '认购规则已停用' })
   }
 
@@ -1288,8 +1311,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       })
     }
     rules.splice(index, 1)
-    pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '删除认购规则', target: rule.id, before: rule, after: null })
-    saveState()
+    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '删除认购规则', target: rule.id, before: rule, after: null })
+    await persistState()
     return send(res, 200, { message: '认购规则已删除' })
   }
 
@@ -1328,7 +1351,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     project.interruptReason = undefined
     project.interruptedAt = undefined
     project.refundNotice = undefined
-    pushAudit({
+    await pushAudit({
       actor: body.operator ?? 'admin01 · 管理员',
       role: 'admin',
       action: '开放项目认购',
@@ -1342,7 +1365,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         ruleName: selectedRule.ruleName
       }
     })
-    saveState()
+    await persistState()
     return send(res, 200, { data: project, message: `项目已按「${selectedRule.ruleName}」开放，状态为未满额` })
   }
 
@@ -1359,7 +1382,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     project.interruptReason = '管理端终止认购'
     project.interruptedAt = now()
     project.refundNotice = '已缴款金额将在 48h 内原路返款到账'
-    pushAudit({
+    await pushAudit({
       actor: body.operator ?? 'admin01 · 管理员',
       role: 'admin',
       action: '终止项目认购',
@@ -1371,7 +1394,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         refundNotice: project.refundNotice
       }
     })
-    saveState()
+    await persistState()
     return send(res, 200, { data: project, message: '项目已终止并进入已中断状态' })
   }
 
@@ -1396,7 +1419,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       desc: `项目「${project.title}」已中断认购：${reason}；已缴款金额将在 48h 内返款到账`,
       status: '已通知员工与财务'
     })
-    pushAudit({
+    await pushAudit({
       actor: body.operator ?? 'admin01 · 管理员',
       role: 'admin',
       action: '中断项目认购',
@@ -1404,7 +1427,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       before,
       after: { status: project.status, interruptReason: reason, refundNotice: project.refundNotice }
     })
-    saveState()
+    await persistState()
     return send(res, 200, { data: project, message: project.refundNotice })
   }
 
@@ -1450,7 +1473,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       : recognizedTotal === subscription.amount && !hasFailedImage
         ? '查看支付'
         : '重新上传截图'
-    pushAudit({
+    await pushAudit({
       actor: body.operator ?? 'employee01 · 员工',
       role: 'employee',
       action: '删除识别失败支付截图',
@@ -1458,7 +1481,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       before,
       after: null
     })
-    saveState()
+    await persistState()
     return send(res, 200, {
       data: {
         status: subscription.pay,
@@ -1538,7 +1561,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
           ? '部分缴款'
           : '待复核'
     subscription.action = !recognized || recognizedTotal < expectedAmount ? '重新上传截图' : '查看支付'
-    saveState()
+    await persistState()
     const paymentImageCount = subscription.paymentImages.length
     const remainingAmount = Math.max(0, Number((expectedAmount - recognizedTotal).toFixed(2)))
     const after = {
@@ -1553,7 +1576,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       payment_success_at: recognized ? uploadedAt : undefined,
       reason: recognitionFailure || undefined
     }
-    pushAudit({ actor: 'OCR 适配层', role: 'system', action: 'OCR 支付校验', target: body.paymentId ?? 'PAY-20260705-0092', before: { status: '待识别' }, after })
+    await pushAudit({ actor: 'OCR 适配层', role: 'system', action: 'OCR 支付校验', target: body.paymentId ?? 'PAY-20260705-0092', before: { status: '待识别' }, after })
     return send(res, 200, { data: after, message: recognized ? '支付截图 OCR 识别完成，等待财务审核' : '支付截图已保存，等待财务审核' })
   }
 
@@ -1603,7 +1626,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         operator: typeof body.operator === 'string' ? body.operator.trim() : 'finance01 · 财务'
       }, now())
       if (!result.duplicate) ocrProofStore.remove(proofId)
-      pushAudit({
+      await pushAudit({
         actor: typeof body.operator === 'string' ? body.operator : 'finance01 · 财务',
         role: 'finance',
         action: result.duplicate ? '重复确认结算（幂等命中）' : project.status === '已完结' ? '确认结算 · 项目完结' : '确认结算 · 部分结算',
@@ -1654,7 +1677,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     project.statusType = 'success'
     project.companyForcedTakeoverAmount += forceAmount
     normalizeProjectAmounts(project)
-    pushAudit({
+    await pushAudit({
       actor: body.operator ?? 'superadmin01 · 公司超级管理员',
       role: 'super_admin',
       action: '强制接管',
@@ -1668,7 +1691,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         note: '强制接管仅覆盖项目剩余可认购金额，不接管员工已认购未缴款金额；认购释放后才会重新进入剩余额度'
       }
     })
-    saveState()
+    await persistState()
     return send(res, 200, { data: project, message: '强制接管成功：仅接管剩余可认购金额，未接管员工已认购未缴款金额' })
   }
 
