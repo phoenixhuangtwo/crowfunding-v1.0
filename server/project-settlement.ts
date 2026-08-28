@@ -2,7 +2,7 @@ export type SettlementInvoiceRecord = {
   id: string
   amount: number
   fileName: string
-  imageUrl: string
+  assetId: string
   transactionDate: string
   payer: string
   payee: string
@@ -26,7 +26,7 @@ export type SettlementConfirmationInput = {
   idempotencyKey: string
   amount: number
   fileName: string
-  imageUrl: string
+  assetId: string
   transactionDate: string
   payer: string
   payee: string
@@ -70,7 +70,7 @@ export function confirmProjectSettlement(
     id: input.idempotencyKey,
     amount,
     fileName: input.fileName,
-    imageUrl: input.imageUrl,
+    assetId: input.assetId,
     transactionDate: input.transactionDate,
     payer: input.payer,
     payee: input.payee,
