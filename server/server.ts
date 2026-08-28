@@ -9,9 +9,15 @@ import { OcrProofStore } from './ocr-proof.ts'
 import { hasImageStorageCapacity, ResourceLimitError, SlidingWindowQuota } from './resource-limits.ts'
 import { loadAppConfig } from './config.ts'
 import { connectMongo } from './persistence/mongo.ts'
-import { createRepositories } from './persistence/repositories.ts'
+import { createRepositories, entitiesDiffer } from './persistence/repositories.ts'
 import { ensureSchema } from './persistence/schema.ts'
-import { QueryService } from './services/query-service.ts'
+import { QueryService, presentReceivingCode } from './services/query-service.ts'
+import { readSingleImageMultipart } from './http-multipart.ts'
+import { validateImageFile, type ValidatedImage } from './image-file.ts'
+import { TencentCosObjectStorage } from './storage/object-storage.ts'
+import { FileAssetService } from './storage/file-asset-service.ts'
+import { requestContext, authorizeAssetRead } from './request-context.ts'
+import { AppError } from './errors.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -19,7 +25,7 @@ type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | 
 
 type PaymentImage = {
   id: string
-  paymentImageUrl: string
+  assetId: string
   paymentImageName: string
   recognizedAmount: number
   uploadedAt: string
@@ -712,6 +718,13 @@ const mongo = await connectMongo(appConfig.mongodb)
 await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
 const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
 const queryService = new QueryService(repositories)
+const objectStorage = new TencentCosObjectStorage(appConfig.cos)
+const fileAssetService = new FileAssetService({
+  assets: repositories.fileAssets,
+  storage: objectStorage,
+  mongo,
+  config: appConfig.cos
+})
 const state: AppState = {
   projects: await repositories.projects.list() as Project[],
   subscriptions: await repositories.subscriptions.list() as Subscription[],
@@ -770,8 +783,9 @@ async function persistRepository<T extends { id: string }>(
   session: import('mongodb').ClientSession
 ) {
   for (const document of documents) {
-    if (await repository.getById(document.id, session)) await repository.replace(document, session)
-    else await repository.insert(document, session)
+    const existing = await repository.getById(document.id, session)
+    if (!existing) await repository.insert(document, session)
+    else if (entitiesDiffer(existing, document)) await repository.replace(document, session)
   }
 }
 
@@ -823,9 +837,58 @@ function send(res: ServerResponse, status: number, payload: unknown) {
   res.end(JSON.stringify(payload))
 }
 
-async function routeGet(url: URL, res: ServerResponse) {
+function auditRecord(input: Omit<AuditLog, 'time' | 'result'> & { result?: AuditLog['result'] }) {
+  return { id: `AUD-${Date.now()}-${randomUUID()}`, time: now(), result: input.result ?? '成功', ...input }
+}
+
+function uploadActor(fields: Record<string, string>, fallback: string) {
+  const operator = fields.operator?.trim() || fallback
+  return { userId: operator.split(' · ')[0] || fallback, label: operator }
+}
+
+function ephemeralDataUrl(image: ValidatedImage) {
+  return `data:${image.mimeType};base64,${image.bytes.toString('base64')}`
+}
+
+async function readValidatedUpload(
+  req: IncomingMessage,
+  allowedFields: readonly string[],
+  allowedMimeTypes: readonly ValidatedImage['mimeType'][]
+) {
+  const multipart = await readSingleImageMultipart(req, {
+    maxFileBytes: 5 * 1024 * 1024,
+    maxFieldBytes: 4 * 1024,
+    allowedFields
+  })
+  return {
+    fields: multipart.fields,
+    image: validateImageFile({ ...multipart.file, maxBytes: 5 * 1024 * 1024, allowedMimeTypes })
+  }
+}
+
+async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
   const { pathname, searchParams } = url
   if (pathname === '/api/health') return send(res, 200, { ok: true, service: 'subscription-api', persistence: 'mongodb', database: appConfig.mongodb.database, time: new Date().toISOString() })
+  const fileMatch = pathname.match(/^\/api\/files\/([^/]+)\/content$/)
+  if (fileMatch) {
+    const context = requestContext(req)
+    const asset = await fileAssetService.getReadyAsset(decodeURIComponent(fileMatch[1]))
+    if (!asset) return send(res, 404, { error: 'FILE_NOT_FOUND', message: '文件不存在或无权访问' })
+    await authorizeAssetRead(context, asset, repositories)
+    res.writeHead(200, {
+      'Content-Type': asset.mimeType,
+      'Content-Length': String(asset.sizeBytes),
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff'
+    })
+    const stream = fileAssetService.openReadStream(asset)
+    stream.once('error', () => {
+      if (!res.headersSent) send(res, 503, { error: 'STORAGE_UNAVAILABLE', message: '图片存储暂不可用' })
+      else res.destroy()
+    })
+    stream.pipe(res)
+    return
+  }
   if (pathname === '/api/state') return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
   if (pathname === '/api/projects') return send(res, 200, { data: await queryService.listProjects() })
   if (pathname === '/api/receiving-codes') return send(res, 200, { data: await queryService.listReceivingCodes() })
@@ -924,6 +987,176 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
 }
 
 async function routePost(pathname: string, req: IncomingMessage, res: ServerResponse) {
+  const multipartReceivingCodeImageMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/image$/)
+  if (multipartReceivingCodeImageMatch) {
+    const receivingCodeId = decodeURIComponent(multipartReceivingCodeImageMatch[1])
+    const { fields, image } = await readValidatedUpload(req, ['operator'], ['image/png', 'image/jpeg', 'image/webp'])
+    const current = await repositories.receivingCodes.getById(receivingCodeId)
+    if (!current) return send(res, 404, { error: 'RECEIVING_CODE_NOT_FOUND', message: '项目收款码不存在' })
+    const actor = uploadActor(fields, 'finance01 · 财务')
+    const updated = await fileAssetService.replaceBinding({
+      ...image,
+      purpose: 'receiving-code',
+      ownerType: 'receiving-code',
+      ownerId: receivingCodeId,
+      createdBy: actor.userId,
+      previousAssetId: current.imageAssetId
+    }, async (asset, session) => {
+      const latest = await repositories.receivingCodes.getById(receivingCodeId, session)
+      if (!latest) throw new Error('项目收款码不存在')
+      const record = { ...latest, imageAssetId: asset.id, imageName: image.fileName, updatedBy: actor.label, updatedAt: now() }
+      await repositories.receivingCodes.replace(record, session)
+      await repositories.auditLogs.insert(auditRecord({
+        actor: actor.label,
+        role: 'finance',
+        action: latest.imageAssetId ? '更换收款码图片' : '上传收款码图片',
+        target: latest.id,
+        before: { imageAssetId: latest.imageAssetId, imageName: latest.imageName },
+        after: { imageAssetId: asset.id, imageName: image.fileName }
+      }) as never, session)
+      return record
+    })
+    const localIndex = receivingCodes.findIndex(item => item.id === receivingCodeId)
+    if (localIndex >= 0) receivingCodes.splice(localIndex, 1, updated as ReceivingCode)
+    return send(res, 200, { data: presentReceivingCode(updated), message: current.imageAssetId ? '收款码图片已更换并保存' : '收款码图片已上传并保存' })
+  }
+
+  if (pathname === '/api/payments/ocr') {
+    const { fields, image } = await readValidatedUpload(
+      req,
+      ['paymentId', 'subscriptionId', 'expectedAmount', 'operator'],
+      ['image/png', 'image/jpeg', 'image/bmp']
+    )
+    const subscriptionId = fields.subscriptionId?.trim()
+    const current = subscriptionId ? await repositories.subscriptions.getById(subscriptionId) : null
+    if (!current) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    if ((current.paymentImages?.length ?? 0) >= maxPaymentImagesPerSubscription) {
+      return send(res, 429, { error: 'PAYMENT_IMAGE_LIMIT_EXCEEDED', message: `每条认购最多保留 ${maxPaymentImagesPerSubscription} 张支付截图` })
+    }
+    const actor = uploadActor(fields, `${current.userId} · 员工`)
+    const asset = await fileAssetService.uploadUnbound({
+      ...image,
+      purpose: 'payment-proof',
+      ownerType: 'subscription',
+      ownerId: current.id,
+      createdBy: actor.userId
+    })
+    let recognizedAmount = 0
+    let recognitionFailure = ''
+    try {
+      ocrQuota.take('ocr')
+      const recognized = await recognizeFinanceBill({
+        imageDataUrl: ephemeralDataUrl(image),
+        appCode: process.env.INVOICE_OCR_APPCODE ?? '',
+        endpoint: process.env.INVOICE_OCR_API_URL
+      })
+      recognizedAmount = Number(recognized.amount ?? 0)
+      if (!Number.isFinite(recognizedAmount) || recognizedAmount < 0.01) recognitionFailure = '未识别到有效交易金额'
+    } catch (error) {
+      recognitionFailure = error instanceof Error ? error.message : 'OCR 识别失败'
+    }
+
+    try {
+      const updated = await mongo.withTransaction(async session => {
+        const latest = await repositories.subscriptions.getById(current.id, session)
+        if (!latest) throw new Error('认购记录不存在')
+        if ((latest.paymentImages?.length ?? 0) >= maxPaymentImagesPerSubscription) throw new Error('支付截图数量已达上限')
+        const uploadedAt = now()
+        const imageRecord = {
+          id: `PAYIMG-${Date.now()}-${randomUUID()}`,
+          assetId: asset.id,
+          paymentImageName: image.fileName,
+          recognizedAmount: recognitionFailure ? 0 : Number(recognizedAmount.toFixed(2)),
+          uploadedAt,
+          status: recognitionFailure ? '识别失败' as const : '已识别' as const
+        }
+        const paymentImages = [...(latest.paymentImages ?? []), imageRecord]
+        const recognizedTotal = Number(paymentImages.reduce((sum, item) => sum + (item.status === '已识别' ? item.recognizedAmount : 0), 0).toFixed(2))
+        const expectedAmount = Number(latest.amount)
+        const pay = recognitionFailure ? '待复核' : recognizedTotal === expectedAmount ? '已缴款' : recognizedTotal < expectedAmount ? '部分缴款' : '待复核'
+        const record = {
+          ...latest,
+          paymentImages,
+          paymentImageName: image.fileName,
+          paymentUploadedAt: uploadedAt,
+          paymentSuccessAt: recognitionFailure ? latest.paymentSuccessAt : uploadedAt,
+          recognizedPaidAmount: recognizedTotal,
+          pay,
+          action: recognitionFailure || recognizedTotal < expectedAmount ? '重新上传截图' : '查看支付'
+        }
+        await repositories.subscriptions.replace(record, session)
+        await repositories.auditLogs.insert(auditRecord({
+          actor: actor.label,
+          role: actor.userId === 'system' ? 'system' : 'employee',
+          action: '上传支付截图并执行 OCR',
+          target: fields.paymentId || current.id,
+          before: { pay: latest.pay, imageCount: latest.paymentImages?.length ?? 0 },
+          after: { pay, imageCount: paymentImages.length, recognizedTotal, assetId: asset.id }
+        }) as never, session)
+        return record
+      })
+      const localIndex = subscriptions.findIndex(item => item.id === updated.id)
+      if (localIndex >= 0) subscriptions.splice(localIndex, 1, updated as Subscription)
+      const remainingAmount = Math.max(0, Number((updated.amount - Number(updated.recognizedPaidAmount ?? 0)).toFixed(2)))
+      return send(res, 200, {
+        data: {
+          status: updated.pay,
+          ocr_status: recognitionFailure ? '待财务复核' : '已识别',
+          recognized_total: updated.recognizedPaidAmount ?? 0,
+          remaining_amount: remainingAmount,
+          image_count: updated.paymentImages?.length ?? 0,
+          reason: recognitionFailure || undefined
+        },
+        message: recognitionFailure ? '支付截图已保存，等待财务审核' : '支付截图 OCR 识别完成，等待财务审核'
+      })
+    } catch (error) {
+      await fileAssetService.deleteBinding(asset.id, async () => undefined).catch(() => undefined)
+      throw error
+    }
+  }
+
+  if (pathname === '/api/invoices/ocr') {
+    const { fields, image } = await readValidatedUpload(req, ['projectId', 'fileName', 'operator'], ['image/png', 'image/jpeg', 'image/bmp'])
+    const projectId = fields.projectId?.trim()
+    const project = projectId ? await repositories.projects.getById(projectId) : null
+    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    if (!['已满额', '已截止', '部分已结算'].includes(project.status)) {
+      return send(res, 409, { error: 'PROJECT_NOT_SETTLEMENT_ELIGIBLE', message: '项目当前状态不允许发起结算识别' })
+    }
+    const actor = uploadActor(fields, 'finance01 · 财务')
+    const asset = await fileAssetService.uploadUnbound({
+      ...image,
+      purpose: 'settlement-invoice',
+      ownerType: 'project',
+      ownerId: project.id,
+      createdBy: actor.userId
+    })
+    try {
+      ocrQuota.take('ocr')
+      const data = await recognizeFinanceBill({
+        imageDataUrl: ephemeralDataUrl(image),
+        appCode: process.env.INVOICE_OCR_APPCODE ?? '',
+        endpoint: process.env.INVOICE_OCR_API_URL
+      })
+      const proof = ocrProofStore.create({
+        projectId: project.id,
+        assetId: asset.id,
+        imageDigest: image.sha256,
+        fileName: image.fileName,
+        result: data
+      })
+      return send(res, 200, {
+        data: { ...data, assetId: asset.id, fileName: image.fileName, settlementProofId: proof.proofId, proofExpiresAt: proof.expiresAt },
+        message: '发票 OCR 识别完成'
+      })
+    } catch (error) {
+      await fileAssetService.deleteBinding(asset.id, async () => undefined).catch(() => undefined)
+      const message = error instanceof Error ? error.message : '发票识别失败'
+      const status = error instanceof ResourceLimitError ? 429 : message.startsWith('未配置') ? 503 : 502
+      return send(res, status, { error: 'INVOICE_OCR_FAILED', message })
+    }
+  }
+
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
 
   if (pathname === '/api/invoices/ocr') {
@@ -1013,12 +1246,6 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (receivingCodes.length >= maxReceivingCodes) {
       return send(res, 429, { error: 'RECEIVING_CODE_LIMIT_EXCEEDED', message: '收款码数量已达上限' })
     }
-    let image: { imageUrl: string; imageName: string } | null = null
-    if (body.imageUrl || body.imageName) {
-      image = validateImagePayload(body, res, 'RECEIVING_CODE')
-      if (!image) return
-      if (!ensureImageStorageCapacity(res, image.imageUrl)) return
-    }
     const record: ReceivingCode = {
       id: `RCV-${Date.now()}`,
       subject,
@@ -1026,11 +1253,10 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       codeName,
       status: '启用',
       updatedBy: String(body.operator ?? 'finance01 · 财务'),
-      updatedAt: now(),
-      ...(image ?? {})
+      updatedAt: now()
     }
     receivingCodes.unshift(record)
-    await pushAudit({ actor: record.updatedBy, role: 'finance', action: '创建收款码', target: record.id, before: null, after: { ...record, imageUrl: image ? '[已保存图片]' : undefined } })
+    await pushAudit({ actor: record.updatedBy, role: 'finance', action: '创建收款码', target: record.id, before: null, after: record })
     return send(res, 201, { data: record, message: '收款码已创建并保存' })
   }
 
@@ -1310,9 +1536,15 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         message: '该规则已被有真实认购记录的项目使用，不支持删除。'
       })
     }
+    await mongo.withTransaction(async session => {
+      await repositories.rules.deleteById(rule.id, session)
+      await repositories.auditLogs.insert(auditRecord({
+        actor: typeof body.operator === 'string' ? body.operator : 'admin01 · 管理员',
+        role: 'admin', action: '删除认购规则', target: rule.id, before: rule, after: null
+      }) as never, session)
+      return true
+    })
     rules.splice(index, 1)
-    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '删除认购规则', target: rule.id, before: rule, after: null })
-    await persistState()
     return send(res, 200, { message: '认购规则已删除' })
   }
 
@@ -1432,7 +1664,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/payments/images/delete') {
-    const subscription = subscriptions.find(item => item.id === body.subscriptionId)
+    const subscription = await repositories.subscriptions.getById(String(body.subscriptionId ?? ''))
     if (!subscription) {
       return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
@@ -1445,49 +1677,43 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (image.status !== '识别失败') {
       return send(res, 409, { error: 'PAYMENT_IMAGE_DELETE_FORBIDDEN', message: '仅识别失败的支付截图支持删除' })
     }
-
-    const before = { ...image }
-    subscription.paymentImages!.splice(imageIndex, 1)
-    const remainingImages = subscription.paymentImages!
-    const latestImage = remainingImages.at(-1)
-    const recognizedTotal = Number(remainingImages
-      .filter(item => item.status === '已识别')
-      .reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
-    const hasFailedImage = remainingImages.some(item => item.status === '识别失败')
-    subscription.paymentImageUrl = latestImage?.paymentImageUrl
-    subscription.paymentImageName = latestImage?.paymentImageName
-    subscription.paymentUploadedAt = latestImage?.uploadedAt
-    subscription.paymentSuccessAt = [...remainingImages].reverse().find(item => item.status === '已识别')?.uploadedAt
-    subscription.recognizedPaidAmount = recognizedTotal
-    subscription.pay = hasFailedImage
-      ? '待复核'
-      : recognizedTotal === 0
-        ? '未缴款'
-        : recognizedTotal === subscription.amount
-          ? '待复核'
-          : recognizedTotal < subscription.amount
-            ? '部分缴款'
-            : '待复核'
-    subscription.action = subscription.pay === '未缴款'
-      ? '去支付'
-      : recognizedTotal === subscription.amount && !hasFailedImage
-        ? '查看支付'
-        : '重新上传截图'
-    await pushAudit({
-      actor: body.operator ?? 'employee01 · 员工',
-      role: 'employee',
-      action: '删除识别失败支付截图',
-      target: image.id,
-      before,
-      after: null
+    const updated = await fileAssetService.deleteBinding(image.assetId, async (_asset, session) => {
+      const latest = await repositories.subscriptions.getById(subscription.id, session)
+      if (!latest) throw new Error('认购记录不存在')
+      const remainingImages = (latest.paymentImages ?? []).filter(item => item.id !== imageId)
+      const latestImage = remainingImages.at(-1)
+      const recognizedTotal = Number(remainingImages.filter(item => item.status === '已识别').reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
+      const hasFailedImage = remainingImages.some(item => item.status === '识别失败')
+      const pay = hasFailedImage ? '待复核' : recognizedTotal === 0 ? '未缴款' : recognizedTotal < latest.amount ? '部分缴款' : '待复核'
+      const record = {
+        ...latest,
+        paymentImages: remainingImages,
+        paymentImageName: latestImage?.paymentImageName,
+        paymentUploadedAt: latestImage?.uploadedAt,
+        paymentSuccessAt: [...remainingImages].reverse().find(item => item.status === '已识别')?.uploadedAt,
+        recognizedPaidAmount: recognizedTotal,
+        pay,
+        action: pay === '未缴款' ? '去支付' : recognizedTotal === latest.amount && !hasFailedImage ? '查看支付' : '重新上传截图'
+      }
+      await repositories.subscriptions.replace(record, session)
+      await repositories.auditLogs.insert(auditRecord({
+        actor: typeof body.operator === 'string' ? body.operator : 'employee01 · 员工',
+        role: 'employee',
+        action: '删除识别失败支付截图',
+        target: image.id,
+        before: { assetId: image.assetId, status: image.status },
+        after: null
+      }) as never, session)
+      return record
     })
-    await persistState()
+    const localIndex = subscriptions.findIndex(item => item.id === updated.id)
+    if (localIndex >= 0) subscriptions.splice(localIndex, 1, updated as Subscription)
     return send(res, 200, {
       data: {
-        status: subscription.pay,
-        recognized_total: recognizedTotal,
-        remaining_amount: Math.max(0, Number((subscription.amount - recognizedTotal).toFixed(2))),
-        image_count: remainingImages.length
+        status: updated.pay,
+        recognized_total: updated.recognizedPaidAmount ?? 0,
+        remaining_amount: Math.max(0, Number((updated.amount - Number(updated.recognizedPaidAmount ?? 0)).toFixed(2))),
+        image_count: updated.paymentImages?.length ?? 0
       },
       message: '识别失败的支付截图已删除'
     })
@@ -1590,62 +1816,74 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   const settlementConfirmMatch = pathname.match(/^\/api\/projects\/([^/]+)\/settlements\/confirm$/)
   if (settlementConfirmMatch) {
     const projectId = decodeURIComponent(settlementConfirmMatch[1])
-    const project = projects.find(item => item.id === projectId)
+    const project = await repositories.projects.getById(projectId) as Project | null
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
     const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : ''
-    const image = validateImagePayload({ imageUrl: body.imageUrl, imageName: body.fileName }, res, 'SETTLEMENT_INVOICE')
-    if (!image) return
     const duplicateInvoice = project.settlementInvoices?.find(invoice => invoice.id === idempotencyKey)
     if (!duplicateInvoice && (project.settlementInvoices?.length ?? 0) >= maxSettlementInvoicesPerProject) {
       return send(res, 429, { error: 'SETTLEMENT_INVOICE_LIMIT_EXCEEDED', message: `每个项目最多保留 ${maxSettlementInvoicesPerProject} 条结算凭证` })
     }
-    if (!duplicateInvoice && !ensureImageStorageCapacity(res, image.imageUrl)) return
     const proofId = typeof body.settlementProofId === 'string' ? body.settlementProofId.trim() : ''
+    const assetId = duplicateInvoice?.assetId ?? (typeof body.assetId === 'string' ? body.assetId.trim() : '')
+    const asset = await fileAssetService.getReadyAsset(assetId)
+    if (!asset || asset.purpose !== 'settlement-invoice' || asset.ownerType !== 'project' || asset.ownerId !== projectId) {
+      return send(res, 404, { error: 'FILE_NOT_FOUND', message: '结算图片资产不存在或不属于当前项目' })
+    }
     const before = {
       status: project.status,
       settledAmount: Number(project.settledAmount ?? 0),
       remainingAmount: Number((project.salesAmount - Number(project.settledAmount ?? 0)).toFixed(2))
     }
     try {
-      const trustedProof = duplicateInvoice ? null : ocrProofStore.verify({
+      const trustedProof = duplicateInvoice ? null : ocrProofStore.consume({
         proofId,
         projectId,
-        imageDataUrl: image.imageUrl,
-        fileName: image.imageName
+        assetId: asset.id,
+        imageDigest: asset.sha256,
+        fileName: asset.originalName
       })
       const trustedResult = trustedProof?.result
       const trustedField = (key: string) => trustedResult?.fields.find(field => field.key === key)?.value ?? '未识别'
       const result = confirmProjectSettlement(project, {
         idempotencyKey,
         amount: duplicateInvoice?.amount ?? Number(trustedResult?.amount),
-        fileName: image.imageName,
-        imageUrl: image.imageUrl,
+        fileName: asset.originalName,
+        assetId: asset.id,
         transactionDate: duplicateInvoice?.transactionDate ?? trustedField('transactionDate'),
         payer: duplicateInvoice?.payer ?? trustedField('payer'),
         payee: duplicateInvoice?.payee ?? trustedField('payee'),
         operator: typeof body.operator === 'string' ? body.operator.trim() : 'finance01 · 财务'
       }, now())
-      if (!result.duplicate) ocrProofStore.remove(proofId)
-      await pushAudit({
-        actor: typeof body.operator === 'string' ? body.operator : 'finance01 · 财务',
-        role: 'finance',
-        action: result.duplicate ? '重复确认结算（幂等命中）' : project.status === '已完结' ? '确认结算 · 项目完结' : '确认结算 · 部分结算',
-        target: project.id,
-        before,
-        after: {
-          status: project.status,
-          settledAmount: result.settledAmount,
-          remainingAmount: result.remainingAmount,
-          invoiceId: result.invoice.id,
-          invoiceAmount: result.invoice.amount
-        }
+      await mongo.withTransaction(async session => {
+        await repositories.projects.replace(project as never, session)
+        await repositories.auditLogs.insert(auditRecord({
+          actor: typeof body.operator === 'string' ? body.operator : 'finance01 · 财务',
+          role: 'finance',
+          action: result.duplicate ? '重复确认结算（幂等命中）' : project.status === '已完结' ? '确认结算 · 项目完结' : '确认结算 · 部分结算',
+          target: project.id,
+          before,
+          after: {
+            status: project.status,
+            settledAmount: result.settledAmount,
+            remainingAmount: result.remainingAmount,
+            invoiceId: result.invoice.id,
+            invoiceAmount: result.invoice.amount,
+            assetId: asset.id
+          }
+        }) as never, session)
+        return true
       })
+      const localIndex = projects.findIndex(item => item.id === project.id)
+      if (localIndex >= 0) projects.splice(localIndex, 1, project)
       return send(res, 200, {
         data: { project, ...result },
         message: project.status === '已完结' ? '项目结算已全部完成' : '本次结算已确认，可继续上传剩余结算凭证'
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : '确认结算失败'
+      const baseMessage = error instanceof Error ? error.message : '确认结算失败'
+      const message = !duplicateInvoice && !baseMessage.includes('OCR 凭证')
+        ? `${baseMessage}；OCR 凭证已消耗，请重新识别后再确认`
+        : baseMessage
       const status = message.includes('超过') || message.includes('已完结') || message.includes('当前状态') || message.includes('OCR 凭证') ? 409 : 400
       return send(res, status, { error: 'PROJECT_SETTLEMENT_CONFIRM_FAILED', message })
     }
@@ -1703,12 +1941,17 @@ const server = createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, null)
   const url = new URL(req.url, 'http://127.0.0.1:4100')
   try {
-    if (req.method === 'GET') return await routeGet(url, res)
+    if (req.method === 'GET') return await routeGet(url, req, res)
     if (req.method === 'POST') return await routePost(url.pathname, req, res)
     return send(res, 405, { error: 'METHOD_NOT_ALLOWED' })
   } catch (error) {
     if (error instanceof RequestBodyError) return send(res, error.status, { error: error.code, message: error.message })
-    return send(res, 500, { error: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : '未知错误' })
+    if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+    const message = error instanceof Error ? error.message : ''
+    if (/multipart|图片|文件名|文件内容|扩展名|表单字段|只能上传|必须上传/.test(message)) {
+      return send(res, message.includes('超过大小') ? 413 : 400, { error: 'UPLOAD_INVALID', message })
+    }
+    return send(res, 500, { error: 'INTERNAL_ERROR', message: '服务处理失败，请稍后重试' })
   }
 })
 
@@ -1718,3 +1961,11 @@ server.headersTimeout = 10_000
 server.listen(port, '127.0.0.1', () => {
   console.log(`subscription-api listening on http://127.0.0.1:${port}`)
 })
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    server.close(() => {
+      void mongo.close().finally(() => process.exit(0))
+    })
+  })
+}

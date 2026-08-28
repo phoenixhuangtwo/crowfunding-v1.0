@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { AppRepositories, EntityRepository } from '../server/persistence/repositories.ts'
+import { entitiesDiffer, type AppRepositories, type EntityRepository } from '../server/persistence/repositories.ts'
 import { QueryService, presentReceivingCode } from '../server/services/query-service.ts'
 
 function emptyRepository<T extends { id: string }>(): EntityRepository<T> {
@@ -49,4 +49,9 @@ test('receiving-code file URLs are derived from internal asset IDs only', () => 
   })
   assert.equal(presented.imageUrl, '/api/files/asset-1/content')
   assert.equal(presented.imageAssetId, 'asset-1')
+})
+
+test('unchanged MongoDB documents are not selected for replacement', () => {
+  assert.equal(entitiesDiffer({ id: 'PRJ-1', status: '未开放' }, { id: 'PRJ-1', status: '未开放' }), false)
+  assert.equal(entitiesDiffer({ id: 'PRJ-1', status: '未开放' }, { id: 'PRJ-1', status: '已满额' }), true)
 })

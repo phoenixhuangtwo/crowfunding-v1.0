@@ -6,7 +6,7 @@ export type PutObjectInput = { key: string; body: Buffer; contentType: string; s
 export interface ObjectStorage {
   putObject(input: PutObjectInput): Promise<void>
   headObject(key: string): Promise<{ sizeBytes: number } | null>
-  getObjectStream(key: string): NodeJS.ReadableStream
+  getObjectStream(key: string): Readable
   deleteObject(key: string): Promise<void>
   checkHealth(): Promise<'up' | 'degraded'>
 }

@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { InvoiceOcrResult } from './invoice-ocr.ts'
 
 type OcrProofRecord = {
   proofId: string
   projectId: string
+  assetId: string
   imageDigest: string
   fileName: string
   result: InvoiceOcrResult
@@ -21,12 +22,9 @@ type OcrProofStoreOptions = {
 type OcrProofIdentity = {
   proofId: string
   projectId: string
-  imageDataUrl: string
+  assetId: string
+  imageDigest: string
   fileName: string
-}
-
-function imageDigest(imageDataUrl: string) {
-  return createHash('sha256').update(imageDataUrl).digest('hex')
 }
 
 export class OcrProofStore {
@@ -52,9 +50,10 @@ export class OcrProofStore {
     }
   }
 
-  create(input: { projectId: string; imageDataUrl: string; fileName: string; result: InvoiceOcrResult }) {
+  create(input: { projectId: string; assetId: string; imageDigest: string; fileName: string; result: InvoiceOcrResult }) {
     this.removeExpired()
     if (!input.projectId.trim()) throw new Error('OCR 凭证缺少项目编号')
+    if (!input.assetId.trim() || !/^[a-f0-9]{64}$/i.test(input.imageDigest)) throw new Error('OCR 凭证缺少有效图片资产')
     if (!Number.isFinite(input.result.amount) || Number(input.result.amount) < 0.01) {
       throw new Error('OCR 未识别到可结算的交易金额')
     }
@@ -67,7 +66,8 @@ export class OcrProofStore {
     this.proofs.set(proofId, {
       proofId,
       projectId: input.projectId,
-      imageDigest: imageDigest(input.imageDataUrl),
+      assetId: input.assetId,
+      imageDigest: input.imageDigest,
       fileName: input.fileName,
       result: structuredClone(input.result),
       expiresAt
@@ -80,7 +80,7 @@ export class OcrProofStore {
     const proof = this.proofs.get(input.proofId)
     if (!proof) throw new Error('OCR 凭证不存在或已使用，请重新识别')
     if (proof.projectId !== input.projectId) throw new Error('OCR 凭证与当前项目不匹配')
-    if (proof.fileName !== input.fileName || proof.imageDigest !== imageDigest(input.imageDataUrl)) {
+    if (proof.fileName !== input.fileName || proof.assetId !== input.assetId || proof.imageDigest !== input.imageDigest) {
       throw new Error('OCR 凭证与上传图片不匹配')
     }
     return structuredClone(proof)

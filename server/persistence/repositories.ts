@@ -30,6 +30,10 @@ export type AppRepositories = {
   fileAssets: EntityRepository<FileAsset>
 }
 
+export function entitiesDiffer(left: unknown, right: unknown) {
+  return JSON.stringify(left) !== JSON.stringify(right)
+}
+
 function withoutMongoId<T>(document: Record<string, unknown>): T {
   const { _id: _unused, ...entity } = document
   return entity as T

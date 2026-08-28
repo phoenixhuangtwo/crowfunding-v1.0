@@ -40,7 +40,8 @@ test('OCR proof binds project, file and image digest and can only be consumed on
   })
   const created = store.create({
     projectId: 'project-1',
-    imageDataUrl: 'data:image/png;base64,QUJD',
+    assetId: 'asset-1',
+    imageDigest: 'a'.repeat(64),
     fileName: 'invoice.png',
     result: {
       amount: 520,
@@ -53,21 +54,24 @@ test('OCR proof binds project, file and image digest and can only be consumed on
   assert.throws(() => store.consume({
     proofId: created.proofId,
     projectId: 'project-2',
-    imageDataUrl: 'data:image/png;base64,QUJD',
+    assetId: 'asset-1',
+    imageDigest: 'a'.repeat(64),
     fileName: 'invoice.png'
   }), /OCR 凭证与当前项目不匹配/)
 
   const trusted = store.consume({
     proofId: created.proofId,
     projectId: 'project-1',
-    imageDataUrl: 'data:image/png;base64,QUJD',
+    assetId: 'asset-1',
+    imageDigest: 'a'.repeat(64),
     fileName: 'invoice.png'
   })
   assert.equal(trusted.result.amount, 520)
   assert.throws(() => store.consume({
     proofId: created.proofId,
     projectId: 'project-1',
-    imageDataUrl: 'data:image/png;base64,QUJD',
+    assetId: 'asset-1',
+    imageDigest: 'a'.repeat(64),
     fileName: 'invoice.png'
   }), /OCR 凭证不存在或已使用/)
 
@@ -78,20 +82,23 @@ test('OCR proof rejects a modified image without consuming the legitimate proof'
   const store = new OcrProofStore({ idFactory: () => 'proof-2' })
   const created = store.create({
     projectId: 'project-1',
-    imageDataUrl: 'data:image/png;base64,QUJD',
+    assetId: 'asset-1',
+    imageDigest: 'a'.repeat(64),
     fileName: 'invoice.png',
     result: { amount: 100, fields: [] }
   })
   assert.throws(() => store.consume({
     proofId: created.proofId,
     projectId: 'project-1',
-    imageDataUrl: 'data:image/png;base64,REVG',
+    assetId: 'asset-2',
+    imageDigest: 'b'.repeat(64),
     fileName: 'invoice.png'
   }), /OCR 凭证与上传图片不匹配/)
   assert.equal(store.consume({
     proofId: created.proofId,
     projectId: 'project-1',
-    imageDataUrl: 'data:image/png;base64,QUJD',
+    assetId: 'asset-1',
+    imageDigest: 'a'.repeat(64),
     fileName: 'invoice.png'
   }).result.amount, 100)
 })

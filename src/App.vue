@@ -69,6 +69,7 @@ type Project = {
     id: string
     amount: number
     fileName: string
+    assetId: string
     imageUrl?: string
     transactionDate: string
     payer: string
@@ -82,7 +83,8 @@ type Project = {
 }
 type PaymentImage = {
   id: string
-  paymentImageUrl: string
+  assetId: string
+  paymentImageUrl?: string
   paymentImageName: string
   recognizedAmount: number
   uploadedAt: string
@@ -93,6 +95,8 @@ type InvoiceOcrResult = {
   taskNo?: string
   settlementProofId?: string
   proofExpiresAt?: number
+  assetId?: string
+  fileName?: string
   fields: Array<{ key: string; label: string; value: string }>
 }
 type Subscription = {
@@ -164,6 +168,7 @@ type ReceivingCode = {
   updatedBy: string
   updatedAt: string
   disabledReason?: string
+  imageAssetId?: string
   imageUrl?: string
   imageName?: string
 }
@@ -259,6 +264,7 @@ const lastOcrResult = ref<{ recognizedTotal: number; remainingAmount: number; im
 const invoiceOcrState = ref<'none' | 'loading' | 'ok' | 'fail'>('none')
 const invoiceImageUrl = ref('')
 const invoiceImageName = ref('')
+const invoiceImageFile = ref<File>()
 const invoiceOcrResult = ref<InvoiceOcrResult>()
 const invoiceOcrError = ref('')
 const invoicePreviewVisible = ref(false)
@@ -295,11 +301,13 @@ const receivingCodeForm = reactive({
 })
 const receivingCodeImageUrl = ref('')
 const receivingCodeImageName = ref('')
+const receivingCodeImageFile = ref<File>()
 const receivingCodeUploadRef = ref<UploadInstance>()
 const receivingCodeImageUploadRef = ref<UploadInstance>()
 const editingReceivingCodeId = ref('')
 const editingReceivingCodeImageUrl = ref('')
 const editingReceivingCodeImageName = ref('')
+const editingReceivingCodeImageFile = ref<File>()
 const activeAgreementName = ref('用户协议')
 const projectFilters = reactive({ status: '全部', subscriptionStatus: '全部', subscriptionCount: undefined as number | undefined, keyword: '' })
 const mineFilters = reactive({
@@ -608,17 +616,7 @@ const activePaymentAmount = computed(() => activePaymentSubscription.value?.amou
 const activePaymentImages = computed<PaymentImage[]>(() => {
   const subscription = activePaymentSubscription.value
   if (!subscription) return []
-  if (subscription.paymentImages?.length) return subscription.paymentImages
-  return subscription.paymentImageUrl && subscription.paymentImageName
-    ? [{
-        id: `PAYIMG-LEGACY-${subscription.id}`,
-        paymentImageUrl: subscription.paymentImageUrl,
-        paymentImageName: subscription.paymentImageName,
-        recognizedAmount: subscription.recognizedPaidAmount ?? (subscription.pay === '已缴款' ? subscription.amount : 0),
-        uploadedAt: subscription.paymentUploadedAt ?? '-',
-        status: '已识别'
-      }]
-    : []
+  return subscription.paymentImages ?? []
 })
 const activePaymentRecognizedAmount = computed(() => Number((activePaymentSubscription.value?.recognizedPaidAmount
   ?? activePaymentImages.value.filter(image => image.status === '已识别').reduce((sum, image) => sum + image.recognizedAmount, 0)).toFixed(2)))
@@ -651,18 +649,7 @@ const activeReviewSubscription = computed(() => {
   return paymentReviewSubscriptions.value.find(item => item.id === activePaymentSubscriptionId.value)
     ?? paymentReviewSubscriptions.value[0]
 })
-const activeReviewPaymentImages = computed(() => activeReviewSubscription.value?.paymentImages?.length
-  ? activeReviewSubscription.value.paymentImages
-  : activeReviewSubscription.value?.paymentImageUrl && activeReviewSubscription.value.paymentImageName
-    ? [{
-        id: `PAYIMG-LEGACY-${activeReviewSubscription.value.id}`,
-        paymentImageUrl: activeReviewSubscription.value.paymentImageUrl,
-        paymentImageName: activeReviewSubscription.value.paymentImageName,
-        recognizedAmount: activeReviewSubscription.value.recognizedPaidAmount ?? activeReviewSubscription.value.amount,
-        uploadedAt: activeReviewSubscription.value.paymentUploadedAt ?? '-',
-        status: '已识别' as const
-      }]
-    : [])
+const activeReviewPaymentImages = computed(() => activeReviewSubscription.value?.paymentImages ?? [])
 const activeReviewProject = computed(() => {
   const subscription = activeReviewSubscription.value
   return subscription
@@ -846,16 +833,44 @@ const filteredAuditRows = computed(() => {
 })
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers = new Headers(options?.headers)
+  if (!(options?.body instanceof FormData)) headers.set('Content-Type', 'application/json')
+  headers.set('X-User-Id', roleMeta.value.account)
+  headers.set('X-User-Role', currentRole.value)
   const response = await fetch(path, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options?.headers ?? {})
-    }
+    headers
   })
   const payload = await response.json()
   if (!response.ok) throw new Error(payload.message ?? payload.error ?? '接口请求失败')
   return payload
+}
+
+const privateImageCache = new Map<string, string>()
+
+async function privateImageUrl(assetId?: string) {
+  if (!assetId) return ''
+  const cached = privateImageCache.get(assetId)
+  if (cached) return cached
+  const response = await fetch(`/api/files/${encodeURIComponent(assetId)}/content`, {
+    headers: { 'X-User-Id': roleMeta.value.account, 'X-User-Role': currentRole.value }
+  })
+  if (!response.ok) return ''
+  const objectUrl = URL.createObjectURL(await response.blob())
+  privateImageCache.set(assetId, objectUrl)
+  return objectUrl
+}
+
+async function hydratePrivateImages(projectRows: Project[], subscriptionRows: Subscription[], codeRows: ReceivingCode[]) {
+  await Promise.all([
+    ...codeRows.map(async code => { code.imageUrl = await privateImageUrl(code.imageAssetId) || undefined }),
+    ...subscriptionRows.flatMap(subscription => (subscription.paymentImages ?? []).map(async image => {
+      image.paymentImageUrl = await privateImageUrl(image.assetId) || undefined
+    })),
+    ...projectRows.flatMap(project => (project.settlementInvoices ?? []).map(async invoice => {
+      invoice.imageUrl = await privateImageUrl(invoice.assetId) || undefined
+    }))
+  ])
 }
 
 function replaceRows<T>(target: T[], rows: T[]) {
@@ -871,6 +886,7 @@ async function loadData() {
       api<{ data: SubscriptionRule[] }>('/api/rules'),
       api<{ data: ReceivingCode[] }>('/api/receiving-codes')
     ])
+    await hydratePrivateImages(projectPayload.data, subscriptionPayload.data, receivingCodePayload.data)
     replaceRows(projects, projectPayload.data)
     replaceRows(subscriptions, subscriptionPayload.data)
     replaceRows(auditRows, auditPayload.data)
@@ -1504,6 +1520,7 @@ function openReceivingCodeCreate() {
   receivingCodeForm.codeName = '支付宝收款码'
   receivingCodeImageUrl.value = ''
   receivingCodeImageName.value = ''
+  receivingCodeImageFile.value = undefined
   receivingCodeUploadRef.value?.clearFiles()
   receivingCodeCreateVisible.value = true
 }
@@ -1515,6 +1532,7 @@ function handleReceivingCodeImageChange(file: UploadFile) {
     return
   }
   receivingCodeImageName.value = file.raw.name
+  receivingCodeImageFile.value = file.raw
   const reader = new FileReader()
   reader.onload = () => {
     receivingCodeImageUrl.value = typeof reader.result === 'string' ? reader.result : ''
@@ -1526,6 +1544,7 @@ function handleReceivingCodeImageChange(file: UploadFile) {
 function removeReceivingCodeImage() {
   receivingCodeImageUrl.value = ''
   receivingCodeImageName.value = ''
+  receivingCodeImageFile.value = undefined
   receivingCodeUploadRef.value?.clearFiles()
 }
 
@@ -1545,11 +1564,15 @@ async function createReceivingCode() {
         subject: receivingCodeForm.subject.trim(),
         accountNote: receivingCodeForm.accountNote.trim(),
         codeName: receivingCodeForm.codeName.trim(),
-        imageUrl: receivingCodeImageUrl.value || undefined,
-        imageName: receivingCodeImageName.value || undefined,
         operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
       })
     })
+    if (receivingCodeImageFile.value) {
+      const form = new FormData()
+      form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
+      form.set('image', receivingCodeImageFile.value, receivingCodeImageFile.value.name)
+      await api(`/api/receiving-codes/${encodeURIComponent(payload.data.id)}/image`, { method: 'POST', body: form })
+    }
     await loadData()
     receivingCodeCreateVisible.value = false
     ElMessage.success(payload.message)
@@ -1562,6 +1585,7 @@ function openReceivingCodeImage(row: ReceivingCode) {
   editingReceivingCodeId.value = row.id
   editingReceivingCodeImageUrl.value = ''
   editingReceivingCodeImageName.value = ''
+  editingReceivingCodeImageFile.value = undefined
   receivingCodeImageUploadRef.value?.clearFiles()
   receivingCodeImageVisible.value = true
 }
@@ -1573,6 +1597,7 @@ function handleExistingReceivingCodeImageChange(file: UploadFile) {
     return
   }
   editingReceivingCodeImageName.value = file.raw.name
+  editingReceivingCodeImageFile.value = file.raw
   const reader = new FileReader()
   reader.onload = () => {
     editingReceivingCodeImageUrl.value = typeof reader.result === 'string' ? reader.result : ''
@@ -1582,19 +1607,15 @@ function handleExistingReceivingCodeImageChange(file: UploadFile) {
 }
 
 async function saveReceivingCodeImage() {
-  if (!editingReceivingCodeId.value || !editingReceivingCodeImageUrl.value || !editingReceivingCodeImageName.value) {
+  if (!editingReceivingCodeId.value || !editingReceivingCodeImageFile.value) {
     ElMessage.warning('请先选择真实收款码图片')
     return
   }
   try {
-    const payload = await api<{ data: ReceivingCode; message: string }>(`/api/receiving-codes/${editingReceivingCodeId.value}/image`, {
-      method: 'POST',
-      body: JSON.stringify({
-        imageUrl: editingReceivingCodeImageUrl.value,
-        imageName: editingReceivingCodeImageName.value,
-        operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
-      })
-    })
+    const form = new FormData()
+    form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
+    form.set('image', editingReceivingCodeImageFile.value, editingReceivingCodeImageFile.value.name)
+    const payload = await api<{ data: ReceivingCode; message: string }>(`/api/receiving-codes/${editingReceivingCodeId.value}/image`, { method: 'POST', body: form })
     await loadData()
     receivingCodeImageVisible.value = false
     ElMessage.success(payload.message)
@@ -1664,18 +1685,16 @@ async function confirmSubscribe() {
   }
 }
 
-async function submitPaymentImage(paymentImage: { url: string; name: string }) {
+async function submitPaymentImage(paymentImage: File) {
   ocrState.value = 'loading'
   try {
-    const payload = await api<{ data: { status: string; ocr_status: string; recognized_total: number; remaining_amount: number; image_count: number; reason?: string } }>('/api/payments/ocr', {
-      method: 'POST',
-      body: JSON.stringify({
-        paymentId: 'PAY-20260705-0092',
-        subscriptionId: activePaymentSubscription.value?.id,
-        paymentImageUrl: paymentImage.url,
-        paymentImageName: paymentImage.name
-      })
-    })
+    const form = new FormData()
+    form.set('paymentId', 'PAY-20260705-0092')
+    form.set('subscriptionId', activePaymentSubscription.value?.id ?? '')
+    form.set('expectedAmount', String(activePaymentAmount.value))
+    form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
+    form.set('image', paymentImage, paymentImage.name)
+    const payload = await api<{ data: { status: string; ocr_status: string; recognized_total: number; remaining_amount: number; image_count: number; reason?: string } }>('/api/payments/ocr', { method: 'POST', body: form })
     await loadData()
     lastOcrResult.value = {
       recognizedTotal: payload.data.recognized_total,
@@ -1694,9 +1713,7 @@ async function submitPaymentImage(paymentImage: { url: string; name: string }) {
     }
   } catch (error) {
     ocrState.value = 'fail'
-    if (paymentImage) {
-      localPaymentImageUrl.value = activePaymentSubscription.value?.paymentImageUrl || ''
-    }
+    localPaymentImageUrl.value = activePaymentSubscription.value?.paymentImageUrl || ''
     ElMessage.error(error instanceof Error ? error.message : 'OCR 校验失败')
   }
 }
@@ -1757,7 +1774,7 @@ async function handlePaymentImageChange(file: UploadFile) {
     if (typeof reader.result !== 'string') return
     localPaymentImageUrl.value = reader.result
     paymentUploadRef.value?.clearFiles()
-    await submitPaymentImage({ url: reader.result, name: raw.name })
+    await submitPaymentImage(raw)
   }
   reader.readAsDataURL(raw)
 }
@@ -1797,15 +1814,14 @@ function runInvoiceOcr(file: UploadFile) {
     }
     invoiceImageUrl.value = reader.result
     invoiceImageName.value = raw.name
+    invoiceImageFile.value = raw
     try {
-      const payload = await api<{ data: InvoiceOcrResult; message: string }>('/api/invoices/ocr', {
-        method: 'POST',
-        body: JSON.stringify({
-          projectId: selectedProject.value.id,
-          imageDataUrl: reader.result,
-          fileName: raw.name
-        })
-      })
+      const form = new FormData()
+      form.set('projectId', selectedProject.value.id)
+      form.set('fileName', raw.name)
+      form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
+      form.set('image', raw, raw.name)
+      const payload = await api<{ data: InvoiceOcrResult; message: string }>('/api/invoices/ocr', { method: 'POST', body: form })
       if (requestId !== invoiceOcrRequestId.value) return
       invoiceOcrResult.value = payload.data
       invoiceSettlementKey.value = `SETTLEMENT-${selectedProject.value.id}-${Date.now()}`
@@ -1829,6 +1845,7 @@ function resetInvoiceRecognition() {
   invoiceOcrState.value = 'none'
   invoiceImageUrl.value = ''
   invoiceImageName.value = ''
+  invoiceImageFile.value = undefined
   invoiceOcrResult.value = undefined
   invoiceOcrError.value = ''
   invoiceSettlementKey.value = ''
@@ -1847,7 +1864,7 @@ function removePendingInvoice() {
 }
 
 async function confirmSettlementInvoice() {
-  if (!currentInvoiceCanConfirm.value || currentInvoiceAmount.value === undefined || !invoiceOcrResult.value?.settlementProofId) {
+  if (!currentInvoiceCanConfirm.value || currentInvoiceAmount.value === undefined || !invoiceOcrResult.value?.settlementProofId || !invoiceOcrResult.value.assetId) {
     ElMessage.warning(currentInvoiceExceedsRemaining.value ? '交易金额超过项目剩余待结算金额' : '当前识别结果没有可确认的交易金额')
     return
   }
@@ -1861,8 +1878,7 @@ async function confirmSettlementInvoice() {
       body: JSON.stringify({
         idempotencyKey: invoiceSettlementKey.value,
         settlementProofId: invoiceOcrResult.value.settlementProofId,
-        fileName: invoiceImageName.value,
-        imageUrl: invoiceImageUrl.value,
+        assetId: invoiceOcrResult.value.assetId,
         operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
       })
     })
