@@ -12,6 +12,8 @@ API_LOG="$RUNTIME_DIR/api.log"
 WEB_LOG="$RUNTIME_DIR/web.log"
 NODE_BIN="$(command -v node || true)"
 SCREEN_BIN="$(command -v screen || true)"
+API_ENTRY="${LOCAL_API_ENTRY:-$PROJECT_DIR/server/server.ts}"
+API_PROCESS_MARKER="${LOCAL_API_MARKER:-$API_ENTRY}"
 API_SESSION="crowdfunding-api-$API_PORT"
 WEB_SESSION="crowdfunding-web-$WEB_PORT"
 
@@ -48,7 +50,7 @@ is_project_process() {
   [[ "$(process_cwd "$pid")" == "$PROJECT_DIR" ]] || return 1
   command="$(process_command "$pid")"
   if [[ "$kind" == "api" ]]; then
-    [[ "$command" == *"server/server.ts"* ]]
+    [[ "$command" == *"$API_PROCESS_MARKER"* ]]
   else
     [[ "$command" == *"vite"* ]]
   fi
@@ -106,10 +108,10 @@ start_api() {
 
   ensure_runtime
   launch_detached "$API_SESSION" "$API_LOG" env API_PORT="$API_PORT" \
-    "$NODE_BIN" --env-file-if-exists=.env.local --import tsx server/server.ts
+    "$NODE_BIN" --env-file-if-exists=.env.local --import tsx "$API_ENTRY"
   if ! wait_for_url "http://127.0.0.1:$API_PORT/api/health"; then
     echo "错误：API 启动失败，日志：$API_LOG" >&2
-    tail -n 20 "$API_LOG" >&2 || true
+    tail -n 20 "$API_LOG" | sed -E 's#mongodb(\+srv)?://[^ ]+#mongodb://[REDACTED]#g; s/(Secret(Id|Key)|COS_SECRET_(ID|KEY))[^ ]*/\1=[REDACTED]/g' >&2 || true
     return 1
   fi
   pid="$(listener_pid "$API_PORT")"

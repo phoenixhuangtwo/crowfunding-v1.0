@@ -12,7 +12,8 @@
     "test": "npm run test:unit && npm run test:smoke",
     "test:unit": "tsx --test tests/*.test.ts",
     "test:smoke": "node tests/smoke.mjs",
-    "storage:preflight": "node --env-file-if-exists=.env.local --import tsx scripts/storage-preflight.ts"
+    "storage:preflight": "node --env-file-if-exists=.env.local --import tsx scripts/storage-preflight.ts",
+    "storage:reconcile": "node --env-file-if-exists=.env.local --import tsx scripts/storage-reconcile.ts"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

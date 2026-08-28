@@ -48,7 +48,8 @@ test('local process manager completes an isolated start, restart, status, and st
     ...process.env,
     API_PORT: String(apiPort),
     WEB_PORT: String(webPort),
-    LOCAL_RUNTIME_DIR: runtimeDir
+    LOCAL_RUNTIME_DIR: runtimeDir,
+    LOCAL_API_ENTRY: join(projectDir, 'tests', 'fixtures', 'local-api-stub.mjs')
   }
 
   try {
