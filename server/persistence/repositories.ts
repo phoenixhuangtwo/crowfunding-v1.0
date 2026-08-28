@@ -30,7 +30,7 @@ export type AppRepositories = {
   fileAssets: EntityRepository<FileAsset>
 }
 
-function withoutMongoId<T>(document: T & { _id?: unknown }): T {
+function withoutMongoId<T>(document: Record<string, unknown>): T {
   const { _id: _unused, ...entity } = document
   return entity as T
 }
@@ -42,11 +42,11 @@ function createEntityRepository<T extends { id: string }>(db: Db, name: string):
       let cursor = collection.find(filter, { session })
       if (options.sort) cursor = cursor.sort(options.sort)
       if (options.limit !== undefined) cursor = cursor.limit(options.limit)
-      return (await cursor.toArray()).map(withoutMongoId)
+      return (await cursor.toArray()).map(document => withoutMongoId<T>(document as unknown as Record<string, unknown>))
     },
     async findOne(filter, session) {
       const document = await collection.findOne(filter, { session })
-      return document ? withoutMongoId(document) : null
+      return document ? withoutMongoId<T>(document as unknown as Record<string, unknown>) : null
     },
     getById(id, session) {
       return this.findOne({ id } as Filter<T>, session)
