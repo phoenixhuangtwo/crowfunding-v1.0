@@ -2,7 +2,7 @@ import type { SettlementInvoiceRecord } from '../project-settlement.ts'
 
 export type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 export type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
-export type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '待确认收款'
+export type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '待确认收款' | '已释放' | '公司待出资'
 export type Actor = { userId: string; label: string; role: Role }
 export type RequestContext = Pick<Actor, 'userId' | 'role'>
 
@@ -33,6 +33,7 @@ export type Project = {
   profitAmount?: number
   companyFixedAmount?: number
   companyTakeoverAmount?: number
+  companyBackstopShares?: number
   companyForcedTakeoverAmount?: number
   employeeSubscribedAmount?: number
   subscribed: number
@@ -51,6 +52,8 @@ export type Subscription = {
   project: string
   userId: string
   amount: number
+  shares?: number
+  companyKind?: 'front' | 'backstop'
   pay: PaymentStatus
   profit: number
   action: string
@@ -62,6 +65,8 @@ export type Subscription = {
   paymentImageName?: string
   paymentImages?: PaymentImage[]
   recognizedPaidAmount?: number
+  actualPaidAmount?: number
+  transactionNo?: string
   reviewedBy?: string
   reviewedAt?: string
   rejectReason?: string
@@ -87,6 +92,10 @@ export type SubscriptionRule = {
   projectName: string
   ruleName: string
   totalAmount: number
+  sharePrice?: number
+  totalShares?: number
+  companyFrontShares?: number
+  maxSharesPerEmployee?: number
   companyFixedAmount: number
   minAmount: number
   minParticipants: number

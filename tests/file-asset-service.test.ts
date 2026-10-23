@@ -71,6 +71,14 @@ test('business binding failure immediately compensates the exact uploaded object
   assert.equal(context.assets.records.size, 0)
 })
 
+test('deleting an unbound pending invoice removes its exact asset and stored object', async () => {
+  const context = harness()
+  const asset = await context.service.uploadUnbound(upload)
+  await context.service.deleteBinding(asset.id, async () => undefined)
+  assert.equal(context.assets.records.size, 0)
+  assert.equal(context.storage.objects.size, 0)
+})
+
 test('object keys reject traversal and encoded separators', () => {
   assert.equal(objectKey('crowfunding', 'payment-proof', 'asset-1', 'png'), 'crowfunding/payment-proof/asset-1.png')
   assert.throws(() => objectKey('../escape', 'payment-proof', 'asset-1', 'png'), /对象键参数不安全/)

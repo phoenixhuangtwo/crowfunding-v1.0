@@ -65,7 +65,8 @@ const input = {
   subject: '广州福尚云科技有限公司',
   accountNote: '财务专用',
   codeName: '支付宝收款码',
-  operator: 'employee01 · 员工',
+  operator: 'admin01 · 管理员',
+  role: 'admin' as const,
   image
 }
 
@@ -86,6 +87,7 @@ test('repeating one receiving-code creation request returns one record and one C
   assert.equal(repeated.record.id, first.record.id)
   assert.equal(context.receivingCodes.records.size, 1)
   assert.equal(context.auditLogs.records.size, 1)
+  assert.equal([...context.auditLogs.records.values()][0]?.role, 'admin')
   assert.equal(context.storage.objects.size, 1)
   assert.equal(first.record.imageAssetId, 'asset-1')
 })

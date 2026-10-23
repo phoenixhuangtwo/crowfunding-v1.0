@@ -26,6 +26,19 @@ export async function authorizeAssetRead(context: RequestContext, asset: FileAss
     if (context.role === 'finance' || subscription?.userId === context.userId) return
   }
   if (asset.purpose === 'settlement-invoice' && context.role === 'finance') return
-  if (asset.purpose === 'receiving-code' && ['employee', 'admin', 'finance'].includes(context.role)) return
+  if (asset.purpose === 'receiving-code') {
+    if (context.role === 'admin' || context.role === 'finance') return
+    if (context.role === 'employee') {
+      const linkedRules = await repos.rules.list({ receivingCodeId: asset.ownerId })
+      if (linkedRules.length > 0) {
+        const subscription = await repos.subscriptions.findOne({
+          userId: context.userId,
+          projectId: { $in: linkedRules.map(rule => rule.projectId) },
+          pay: { $ne: '已释放' }
+        })
+        if (subscription) return
+      }
+    }
+  }
   throw fileNotFound()
 }

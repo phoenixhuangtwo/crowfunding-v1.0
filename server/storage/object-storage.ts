@@ -1,3 +1,4 @@
+import { traceOperation, logEvent, logFailure } from '../observability.ts'
 import type { Readable } from 'node:stream'
 import COS from 'cos-nodejs-sdk-v5'
 
@@ -26,7 +27,7 @@ export class TencentCosObjectStorage implements ObjectStorage {
   }
 
   async putObject(input: PutObjectInput) {
-    await this.cos.putObject({
+    await traceOperation('cos', 'putObject', () => this.cos.putObject({
       Bucket: this.config.bucket,
       Region: this.config.region,
       Key: input.key,
@@ -34,12 +35,12 @@ export class TencentCosObjectStorage implements ObjectStorage {
       ContentType: input.contentType,
       ACL: 'private',
       Headers: { 'x-cos-meta-sha256': input.sha256 }
-    })
+    }))
   }
 
   async headObject(key: string) {
     try {
-      const result = await this.cos.headObject({ Bucket: this.config.bucket, Region: this.config.region, Key: key })
+      const result = await traceOperation('cos', 'headObject', () => this.cos.headObject({ Bucket: this.config.bucket, Region: this.config.region, Key: key }))
       const headers = result.headers as Record<string, string | undefined>
       const sizeBytes = Number(headers['content-length'] ?? 0)
       return { sizeBytes }
@@ -51,16 +52,23 @@ export class TencentCosObjectStorage implements ObjectStorage {
   }
 
   getObjectStream(key: string) {
-    return this.cos.getObjectStream({ Bucket: this.config.bucket, Region: this.config.region, Key: key }) as Readable
+    const start = performance.now()
+    const stream = this.cos.getObjectStream({ Bucket: this.config.bucket, Region: this.config.region, Key: key }) as Readable
+    stream.once('end', () => logEvent('dependency.complete', { dependency: 'cos', operation: 'getObjectStream', outcome: 'success', durationMs: Math.round(performance.now() - start) }))
+    stream.once('error', error => {
+      logEvent('dependency.complete', { dependency: 'cos', operation: 'getObjectStream', outcome: 'failure', durationMs: Math.round(performance.now() - start) })
+      logFailure('cos.stream.error', error)
+    })
+    return stream
   }
 
   async deleteObject(key: string) {
-    await this.cos.deleteObject({ Bucket: this.config.bucket, Region: this.config.region, Key: key })
+    await traceOperation('cos', 'deleteObject', () => this.cos.deleteObject({ Bucket: this.config.bucket, Region: this.config.region, Key: key }))
   }
 
   async checkHealth() {
     try {
-      await this.cos.headBucket({ Bucket: this.config.bucket, Region: this.config.region })
+      await traceOperation('cos', 'headBucket', () => this.cos.headBucket({ Bucket: this.config.bucket, Region: this.config.region }))
       return 'up' as const
     } catch {
       return 'degraded' as const

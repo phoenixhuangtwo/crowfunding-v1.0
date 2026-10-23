@@ -103,6 +103,15 @@ test('OCR proof rejects a modified image without consuming the legitimate proof'
   }).result.amount, 100)
 })
 
+test('an uncommitted pending-invoice deletion can restore its exact OCR proof', () => {
+  const store = new OcrProofStore({ idFactory: () => 'proof-restore' })
+  const identity = { proofId: 'proof-restore', projectId: 'project-1', assetId: 'asset-1', imageDigest: 'a'.repeat(64), fileName: 'invoice.png' }
+  store.create({ ...identity, result: { amount: 100, fields: [] } })
+  const proof = store.consume(identity)
+  store.restore(proof)
+  assert.equal(store.consume(identity).result.amount, 100)
+})
+
 test('sliding-window quota rejects calls above the configured budget and recovers after the window', () => {
   let now = 1_000
   const quota = new SlidingWindowQuota({ limit: 2, windowMs: 1_000, now: () => now })

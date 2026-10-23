@@ -1,3 +1,4 @@
+import { traceOperation } from './observability.ts'
 const defaultEndpoint = 'https://gjbsb.market.alicloudapi.com/ocrservice/advanced'
 const maxImageDataUrlLength = Math.ceil(5 * 1024 * 1024 * 4 / 3) + 128
 const supportedImageDataUrl = /^data:image\/(?:png|jpe?g|bmp);base64,([A-Za-z0-9+/]+={0,2})$/
@@ -67,7 +68,7 @@ function recognizedContent(result: Record<string, unknown>) {
     .join('\n')
 }
 
-export async function recognizeFinanceBill({
+async function recognizeFinanceBillImpl({
   imageDataUrl,
   appCode,
   endpoint = defaultEndpoint,
@@ -121,4 +122,8 @@ export async function recognizeFinanceBill({
       .find(value => typeof value === 'string') as string | undefined,
     fields: extractReceiptFields(normalizedContent)
   }
+}
+
+export function recognizeFinanceBill(options: RecognizeFinanceBillOptions) {
+  return traceOperation('ocr', 'recognizeFinanceBill', () => recognizeFinanceBillImpl(options))
 }

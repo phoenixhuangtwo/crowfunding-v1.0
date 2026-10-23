@@ -11,6 +11,7 @@ type CreationInput = {
   accountNote: string
   codeName: string
   operator: string
+  role: 'admin' | 'finance'
   image?: ValidatedImage
 }
 
@@ -66,7 +67,7 @@ export async function createReceivingCodeOnce(input: CreationInput, dependencies
       id: dependencies.auditIdFactory(),
       time: dependencies.now(),
       actor: input.operator,
-      role: 'finance',
+      role: input.role,
       action: '创建收款码',
       target: record.id,
       before: null,

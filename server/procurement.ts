@@ -1,3 +1,4 @@
+import { traceOperation } from './observability.ts'
 export type ProcurementPageResult = {
   items: Array<Record<string, unknown>>
   fetched: number
@@ -28,7 +29,7 @@ type FetchProcurementPageOptions = {
   timeoutMs?: number
 }
 
-export async function fetchProcurementPage({
+async function fetchProcurementPageImpl({
   baseUrl,
   token,
   projectName,
@@ -108,4 +109,8 @@ export async function fetchAllProcurementPages(options: FetchProcurementPageOpti
 export function formatProcurementSyncMessage(summary: ProcurementSyncSummary) {
   const reasons = summary.skippedByReason
   return `采购订单同步完成：拉取 ${summary.fetched}/${summary.total} 条，新增 ${summary.created} 条，更新 ${summary.updated} 条，跳过 ${summary.skipped} 条（缺少编号 ${reasons.missingId}、缺少名称 ${reasons.missingTitle}、成本无效 ${reasons.nonPositiveCost}、受保护且无变化 ${reasons.protectedUnchanged}）`
+}
+
+export function fetchProcurementPage(options: FetchProcurementPageOptions) {
+  return traceOperation('procurement', 'fetchProcurementPage', () => fetchProcurementPageImpl(options))
 }

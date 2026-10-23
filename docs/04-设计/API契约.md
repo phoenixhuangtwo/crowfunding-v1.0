@@ -29,10 +29,23 @@ API（Application Programming Interface，应用程序接口）当前由 `server
 | `POST` | `/api/projects/:id/interrupt` | 中断项目 | REQ-PRJ-002、REQ-RISK-001 |
 | `POST` | `/api/payments/ocr` | 支付 OCR 模拟 | REQ-PAY-002 |
 | `POST` | `/api/invoices/ocr` | 服务端代理发票 OCR；请求传入图片 Data URL 和文件名，返回归一化金额、任务号与识别字段 | REQ-SET-001 |
-| `POST` | `/api/settlements/calc` | 结算试算 | REQ-SET-001 |
+| `POST` | `/api/settlements/calc` | 财务只读利润试算；请求须明确传入四项非负整数分金额，不接受空值或演示默认值 | REQ-SET-001 |
 | `POST` | `/api/takeovers/:id/force` | 强制接管 | REQ-CAP-001 |
 
 ## 请求示例
+
+### 利润试算
+
+```json
+{
+  "customerReceiptsCents": 30301,
+  "companyTopUpsCents": 600,
+  "procurementPaymentsCents": 30000,
+  "confirmedCostsCents": 150
+}
+```
+
+返回 `profitCents: 751` 和 `previewOnly: true`。这只是按输入金额计算，不核验银行流水、不确认回款，也不生成分润或付款记录；调用方须先核实四项金额的来源。
 
 ### 创建认购
 

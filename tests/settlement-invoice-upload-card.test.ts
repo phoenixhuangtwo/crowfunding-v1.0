@@ -21,7 +21,7 @@ test('pending settlement invoice uses one card for upload, preview, replace, and
 
 test('deleting a pending invoice invalidates in-flight OCR and clears transient recognition state', async () => {
   const source = await readFile(new URL('../src/App.vue', import.meta.url), 'utf8')
-  const resetIndex = source.indexOf('function removePendingInvoice()')
+  const resetIndex = source.indexOf('async function removePendingInvoice()')
   const confirmIndex = source.indexOf('async function confirmSettlementInvoice()')
 
   assert.notEqual(resetIndex, -1, 'pending invoice delete handler should exist')
@@ -29,5 +29,6 @@ test('deleting a pending invoice invalidates in-flight OCR and clears transient 
 
   const deleteHandler = source.slice(resetIndex, confirmIndex)
   assert.match(deleteHandler, /invoiceOcrRequestId\.value \+= 1/)
+  assert.match(deleteHandler, /discardPendingInvoice\(result, projectId\)/)
   assert.match(deleteHandler, /resetInvoiceRecognition\(\)/)
 })

@@ -25,6 +25,8 @@ import { sortProjectsByCreatedAtDesc } from './project-sort'
 import { filterSubscriptionRules } from './subscription-rule-filter'
 import { settlementPaymentTime, settlementSubscriberLabel } from './settlement-detail'
 import { beginSettlement } from './settlement-flow'
+import { estimateShareProfit } from './estimated-share-profit'
+import { prepareShareRule } from '../server/share-subscription'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
 type PageKey =
@@ -59,6 +61,7 @@ type Project = {
   profitAmount?: number
   companyFixedAmount?: number
   companyTakeoverAmount?: number
+  companyBackstopShares?: number
   companyForcedTakeoverAmount?: number
   employeeSubscribedAmount?: number
   subscribed: number
@@ -108,6 +111,7 @@ type Subscription = {
   project: string
   userId?: string
   amount: number
+  shares?: number
   pay: string
   profit: number
   action: string
@@ -120,11 +124,16 @@ type Subscription = {
   paymentImageName?: string
   paymentImages?: PaymentImage[]
   recognizedPaidAmount?: number
+  actualPaidAmount?: number
+  transactionNo?: string
   reviewedBy?: string
   reviewedAt?: string
   rejectReason?: string
 }
 type AuditRow = {
+  before?: unknown
+  after?: unknown
+  requestId?: string
   time: string
   actor: string
   action: string
@@ -137,6 +146,10 @@ type SubscriptionRule = {
   projectName: string
   ruleName: string
   totalAmount: number
+  sharePrice?: number
+  totalShares?: number
+  companyFrontShares?: number
+  maxSharesPerEmployee?: number
   companyFixedAmount?: number
   minAmount: number
   minParticipants: number
@@ -152,6 +165,9 @@ type RuleForm = {
   projectId: string
   ruleName: string
   totalAmount: number | undefined
+  sharePrice: number | undefined
+  companyFrontShares: number | undefined
+  maxSharesPerEmployee: number | undefined
   companyFixedAmount: number | undefined
   minAmount: number | undefined
   minParticipants: number | undefined
@@ -250,6 +266,8 @@ const agreementVisible = ref(false)
 const agreementDrawerVisible = ref(false)
 const subscribeVisible = ref(false)
 const auditVisible = ref(false)
+const selectedAudit = ref<AuditRow | null>(null)
+const formatAuditValue = (value: unknown) => value === undefined ? '未记录' : JSON.stringify(value, null, 2)
 const ruleDrawerVisible = ref(false)
 const ruleCreateVisible = ref(false)
 const receivingCodeCreateVisible = ref(false)
@@ -272,11 +290,15 @@ const invoiceOcrResult = ref<InvoiceOcrResult>()
 const invoiceOcrError = ref('')
 const invoicePreviewVisible = ref(false)
 const invoiceOcrRequestId = ref(0)
+const invoiceDeleting = ref(false)
 const settlementInvoiceVisible = ref(false)
 const invoiceSettlementKey = ref('')
 const settlementSubmitting = ref(false)
 const listState = ref<'normal' | 'empty' | 'loading' | 'error'>('normal')
 const subscribeAmount = ref<number | undefined>(12000)
+const subscribeShares = ref<number | undefined>(1)
+const reviewActualPaidAmount = ref<number | undefined>()
+const reviewTransactionNo = ref('')
 const selectedProjectId = ref('PRJ-20260701-003')
 const activePaymentSubscriptionId = ref('')
 const projectPage = ref(1)
@@ -329,6 +351,9 @@ const createEmptyRuleForm = (): RuleForm => ({
   projectId: '',
   ruleName: '',
   totalAmount: undefined,
+  sharePrice: undefined,
+  companyFrontShares: 0,
+  maxSharesPerEmployee: undefined,
   companyFixedAmount: undefined,
   minAmount: undefined,
   minParticipants: undefined,
@@ -563,8 +588,33 @@ const selectedProjectRule = computed(() => {
     ?? rules.find(rule => rule.projectId === project.id && rule.status !== '已停用')
 })
 const selectedProjectMinAmount = computed(() => selectedProjectRule.value?.minAmount ?? 100)
+const selectedProjectShareRule = computed(() => selectedProjectRule.value?.sharePrice ? selectedProjectRule.value : undefined)
+const shareRemaining = computed(() => selectedProject.value && selectedProjectShareRule.value
+  ? Math.floor(Math.round(projectRemainAmount(selectedProject.value) * 100) / Math.round(selectedProjectShareRule.value.sharePrice! * 100)) : 0)
+const employeeHeldShares = computed(() => subscriptions
+  .filter(item => item.projectId === selectedProject.value?.id && item.userId === roleMeta.value.account)
+  .reduce((sum, item) => sum + (item.shares ?? 0), 0))
+const shareAvailable = computed(() => selectedProjectShareRule.value?.allowMultiple === false && employeeHeldShares.value > 0
+  ? 0
+  : Math.max(0, Math.min(shareRemaining.value,
+    (selectedProjectShareRule.value?.maxSharesPerEmployee ?? 0) - employeeHeldShares.value)))
+const shareDeadlineOpen = computed(() => !selectedProjectShareRule.value || new Date(selectedProject.value.deadline.replace(' ', 'T')).getTime() >= Date.now())
+const effectiveSubscribeAmount = computed(() => selectedProjectShareRule.value
+  ? Number(((subscribeShares.value ?? 0) * selectedProjectShareRule.value.sharePrice!).toFixed(2))
+  : subscribeAmount.value ?? 0)
+const selectedShareEstimatedProfit = computed(() => selectedProjectShareRule.value && selectedProject.value
+  ? estimateShareProfit({
+    salesAmount: selectedProject.value.salesAmount,
+    costAmount: selectedProject.value.costAmount,
+    totalShares: selectedProjectShareRule.value.totalShares,
+    shares: subscribeShares.value
+  }) : null)
 const subscribeAmountMax = computed(() => Math.max(selectedProjectMinAmount.value, selectedProject.value ? projectRemainAmount(selectedProject.value) : selectedProjectMinAmount.value))
-const canSubscribe = computed(() => Boolean(selectedProject.value?.status === '未满额' && subscribeAmount.value && subscribeAmount.value >= selectedProjectMinAmount.value && subscribeAmount.value <= projectRemainAmount(selectedProject.value)))
+const canSubscribe = computed(() => Boolean(selectedProject.value?.status === '未满额' && shareDeadlineOpen.value && (
+  selectedProjectShareRule.value
+    ? Number.isInteger(subscribeShares.value ?? NaN) && (subscribeShares.value ?? 0) >= 1 && (subscribeShares.value ?? 0) <= shareAvailable.value
+    : subscribeAmount.value && subscribeAmount.value >= selectedProjectMinAmount.value && subscribeAmount.value <= projectRemainAmount(selectedProject.value)
+)))
 const settlementProjectSubscriptions = computed(() => subscriptions.filter(subscription => isProjectSubscription(selectedProject.value, subscription)))
 const selectedProjectSettledAmount = computed(() => Number((selectedProject.value?.settledAmount ?? 0).toFixed(2)))
 const selectedProjectRemainingSettlementAmount = computed(() => Number(Math.max(0, projectSalesAmount(selectedProject.value) - selectedProjectSettledAmount.value).toFixed(2)))
@@ -573,6 +623,7 @@ const currentInvoiceAmount = computed(() => invoiceOcrResult.value?.amount)
 const currentInvoiceCanConfirm = computed(() => currentInvoiceAmount.value !== undefined
   && currentInvoiceAmount.value > 0
   && currentInvoiceAmount.value <= selectedProjectRemainingSettlementAmount.value
+  && !invoiceDeleting.value
   && !selectedProjectSettlementCompleted.value)
 const currentInvoiceExceedsRemaining = computed(() => currentInvoiceAmount.value !== undefined
   && currentInvoiceAmount.value > selectedProjectRemainingSettlementAmount.value)
@@ -584,6 +635,7 @@ const selectedRuleProject = computed(() => projects.find(project => project.id =
 const enabledReceivingCodes = computed(() => receivingCodes.filter(code => code.status === '启用'))
 const selectedRuleReceivingCode = computed(() => receivingCodes.find(code => code.id === ruleForm.receivingCodeId))
 const editingRule = computed(() => rules.find(rule => rule.id === editingRuleId.value))
+const isShareRuleForm = computed(() => Boolean(ruleForm.sharePrice) || (!editingRule.value && !ruleReadonly.value))
 const ruleProjectIds = computed(() => new Set(rules.map(rule => rule.projectId)))
 const isRuleProjectOptionDisabled = (projectId: string) => {
   return ruleProjectIds.value.has(projectId) && editingRule.value?.projectId !== projectId
@@ -592,9 +644,13 @@ const ruleFormLockedBySubscriptions = computed(() => editingRule.value ? isRuleL
 const derivedRuleTotalAmount = computed(() => {
   const project = selectedRuleProject.value
   if (!project) return 0
+  if (isShareRuleForm.value && ruleForm.sharePrice && ruleForm.companyFrontShares !== undefined) {
+    return Math.max(0, projectCostAmount(project) - ruleForm.sharePrice * ruleForm.companyFrontShares)
+  }
   return Math.max(0, projectCostAmount(project) - Number(ruleForm.companyFixedAmount ?? 0))
 })
 const derivedRuleMinAmount = computed(() => {
+  if (isShareRuleForm.value) return ruleForm.sharePrice ?? 0
   const participants = Number(ruleForm.minParticipants ?? 0)
   return participants > 0 ? Math.ceil(derivedRuleTotalAmount.value / participants) : 0
 })
@@ -614,8 +670,8 @@ const paymentReviewSubscriptions = computed(() => {
   return filterTargetProjectPaymentReviews(subscriptions, project)
 })
 const activePaymentSubscription = computed(() => {
-  return subscriptions.find(item => item.id === activePaymentSubscriptionId.value && subscriptionDisplayPay(item) !== '已释放')
-    ?? subscriptions.find(item => !['待确认收款', '已收款', '已释放'].includes(subscriptionDisplayPay(item)))
+  return subscriptions.find(item => item.id === activePaymentSubscriptionId.value && !['已释放', '缴款逾期'].includes(subscriptionDisplayPay(item)))
+    ?? subscriptions.find(item => !['待确认收款', '已收款', '已释放', '缴款逾期'].includes(subscriptionDisplayPay(item)))
 })
 const activePaymentAmount = computed(() => activePaymentSubscription.value?.amount ?? 12000)
 const activePaymentImages = computed<PaymentImage[]>(() => {
@@ -686,6 +742,7 @@ const activeReviewPaymentSuccessAt = computed(() => activeReviewSubscription.val
 const activeReviewReviewedBy = computed(() => activeReviewSubscription.value?.reviewedBy ?? '-')
 const activeReviewReviewedAt = computed(() => activeReviewSubscription.value?.reviewedAt ?? '-')
 const filteredSubscriptions = computed(() => subscriptions.filter(subscription => {
+  if (isCompanySubscription(subscription) || subscription.userId !== roleMeta.value.account) return false
   const keyword = mineFilters.keyword.trim()
   const keywordMatched = !keyword || [subscription.id, subscription.project].some(value => value.includes(keyword))
   const projectMatched = mineFilters.project === '全部' || subscription.project === mineFilters.project
@@ -849,7 +906,11 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     headers
   })
   const payload = await response.json()
-  if (!response.ok) throw new Error(payload.message ?? payload.error ?? '接口请求失败')
+  if (!response.ok) {
+    const requestId = response.headers.get('X-Request-Id')
+    const message = payload.message ?? payload.error ?? '接口请求失败'
+    throw new Error(requestId ? `${message}（请求编号：${requestId}）` : message)
+  }
   return payload
 }
 
@@ -889,7 +950,7 @@ async function loadData() {
     const [projectPayload, subscriptionPayload, auditPayload, rulePayload, receivingCodePayload] = await Promise.all([
       api<{ data: Project[] }>('/api/projects'),
       api<{ data: Subscription[] }>('/api/subscriptions'),
-      api<{ data: AuditRow[] }>('/api/audit-logs'),
+      currentRole.value === 'employee' ? Promise.resolve({ data: [] as AuditRow[] }) : api<{ data: AuditRow[] }>('/api/audit-logs'),
       api<{ data: SubscriptionRule[] }>('/api/rules'),
       api<{ data: ReceivingCode[] }>('/api/receiving-codes')
     ])
@@ -904,11 +965,22 @@ async function loadData() {
   }
 }
 
+watch(currentRole, () => {
+  replaceRows(subscriptions, [])
+  replaceRows(receivingCodes, [])
+  replaceRows(auditRows, [])
+  void loadData()
+})
+
 function applyRuleFilters() {
   rulePage.value = 1
 }
 
 watch(ruleFilters, applyRuleFilters)
+watch(activePaymentSubscriptionId, () => {
+  reviewActualPaidAmount.value = undefined
+  reviewTransactionNo.value = ''
+})
 
 function formatMoney(value: number) {
   return `¥ ${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -919,7 +991,7 @@ function formatDateTime(value?: string) {
 }
 
 function paymentRemaining(subscription: Subscription) {
-  if (subscriptionDisplayPay(subscription) === '已释放') return '-'
+  if (['已释放', '缴款逾期'].includes(subscriptionDisplayPay(subscription))) return '-'
   if (subscription.pay !== '未缴款') return '0时0分'
   if (!subscription.paymentDeadlineAt) return '-'
   const remaining = new Date(subscription.paymentDeadlineAt.replace(' ', 'T')).getTime() - Date.now()
@@ -941,6 +1013,10 @@ function openPayment(subscription: Subscription) {
 function handleSubscriptionAction(subscription: Subscription) {
   if (subscriptionDisplayPay(subscription) === '已释放') {
     ElMessage.info('该认购单已因过期未缴款释放，金额已回到项目剩余可认购金额')
+    return
+  }
+  if (subscriptionDisplayPay(subscription) === '缴款逾期') {
+    ElMessage.info('缴款期限已过，等待本项目所有认购单到期后统一释放和公司兜底')
     return
   }
   if (subscription.pay === '待确认收款') {
@@ -1037,7 +1113,17 @@ function projectUnpaidEmployeeAmount(project: Project) {
 
 function subscriptionEstimatedProfit(subscription: Subscription) {
   const project = projects.find(item => item.id === subscription.projectId || item.title === subscription.project)
-  return project ? projectProfitAmount(project) : subscription.profit
+  if (subscription.shares !== undefined) {
+    const rule = rules.find(item => item.id === project?.ruleId)
+    return estimateShareProfit({
+      salesAmount: project?.salesAmount,
+      costAmount: project?.costAmount,
+      totalShares: rule?.totalShares,
+      shares: subscription.shares
+    })
+  }
+  // Legacy amount-based subscriptions have no verified participant allocation yet.
+  return null
 }
 
 function subscriptionProjectCode(subscription: Subscription) {
@@ -1090,11 +1176,13 @@ function isCompanySubscription(subscription: Subscription) {
 }
 
 function isExpiredUnpaidSubscription(subscription: Subscription) {
-  return subscription.pay === '未缴款' && getDateTime(subscription.paymentDeadlineAt, Number.POSITIVE_INFINITY) < Date.now()
+  return subscription.shares === undefined && subscription.pay === '未缴款' && getDateTime(subscription.paymentDeadlineAt, Number.POSITIVE_INFINITY) < Date.now()
 }
 
 function subscriptionDisplayPay(subscription: Subscription) {
-  return isExpiredUnpaidSubscription(subscription) ? '已释放' : subscription.pay
+  if (isExpiredUnpaidSubscription(subscription)) return '已释放'
+  if (subscription.shares !== undefined && subscription.pay === '未缴款' && getDateTime(subscription.paymentDeadlineAt, Number.POSITIVE_INFINITY) < Date.now()) return '缴款逾期'
+  return subscription.pay
 }
 
 function subscriptionPayLabel(subscription: Subscription) {
@@ -1111,6 +1199,7 @@ function subscriptionPayTagType(subscription: Subscription) {
   if (pay === '待复核') return 'warning'
   if (pay === '复核驳回') return 'danger'
   if (pay === '已释放') return 'info'
+  if (pay === '缴款逾期') return 'warning'
   return 'success'
 }
 
@@ -1234,13 +1323,21 @@ function resetReceivingCodeFilters() {
 }
 
 function isRuleLocked(rule: SubscriptionRule) {
-  return getRuleProjectIds(rule).some(projectId => hasRealUserSubscriptions(projectId))
+  return getRuleProjectIds(rule).some(projectId => subscriptions.some(item => item.projectId === projectId))
+}
+
+function isReceivingCodeImageLocked(receivingCodeId: string) {
+  const linkedProjects = new Set(rules.filter(rule => rule.receivingCodeId === receivingCodeId).map(rule => rule.projectId))
+  return subscriptions.some(item => linkedProjects.has(item.projectId ?? ''))
 }
 
 function fillRuleForm(rule: SubscriptionRule) {
   ruleForm.projectId = rule.projectId
   ruleForm.ruleName = rule.ruleName
   ruleForm.totalAmount = rule.totalAmount
+  ruleForm.sharePrice = rule.sharePrice
+  ruleForm.companyFrontShares = rule.companyFrontShares
+  ruleForm.maxSharesPerEmployee = rule.maxSharesPerEmployee
   ruleForm.companyFixedAmount = rule.companyFixedAmount
   ruleForm.minAmount = rule.minAmount
   ruleForm.minParticipants = rule.minParticipants
@@ -1299,6 +1396,7 @@ function openRuleDetail(projectId: string) {
   if (existingRule) {
     fillRuleForm(existingRule)
   } else {
+    Object.assign(ruleForm, createEmptyRuleForm())
     ruleForm.projectId = project?.id ?? 'PRJ-20260701-003'
     ruleForm.ruleName = '暂无已配置规则'
     ruleForm.totalAmount = project?.total ?? 0
@@ -1429,8 +1527,19 @@ async function submitRule() {
     ElMessage.warning('请选择当前启用的项目收款码')
     return
   }
-  const totalAmount = derivedRuleTotalAmount.value
-  const companyFixedAmount = Number(ruleForm.companyFixedAmount ?? 0)
+  let shareRule: ReturnType<typeof prepareShareRule> | undefined
+  if (isShareRuleForm.value) {
+    try {
+      if (!selectedRuleProject.value) throw new RangeError('请选择采购项目')
+      shareRule = prepareShareRule(projectCostAmount(selectedRuleProject.value), Number(ruleForm.sharePrice),
+        Number(ruleForm.companyFrontShares), Number(ruleForm.maxSharesPerEmployee))
+    } catch (error) {
+      ElMessage.warning(error instanceof Error ? error.message : '份额规则无效')
+      return
+    }
+  }
+  const totalAmount = shareRule?.totalAmount ?? derivedRuleTotalAmount.value
+  const companyFixedAmount = shareRule?.companyFixedAmount ?? Number(ruleForm.companyFixedAmount ?? 0)
   const projectCost = selectedRuleProject.value ? projectCostAmount(selectedRuleProject.value) : 0
   if (!Number.isFinite(totalAmount) || !Number.isFinite(companyFixedAmount) || companyFixedAmount < 0 || companyFixedAmount >= projectCost) {
     ElMessage.warning('公司固定认购金额必须小于项目成本金额')
@@ -1440,13 +1549,15 @@ async function submitRule() {
     ElMessage.warning('开放认购金额必须大于 0 元')
     return
   }
-  const minAmount = derivedRuleMinAmount.value
+  const minAmount = shareRule?.sharePrice ?? derivedRuleMinAmount.value
   if (!Number.isFinite(minAmount) || minAmount > totalAmount) {
     ElMessage.warning('单次认购最低金额不可高于开放认购金额')
     return
   }
   const submitRuleForm = {
     ...ruleForm,
+    ...shareRule,
+    companyFixedAmount,
     totalAmount,
     minAmount
   }
@@ -1670,7 +1781,7 @@ function startSubscribe() {
     return
   }
   if (!canSubscribe.value) {
-    ElMessage.error('认购金额需不低于 100 元，且不得超过剩余可认购金额')
+    ElMessage.error(selectedProjectShareRule.value ? '认购份数需为正整数，且不能超过剩余份数或个人上限' : '认购金额需不低于 100 元，且不得超过剩余可认购金额')
     return
   }
   subscribeVisible.value = true
@@ -1682,7 +1793,7 @@ function openAgreementDrawer(name: string) {
 }
 
 async function confirmSubscribe() {
-  const amount = subscribeAmount.value ?? 0
+  const amount = effectiveSubscribeAmount.value
   try {
     await api<{ data: Subscription }>('/api/subscriptions', {
       method: 'POST',
@@ -1690,6 +1801,7 @@ async function confirmSubscribe() {
         projectId: selectedProject.value.id,
         userId: roleMeta.value.account,
         amount,
+        ...(selectedProjectShareRule.value ? { shares: subscribeShares.value } : {}),
         agreementsConfirmed: allAgreed.value,
         idempotencyKey: `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`
       })
@@ -1797,11 +1909,34 @@ async function handlePaymentImageChange(file: UploadFile) {
   reader.readAsDataURL(raw)
 }
 
-function runInvoiceOcr(file: UploadFile) {
+async function discardPendingInvoice(result: InvoiceOcrResult, projectId: string) {
+  if (!result.assetId || !result.settlementProofId) return ''
+  const payload = await api<{ message: string }>('/api/invoices/pending/delete', {
+    method: 'POST',
+    body: JSON.stringify({ projectId, assetId: result.assetId, settlementProofId: result.settlementProofId })
+  })
+  return payload.message
+}
+
+async function runInvoiceOcr(file: UploadFile) {
   const raw = file.raw
   if (!raw) return
   const requestId = invoiceOcrRequestId.value + 1
   invoiceOcrRequestId.value = requestId
+  const projectId = selectedProject.value.id
+  const previousResult = invoiceOcrResult.value
+  if (previousResult?.assetId) {
+    invoiceDeleting.value = true
+    try {
+      await discardPendingInvoice(previousResult, projectId)
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : '旧发票文件清理失败，未开始重新上传')
+      return
+    } finally {
+      invoiceDeleting.value = false
+    }
+    if (requestId !== invoiceOcrRequestId.value) return
+  }
   const validationError = validateInvoiceImage(raw)
   if (validationError) {
     invoiceOcrState.value = 'fail'
@@ -1835,12 +1970,16 @@ function runInvoiceOcr(file: UploadFile) {
     invoiceImageFile.value = raw
     try {
       const form = new FormData()
-      form.set('projectId', selectedProject.value.id)
+      form.set('projectId', projectId)
       form.set('fileName', raw.name)
       form.set('operator', `${roleMeta.value.account} · ${roleMeta.value.label}`)
       form.set('image', raw, raw.name)
       const payload = await api<{ data: InvoiceOcrResult; message: string }>('/api/invoices/ocr', { method: 'POST', body: form })
-      if (requestId !== invoiceOcrRequestId.value) return
+      if (requestId !== invoiceOcrRequestId.value) {
+        try { await discardPendingInvoice(payload.data, projectId) }
+        catch { ElMessage.warning('已取消的发票文件清理失败，请联系管理员检查待确认文件') }
+        return
+      }
       invoiceOcrResult.value = payload.data
       invoiceSettlementKey.value = `SETTLEMENT-${selectedProject.value.id}-${Date.now()}`
       invoiceOcrState.value = 'ok'
@@ -1874,14 +2013,26 @@ function openInvoicePreview() {
   invoicePreviewVisible.value = true
 }
 
-function removePendingInvoice() {
+async function removePendingInvoice() {
+  if (invoiceDeleting.value || settlementSubmitting.value) return
   invoiceOcrRequestId.value += 1
-  invoicePreviewVisible.value = false
-  resetInvoiceRecognition()
-  ElMessage.success('已删除当前待确认发票')
+  const result = invoiceOcrResult.value
+  const projectId = selectedProject.value.id
+  invoiceDeleting.value = true
+  try {
+    const message = result ? await discardPendingInvoice(result, projectId) : ''
+    invoicePreviewVisible.value = false
+    resetInvoiceRecognition()
+    ElMessage.success(message || '已清除当前待确认发票')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '待确认发票删除失败')
+  } finally {
+    invoiceDeleting.value = false
+  }
 }
 
 async function confirmSettlementInvoice() {
+  if (invoiceDeleting.value) return
   if (!currentInvoiceCanConfirm.value || currentInvoiceAmount.value === undefined || !invoiceOcrResult.value?.settlementProofId || !invoiceOcrResult.value.assetId) {
     ElMessage.warning(currentInvoiceExceedsRemaining.value ? '交易金额超过项目剩余待结算金额' : '当前识别结果没有可确认的交易金额')
     return
@@ -1947,6 +2098,10 @@ async function submitPaymentReview(result: 'pass' | 'reject' | 'partial') {
     ElMessage.warning('当前没有待复核记录')
     return
   }
+  if (subscription.shares !== undefined && result === 'pass' && (!reviewActualPaidAmount.value || !reviewTransactionNo.value.trim())) {
+    ElMessage.warning('请填写实际到账金额和交易流水号后再复核')
+    return
+  }
   const config = {
     pass: { title: '复核通过', message: '确认该笔支付有效？确认后员工缴款状态将更新为“缴款成功”。' },
     reject: { title: '复核驳回', message: '确认驳回该笔支付？确认后员工缴款状态将更新为“缴款被驳回”，并需重新上传支付截图。' },
@@ -1976,6 +2131,9 @@ async function submitPaymentReview(result: 'pass' | 'reject' | 'partial') {
       body: JSON.stringify({
         result,
         rejectReason,
+        ...(subscription.shares !== undefined && result === 'pass'
+          ? { actualPaidAmount: reviewActualPaidAmount.value, transactionNo: reviewTransactionNo.value.trim() }
+          : {}),
         operator: `${roleMeta.value.account} · ${roleMeta.value.label}`
       })
     })
@@ -2195,8 +2353,11 @@ onMounted(loadData)
                   <dt>采购内容</dt><dd><el-button link type="primary" @click="openProcurementOrderDetail">查看详情</el-button></dd>
                   <dt>项目来源</dt><dd>采购系统 MCP 同步 · 2026-07-01 09:20</dd>
                   <dt>总开放认购金额</dt><dd>{{ formatMoney(selectedProject.total) }}</dd>
+                  <template v-if="selectedProjectShareRule">
+                    <dt>份额规则</dt><dd>每份 {{ formatMoney(selectedProjectShareRule.sharePrice!) }} · 总 {{ selectedProjectShareRule.totalShares }} 份 · 公司前置 {{ selectedProjectShareRule.companyFrontShares }} 份 · 每人最多 {{ selectedProjectShareRule.maxSharesPerEmployee }} 份</dd>
+                  </template>
                   <dt>认购时间</dt><dd>2026-07-02 10:00 至 {{ selectedProject.deadline }}</dd>
-                  <dt>收益规则</dt><dd>项目结算后按实缴金额占比分配利润，公司固定认购、公司兜底认购和公司强制接管认购部分收益归公司。</dd>
+                  <dt>收益规则</dt><dd>{{ selectedProjectShareRule ? '回款确认后按认购份数分配本金与利润，分配到分以下的尾差归公司。' : '项目结算后按实缴金额占比分配利润，公司固定认购、公司兜底认购和公司强制接管认购部分收益归公司。' }}</dd>
                 </dl>
               </section>
               <section class="panel">
@@ -2220,10 +2381,17 @@ onMounted(loadData)
                 本项目已中断认购：{{ selectedProject.interruptReason }}。{{ selectedProject.refundNotice }}
               </el-alert>
               <el-alert type="info" :closable="false" class="remaining-alert">
-                剩余可认购 {{ formatMoney(projectRemainAmount(selectedProject)) }}，单次认购最低 {{ formatMoney(selectedProjectMinAmount) }}
+                {{ selectedProjectShareRule ? `剩余 ${shareRemaining} 份，每人还可认购 ${shareAvailable} 份；每份 ${formatMoney(selectedProjectShareRule.sharePrice!)}` : `剩余可认购 ${formatMoney(projectRemainAmount(selectedProject))}，单次认购最低 ${formatMoney(selectedProjectMinAmount)}` }}
               </el-alert>
               <el-form label-position="top">
-                <el-form-item label="认购金额">
+                <el-form-item v-if="selectedProjectShareRule" label="认购份数">
+                  <el-input-number v-model="subscribeShares" :min="1" :max="Math.max(1, shareAvailable)" :step="1" :precision="0" controls-position="right" />
+                  <span class="form-unit">份 · 合计 {{ formatMoney(effectiveSubscribeAmount) }}</span>
+                </el-form-item>
+                <el-alert v-if="selectedProjectShareRule" type="warning" :closable="false" class="mb12">
+                  预计可分配利润：{{ selectedShareEstimatedProfit === null ? '暂无可用采购预算数据' : formatMoney(selectedShareEstimatedProfit) }}。仅按采购单预计销售额减成本测算，不是实际回款或保证收益。
+                </el-alert>
+                <el-form-item v-else label="认购金额">
                   <el-input-number v-model="subscribeAmount" :min="selectedProjectMinAmount" :max="subscribeAmountMax" :step="100" controls-position="right" />
                 </el-form-item>
                 <el-form-item>
@@ -2263,6 +2431,7 @@ onMounted(loadData)
               <el-option label="已收款" value="已收款" />
               <el-option label="缴款成功" value="已缴款" />
               <el-option label="已释放" value="已释放" />
+              <el-option label="缴款逾期" value="缴款逾期" />
             </el-select>
             <el-input-number
               v-model="mineFilters.minAmount"
@@ -2296,6 +2465,7 @@ onMounted(loadData)
                 </template>
               </el-table-column>
               <el-table-column label="申请认购金额" width="130"><template #default="{ row }">{{ formatMoney(row.amount) }}</template></el-table-column>
+              <el-table-column label="认购份数" width="100"><template #default="{ row }">{{ row.shares ?? '旧版' }}</template></el-table-column>
               <el-table-column label="状态" width="190">
                 <template #default="{ row }">
                   <el-tag :type="subscriptionPayTagType(row)">{{ subscriptionPayLabel(row) }}</el-tag>
@@ -2311,10 +2481,10 @@ onMounted(loadData)
               </el-table-column>
               <el-table-column label="截止缴款剩余时长" width="150"><template #default="{ row }">{{ paymentRemaining(row) }}</template></el-table-column>
               <el-table-column label="缴款图上传时间" width="170"><template #default="{ row }">{{ formatDateTime(row.paymentUploadedAt) }}</template></el-table-column>
-              <el-table-column label="预估收益" width="130"><template #default="{ row }">{{ formatMoney(subscriptionEstimatedProfit(row)) }}</template></el-table-column>
+              <el-table-column label="预估收益" width="150"><template #default="{ row }">{{ subscriptionEstimatedProfit(row) === null ? '暂无估算' : formatMoney(subscriptionEstimatedProfit(row)!) }}<div v-if="row.shares !== undefined" class="muted">仅供参考</div></template></el-table-column>
               <el-table-column label="操作" width="180">
                 <template #default="{ row }">
-                  <span v-if="subscriptionDisplayPay(row) === '已释放'" class="muted">已释放</span>
+                  <span v-if="['已释放', '缴款逾期'].includes(subscriptionDisplayPay(row))" class="muted">{{ subscriptionDisplayPay(row) }}</span>
                   <el-button v-else size="small" type="primary" @click="handleSubscriptionAction(row)">
                     {{ subscriptionDisplayPay(row) === '未缴款' ? '去支付' : row.action }}
                   </el-button>
@@ -2693,6 +2863,9 @@ onMounted(loadData)
               <el-table-column label="实际可认购金额" align="right" width="160">
                 <template #default="{ row }">{{ formatMoney(row.totalAmount) }}</template>
               </el-table-column>
+              <el-table-column label="份额规则" min-width="220">
+                <template #default="{ row }">{{ row.sharePrice ? `${formatMoney(row.sharePrice)}/份 · 总 ${row.totalShares} 份 · 公司前置 ${row.companyFrontShares} 份` : '旧版金额规则' }}</template>
+              </el-table-column>
               <el-table-column label="单次认购最低金额" align="left" width="160">
                 <template #default="{ row }">{{ formatMoney(row.minAmount) }}</template>
               </el-table-column>
@@ -2802,7 +2975,8 @@ onMounted(loadData)
               </el-table-column>
               <el-table-column label="操作" fixed="right" width="210">
                 <template #default="{ row }">
-                  <el-button v-if="row.status === '启用'" size="small" type="primary" plain @click="openReceivingCodeImage(row)">{{ row.imageUrl ? '更换图片' : '上传图片' }}</el-button>
+                  <span v-if="row.status === '启用' && isReceivingCodeImageLocked(row.id)" class="muted">认购后图片已锁定</span>
+                  <el-button v-else-if="row.status === '启用'" size="small" type="primary" plain @click="openReceivingCodeImage(row)">{{ row.imageUrl ? '更换图片' : '上传图片' }}</el-button>
                   <el-button v-if="row.status === '启用'" size="small" type="danger" @click="disableReceivingCode(row)">禁用</el-button>
                   <span v-else class="muted">不可删除</span>
                 </template>
@@ -2882,8 +3056,20 @@ onMounted(loadData)
               <div class="stats compact">
                 <div><span>应付金额</span><strong>{{ formatMoney(activeReviewAmount) }}</strong></div>
                 <div><span>累计 OCR 金额</span><strong>{{ formatMoney(activeReviewRecognizedAmount) }}</strong></div>
-                <div><span>置信度</span><strong class="ok">98%</strong></div>
+                <div v-if="activeReviewSubscription?.shares === undefined"><span>置信度</span><strong class="ok">98%</strong></div>
               </div>
+              <div v-if="activeReviewSubscription?.shares !== undefined" class="review-project-meta">
+                <div><span>认购份数</span><strong>{{ activeReviewSubscription.shares }} 份</strong></div>
+                <div><span>实际到账金额</span>
+                  <el-input-number v-if="activeReviewIsPending" v-model="reviewActualPaidAmount" :min="0.01" :precision="2" controls-position="right" />
+                  <strong v-else>{{ activeReviewSubscription.actualPaidAmount !== undefined ? formatMoney(activeReviewSubscription.actualPaidAmount) : '-' }}</strong>
+                </div>
+                <div><span>交易流水号</span>
+                  <el-input v-if="activeReviewIsPending" v-model="reviewTransactionNo" maxlength="100" placeholder="请以银行实际到账记录为准" />
+                  <strong v-else>{{ activeReviewSubscription.transactionNo || '-' }}</strong>
+                </div>
+              </div>
+              <el-alert v-if="activeReviewSubscription?.shares !== undefined && activeReviewIsPending" type="warning" :closable="false" title="通过前须核对认购金额、实际到账金额及凭证识别金额一致；OCR 结果不能代替财务核实。" />
               <el-input type="textarea" placeholder="驳回或部分缴款时填写原因" :disabled="!activeReviewIsPending" />
               <div v-if="activeReviewIsPending" class="actions-row">
                 <el-button type="primary" @click="submitPaymentReview('pass')">通过</el-button>
@@ -2899,7 +3085,7 @@ onMounted(loadData)
           <div class="page-head">
             <div>
               <h1>项目结算</h1>
-              <p>{{ selectedProject.title }} · {{ selectedProject.id }} · 录入收入成本，试算员工收益与公司收益</p>
+              <p>{{ selectedProject.title }} · {{ selectedProject.id }} · 核对结算凭证与认购记录</p>
             </div>
             <div class="page-head-actions">
               <el-tag :type="projectSettlementTagType(selectedProject)">{{ projectSettlementStatus(selectedProject.status) }}</el-tag>
@@ -2922,24 +3108,27 @@ onMounted(loadData)
                 <dd>{{ selectedProject.deadline }}</dd>
                 <dt>归属管理端</dt>
                 <dd>项目管理 / {{ selectedProject.id }}</dd>
-                <dt>项目销售收入</dt>
+                <dt>预计项目销售额</dt>
                 <dd class="settlement-money">{{ formatMoney(projectSalesAmount(selectedProject)) }}</dd>
-                <dt>采购与执行成本</dt>
+                <dt>预计采购与执行成本</dt>
                 <dd class="settlement-money">{{ formatMoney(projectCostAmount(selectedProject)) }}</dd>
-                <dt>其他费用</dt>
-                <dd class="settlement-money">{{ formatMoney(Math.round(projectProfitAmount(selectedProject) * 0.1)) }}</dd>
-                <dt>可分配利润</dt>
-                <dd class="settlement-money ok">{{ formatMoney(Math.max(0, projectProfitAmount(selectedProject) - Math.round(projectProfitAmount(selectedProject) * 0.1))) }}</dd>
+                <dt>预计项目利润</dt>
+                <dd class="settlement-money">{{ formatMoney(projectProfitAmount(selectedProject)) }}</dd>
+                <dt>已确认其他成本</dt>
+                <dd>待录入核实</dd>
+                <dt>实际可分配利润</dt>
+                <dd>待实收、补款及成本核实后计算</dd>
               </dl>
             </section>
+            <el-alert title="本页仅核对发票凭证，不代表客户款项实收或完成分润。实际利润须按客户实收＋公司补款－采购实付－其他已确认成本计算；分配尾差归公司。" type="info" :closable="false" show-icon />
             <div class="settlement-balance-summary">
-              <div><span>项目销售收入</span><strong>{{ formatMoney(projectSalesAmount(selectedProject)) }}</strong></div>
-              <div><span>累计已确认结算</span><strong>{{ formatMoney(selectedProjectSettledAmount) }}</strong></div>
-              <div><span>剩余待结算</span><strong>{{ formatMoney(selectedProjectRemainingSettlementAmount) }}</strong></div>
+              <div><span>预计项目销售额</span><strong>{{ formatMoney(projectSalesAmount(selectedProject)) }}</strong></div>
+              <div><span>累计已确认凭证金额</span><strong>{{ formatMoney(selectedProjectSettledAmount) }}</strong></div>
+              <div><span>剩余待核对凭证金额</span><strong>{{ formatMoney(selectedProjectRemainingSettlementAmount) }}</strong></div>
             </div>
             <el-alert
               v-if="selectedProjectSettlementCompleted"
-              title="项目已完结，累计交易金额已达到项目销售收入，发票上传入口已关闭。"
+              title="凭证金额已达到预计销售额，发票上传入口已关闭；实际回款及分润仍需单独核实。"
               type="success"
               :closable="false"
               show-icon
@@ -2953,7 +3142,7 @@ onMounted(loadData)
                 <template #default="{ row }">{{ settlementPaymentTime(row) }}</template>
               </el-table-column>
               <el-table-column label="有效认购" align="right" min-width="120"><template #default="{ row }">{{ formatMoney(row.amount) }}</template></el-table-column>
-              <el-table-column label="收益" align="right" min-width="120"><template #default="{ row }">{{ formatMoney(row.profit) }}</template></el-table-column>
+              <el-table-column label="预估收益" align="right" min-width="120"><template #default="{ row }">{{ subscriptionEstimatedProfit(row) === null ? '暂无估算' : formatMoney(subscriptionEstimatedProfit(row)!) }}</template></el-table-column>
             </el-table>
             <div v-if="!selectedProjectSettlementCompleted" class="actions-row">
               <el-button type="primary" :disabled="settlementInvoiceVisible" @click="startSettlement">
@@ -2996,7 +3185,7 @@ onMounted(loadData)
                     <div class="invoice-upload-card__toolbar">
                       <el-button size="small" plain @click.stop="openInvoicePreview">预览</el-button>
                       <el-button size="small" type="primary">重新上传</el-button>
-                      <el-button size="small" type="danger" plain @click.stop="removePendingInvoice">删除</el-button>
+                      <el-button size="small" type="danger" plain :loading="invoiceDeleting" :disabled="settlementSubmitting" @click.stop="removePendingInvoice">删除</el-button>
                     </div>
                   </div>
                 </el-upload>
@@ -3105,10 +3294,11 @@ onMounted(loadData)
         <template v-if="currentPage === 'takeovers'">
           <div class="page-head"><div><h1>公司兜底管理</h1><p>公司总认购金额 = 公司固定认购金额 + 公司兜底认购金额 + 公司强制接管认购金额</p></div></div>
           <section class="panel">
-            <el-table :data="projects.filter(item => projectRemainAmount(item) > 0)" stripe>
+            <el-table :data="projects.filter(item => projectRemainAmount(item) > 0 || projectCompanyTakeoverAmount(item) > 0)" stripe>
               <el-table-column prop="title" label="项目" min-width="260" />
               <el-table-column label="公司固定认购金额" align="right" width="160"><template #default="{ row }">{{ formatMoney(projectCompanyFixedAmount(row)) }}</template></el-table-column>
               <el-table-column label="公司兜底认购金额" align="right" width="160"><template #default="{ row }">{{ formatMoney(projectCompanyTakeoverAmount(row)) }}</template></el-table-column>
+              <el-table-column label="公司兜底份数" align="right" width="130"><template #default="{ row }">{{ row.companyBackstopShares ?? (row.ruleId && rules.find(rule => rule.id === row.ruleId)?.sharePrice ? 0 : '旧版') }}</template></el-table-column>
               <el-table-column label="公司强制接管认购金额" align="right" width="190"><template #default="{ row }">{{ formatMoney(projectCompanyForcedTakeoverAmount(row)) }}</template></el-table-column>
               <el-table-column label="公司总认购金额" align="right" width="160"><template #default="{ row }">{{ formatMoney(projectCompanySubscribedAmount(row)) }}</template></el-table-column>
               <el-table-column label="剩余可强制接管金额" align="right" width="180"><template #default="{ row }">{{ formatMoney(projectRemainAmount(row)) }}</template></el-table-column>
@@ -3167,7 +3357,7 @@ onMounted(loadData)
               <el-table-column prop="action" label="动作" />
               <el-table-column prop="target" label="目标" width="180" />
               <el-table-column prop="result" label="结果" width="100" />
-              <el-table-column label="操作" width="120"><template #default><el-button link type="primary" @click="auditVisible = true">查看差异</el-button></template></el-table-column>
+              <el-table-column label="操作" width="120"><template #default="{ row }"><el-button link type="primary" @click="selectedAudit = row; auditVisible = true">查看差异</el-button></template></el-table-column>
             </el-table>
           </section>
         </template>
@@ -3238,7 +3428,9 @@ onMounted(loadData)
     <el-dialog v-model="subscribeVisible" title="确认认购" width="520px">
       <dl class="desc">
         <dt>项目</dt><dd>{{ selectedProject.title }}</dd>
-        <dt>认购金额</dt><dd>{{ formatMoney(subscribeAmount ?? 0) }}</dd>
+        <template v-if="selectedProjectShareRule"><dt>认购份数</dt><dd>{{ subscribeShares }} 份</dd></template>
+        <dt>认购金额</dt><dd>{{ formatMoney(effectiveSubscribeAmount) }}</dd>
+        <template v-if="selectedProjectShareRule"><dt>预计利润</dt><dd>{{ selectedShareEstimatedProfit === null ? '暂无估算' : formatMoney(selectedShareEstimatedProfit) }}（仅供参考）</dd></template>
         <dt>协议状态</dt><dd>已确认当前有效版本</dd>
       </dl>
       <el-alert
@@ -3256,8 +3448,12 @@ onMounted(loadData)
 
     <el-drawer v-model="auditVisible" title="结构化差异（before / after）" size="480px">
       <div class="diff">
-        <pre>{ "status": "待复核", "amount": 12000 }</pre>
-        <pre>{ "status": "已缴款", "amount": 12000 }</pre>
+        <p>{{ selectedAudit?.action }} · {{ selectedAudit?.target }}</p>
+        <p v-if="selectedAudit?.requestId">请求编号：{{ selectedAudit.requestId }}</p>
+        <h4>变更前</h4>
+        <pre>{{ formatAuditValue(selectedAudit?.before) }}</pre>
+        <h4>变更后</h4>
+        <pre>{{ formatAuditValue(selectedAudit?.after) }}</pre>
       </div>
     </el-drawer>
 
@@ -3413,9 +3609,22 @@ onMounted(loadData)
             class="rule-time-range"
           />
         </el-form-item>
-        <el-form-item label="公司固定认购金额" required>
+        <el-form-item v-if="isShareRuleForm" label="每份金额" required>
+          <el-input-number v-model="ruleForm.sharePrice" :min="0.01" :precision="2" :step="100" controls-position="right" />
+          <span class="form-unit">元/份</span>
+        </el-form-item>
+        <el-form-item v-if="isShareRuleForm" label="公司前置认购份数" required>
+          <el-input-number v-model="ruleForm.companyFrontShares" :min="0" :precision="0" controls-position="right" />
+        </el-form-item>
+        <el-form-item v-if="isShareRuleForm" label="员工个人认购上限" required>
+          <el-input-number v-model="ruleForm.maxSharesPerEmployee" :min="1" :precision="0" controls-position="right" />
+        </el-form-item>
+        <el-form-item v-if="!isShareRuleForm" label="公司固定认购金额" required>
           <el-input-number v-model="ruleForm.companyFixedAmount" :min="0" :step="1000" controls-position="right" />
           <span class="form-unit">元</span>
+        </el-form-item>
+        <el-form-item v-if="isShareRuleForm" label="份额合计">
+          <div class="derived-field">采购成本 {{ formatMoney(selectedRuleProject ? projectCostAmount(selectedRuleProject) : 0) }}；公司前置金额 {{ formatMoney((ruleForm.sharePrice ?? 0) * (ruleForm.companyFrontShares ?? 0)) }}</div>
         </el-form-item>
         <el-form-item label="开放认购金额" required>
           <div class="derived-field">
@@ -3423,10 +3632,10 @@ onMounted(loadData)
             <span>项目成本金额 - 公司固定认购金额</span>
           </div>
         </el-form-item>
-        <el-form-item label="开放参与人数" required>
+        <el-form-item v-if="!isShareRuleForm" label="开放参与人数" required>
           <el-input-number v-model="ruleForm.minParticipants" :min="1" controls-position="right" />
         </el-form-item>
-        <el-form-item label="单次认购最低金额" required>
+        <el-form-item v-if="!isShareRuleForm" label="单次认购最低金额" required>
           <div class="derived-field">
             <strong>{{ formatMoney(derivedRuleMinAmount) }}</strong>
             <span>开放认购金额 / 开放参与人数</span>
@@ -3435,8 +3644,11 @@ onMounted(loadData)
         <el-form-item label="是否允许多次认购">
           <el-switch v-model="ruleForm.allowMultiple" />
         </el-form-item>
-        <el-form-item label="截止后公司兜底">
+        <el-form-item v-if="!isShareRuleForm" label="截止后公司兜底">
           <el-switch v-model="ruleForm.companyTakeover" />
+        </el-form-item>
+        <el-form-item v-else label="公司自动兜底">
+          <span>所有员工认购单的 12 小时缴款期限结束后，自动承接未认满份额；公司出资仍需财务确认。</span>
         </el-form-item>
         <el-form-item label="发布状态" required>
           <el-radio-group v-model="ruleForm.status">

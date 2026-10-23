@@ -1,3 +1,4 @@
+import { observeRequests, logFailure, currentRequestId } from './observability.ts'
 import { createServer, IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { fetchAllProcurementPages, fetchProcurementPage, formatProcurementSyncMessage } from './procurement.ts'
@@ -18,11 +19,16 @@ import { validateImageFile, type ValidatedImage } from './image-file.ts'
 import { TencentCosObjectStorage } from './storage/object-storage.ts'
 import { FileAssetService } from './storage/file-asset-service.ts'
 import { requestContext, authorizeAssetRead } from './request-context.ts'
-import { AppError } from './errors.ts'
+import { AppError, isDuplicateKey } from './errors.ts'
+import { calculateShareSubscription, prepareShareRule } from './share-subscription.ts'
+import { createFundLedger } from './finance/fund-ledger.ts'
+import { validateContributionReview } from './finance/contribution-review.ts'
+import { calculateSettlementProfit } from './finance/settlement-profit.ts'
+import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
-type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款'
+type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资'
 
 type PaymentImage = {
   id: string
@@ -51,6 +57,7 @@ type Project = {
   profitAmount: number
   companyFixedAmount: number
   companyTakeoverAmount: number
+  companyBackstopShares?: number
   companyForcedTakeoverAmount: number
   employeeSubscribedAmount: number
   subscribed: number
@@ -69,6 +76,8 @@ type Subscription = {
   project: string
   userId: string
   amount: number
+  shares?: number
+  companyKind?: 'front' | 'backstop'
   pay: PaymentStatus | '待确认收款'
   profit: number
   action: string
@@ -81,6 +90,8 @@ type Subscription = {
   paymentImageName?: string
   paymentImages?: PaymentImage[]
   recognizedPaidAmount?: number
+  actualPaidAmount?: number
+  transactionNo?: string
   reviewedBy?: string
   reviewedAt?: string
   rejectReason?: string
@@ -110,6 +121,10 @@ type SubscriptionRule = {
   projectName: string
   ruleName: string
   totalAmount: number
+  sharePrice?: number
+  totalShares?: number
+  companyFrontShares?: number
+  maxSharesPerEmployee?: number
   companyFixedAmount: number
   minAmount: number
   minParticipants: number
@@ -713,13 +728,27 @@ function getRuleProjectIds(ruleId: string) {
 }
 
 function isRuleLocked(ruleId: string) {
-  return getRuleProjectIds(ruleId).some(projectId => hasRealUserSubscriptions(projectId))
+  return getRuleProjectIds(ruleId).some(projectId => subscriptions.some(item => item.projectId === projectId))
+}
+
+async function receivingCodeHasSubscriptions(receivingCodeId: string, session?: import('mongodb').ClientSession) {
+  const linkedRules = await repositories.rules.list({ receivingCodeId } as never, {}, session)
+  const projectIds = linkedRules.map(rule => rule.projectId)
+  if (projectIds.length === 0) return false
+  return (await repositories.subscriptions.count({ projectId: { $in: projectIds } } as never, session)) > 0
+}
+
+async function requireReceivingCodeMutable(receivingCodeId: string, session?: import('mongodb').ClientSession) {
+  if (await receivingCodeHasSubscriptions(receivingCodeId, session)) {
+    throw new AppError(409, 'RECEIVING_CODE_LOCKED', '已有认购单的众筹项目不可更换或补传收款码图片')
+  }
 }
 
 const appConfig = loadAppConfig()
 const mongo = await connectMongo(appConfig.mongodb)
 await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
 const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
+const fundLedger = createFundLedger(mongo.db, appConfig.mongodb.collectionPrefix)
 const queryService = new QueryService(repositories)
 const objectStorage = new TencentCosObjectStorage(appConfig.cos)
 const fileAssetService = new FileAssetService({
@@ -820,7 +849,7 @@ function addHours(datetime: string, hours: number) {
 }
 
 async function pushAudit(entry: Omit<AuditLog, 'time' | 'result'> & { result?: AuditLog['result'] }) {
-  auditLogs.unshift({ id: `AUD-${Date.now()}-${randomUUID()}`, time: now(), result: entry.result ?? '成功', ...entry } as AuditLog)
+  auditLogs.unshift({ id: `AUD-${Date.now()}-${randomUUID()}`, requestId: currentRequestId(), time: now(), result: entry.result ?? '成功', ...entry } as AuditLog)
   await persistState()
 }
 
@@ -835,12 +864,111 @@ function send(res: ServerResponse, status: number, payload: unknown) {
 }
 
 function auditRecord(input: Omit<AuditLog, 'time' | 'result'> & { result?: AuditLog['result'] }) {
-  return { id: `AUD-${Date.now()}-${randomUUID()}`, time: now(), result: input.result ?? '成功', ...input }
+  return { id: `AUD-${Date.now()}-${randomUUID()}`, requestId: currentRequestId(), time: now(), result: input.result ?? '成功', ...input }
+}
+
+let backstopRunning = false
+async function runDueBackstops() {
+  if (backstopRunning) return
+  backstopRunning = true
+  try {
+    const openProjects = await repositories.projects.list({ status: { $in: ['未满额', '已满额'] } } as never)
+    for (const candidate of openProjects) {
+      try {
+        if (!candidate.ruleId) continue
+        const rule = await repositories.rules.getById(candidate.ruleId)
+        if (!rule?.sharePrice || !rule.companyTakeover) continue
+        const result = await mongo.withTransaction(async session => {
+          const project = await repositories.projects.getById(candidate.id, session)
+          if (!project || !['未满额', '已满额'].includes(project.status)) return null
+          const records = await repositories.subscriptions.list({ projectId: project.id } as never, {}, session)
+          if (records.some(record => record.companyKind === 'backstop')) return null
+          const employees = records.filter(record => record.shares !== undefined && !isCompanySubscription(record as Subscription))
+          const cutoffInput = { subscriptionCutoffAt: project.deadline, employeePaymentDeadlines: employees.map(record => record.paymentDeadlineAt) }
+          const currentTime = new Date()
+          if (currentTime.getTime() < paymentCutoffTime(cutoffInput)) return null
+          const released = employees.filter(record => record.pay === '未缴款')
+          const releasedCents = released.reduce((sum, record) => sum + Math.round(record.amount * 100), 0)
+          const remainingAmount = (Math.round(project.remain * 100) + releasedCents) / 100
+          const backstop = planCompanyBackstop({
+            status: project.status, sharePrice: rule.sharePrice, remainingAmount,
+            ...cutoffInput, companyTakeover: true
+          }, currentTime)
+          if (!backstop && released.length === 0) return null
+
+          const nextProject = { ...project }
+          nextProject.employeeSubscribedAmount = Math.max(0, Math.round((nextProject.employeeSubscribedAmount - releasedCents / 100) * 100) / 100)
+          nextProject.people = Math.max(0, nextProject.people - released.length)
+          if (backstop) {
+            nextProject.companyTakeoverAmount = Math.round((nextProject.companyTakeoverAmount + backstop.amount) * 100) / 100
+            nextProject.companyBackstopShares = backstop.shares
+          }
+          normalizeProjectAmounts(nextProject as Project)
+          if (nextProject.remain === 0) {
+            nextProject.status = '已满额'
+            nextProject.statusType = 'success'
+          }
+          const releasedRecords = released.map(record => ({ ...record, pay: '已释放' as const, action: '已释放' }))
+          for (const record of releasedRecords) await repositories.subscriptions.replace(record, session)
+          let companyRecord: Subscription | undefined
+          if (backstop) {
+            companyRecord = {
+              id: `SUB-COMPANY-BACKSTOP-${project.id}`, projectId: project.id, project: project.title,
+              userId: 'company', companyKind: 'backstop', amount: backstop.amount, shares: backstop.shares,
+              pay: '公司待出资', profit: project.profitAmount, action: '财务确认公司出资',
+              idempotencyKey: `system:company-backstop:${project.id}`,
+              createdAt: now(), paymentDeadlineAt: now()
+            }
+            await repositories.subscriptions.insert(companyRecord, session)
+          }
+          await repositories.projects.replace(nextProject, session)
+          const audit = auditRecord({
+            actor: '系统', role: 'system', action: '缴款期限结束后公司自动兜底', target: project.id,
+            before: { status: project.status, remain: project.remain },
+            after: { status: nextProject.status, releasedSubscriptionIds: released.map(record => record.id), backstopShares: backstop?.shares ?? 0, backstopAmount: backstop?.amount ?? 0, companyFundsConfirmed: false }
+          }) as AuditLog
+          await repositories.auditLogs.insert(audit as never, session)
+          return { project: nextProject, releasedRecords, companyRecord, audit }
+        })
+        if (!result) continue
+        const index = projects.findIndex(project => project.id === result.project.id)
+        if (index >= 0) projects.splice(index, 1, result.project as Project)
+        for (const record of result.releasedRecords) {
+          const subscriptionIndex = subscriptions.findIndex(item => item.id === record.id)
+          if (subscriptionIndex >= 0) subscriptions.splice(subscriptionIndex, 1, record as Subscription)
+        }
+        if (result.companyRecord) subscriptions.unshift(result.companyRecord)
+        auditLogs.unshift(result.audit)
+      } catch (error) {
+        logFailure('company.backstop.project', error)
+      }
+    }
+  } finally {
+    backstopRunning = false
+  }
 }
 
 function uploadActor(fields: Record<string, string>, fallback: string) {
   const operator = fields.operator?.trim() || fallback
   return { userId: operator.split(' · ')[0] || fallback, label: operator }
+}
+
+function receivingCodeManager(req: IncomingMessage) {
+  const context = requestContext(req)
+  if (context.role !== 'admin' && context.role !== 'finance') throw new AppError(403, 'FORBIDDEN', '只有管理员或财务可以维护收款码')
+  return { ...context, label: `${context.userId} · ${context.role === 'admin' ? '管理员' : '财务'}` }
+}
+
+function managementActor(req: IncomingMessage, allowedRoles: Role[]) {
+  const context = requestContext(req)
+  if (!allowedRoles.includes(context.role)) throw new AppError(403, 'FORBIDDEN', '当前角色无权执行该管理操作')
+  return { ...context, label: `${context.userId} · ${context.role === 'super_admin' ? '公司超级管理员' : '管理员'}` }
+}
+
+function financeOperator(req: IncomingMessage) {
+  const context = requestContext(req)
+  if (context.role !== 'finance') throw new AppError(403, 'FORBIDDEN', '只有财务可以执行结算操作')
+  return { ...context, label: `${context.userId} · 财务` }
 }
 
 function ephemeralDataUrl(image: ValidatedImage) {
@@ -886,9 +1014,21 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     stream.pipe(res)
     return
   }
-  if (pathname === '/api/state') return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
+  if (pathname === '/api/state') {
+    const context = requestContext(req)
+    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能访问全量业务状态')
+    return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
+  }
   if (pathname === '/api/projects') return send(res, 200, { data: await queryService.listProjects() })
-  if (pathname === '/api/receiving-codes') return send(res, 200, { data: await queryService.listReceivingCodes() })
+  if (pathname === '/api/receiving-codes') {
+    const context = requestContext(req)
+    const codes = await queryService.listReceivingCodes()
+    if (context.role !== 'employee') return send(res, 200, { data: codes })
+    const projectIds = new Set((await queryService.listSubscriptions(context))
+      .filter(item => item.pay !== '已释放').map(item => item.projectId))
+    const codeIds = new Set(rules.filter(rule => projectIds.has(rule.projectId)).map(rule => rule.receivingCodeId))
+    return send(res, 200, { data: codes.filter(code => codeIds.has(code.id)) })
+  }
   const procurementDetailMatch = pathname.match(/^\/api\/procurement\/orders\/([^/]+)$/)
   if (procurementDetailMatch) {
     const projectId = decodeURIComponent(procurementDetailMatch[1])
@@ -920,9 +1060,17 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     })
     return send(res, 200, { data: filtered })
   }
-  if (pathname === '/api/subscriptions') return send(res, 200, { data: await queryService.listSubscriptions() })
-  if (pathname === '/api/audit-logs') return send(res, 200, { data: await repositories.auditLogs.list({}, { sort: { time: -1 } }) })
-  if (pathname === '/api/risk-events') return send(res, 200, { data: await repositories.riskEvents.list({}, { sort: { time: -1 } }) })
+  if (pathname === '/api/subscriptions') return send(res, 200, { data: await queryService.listSubscriptions(requestContext(req)) })
+  if (pathname === '/api/audit-logs') {
+    const context = requestContext(req)
+    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能查看全量审计日志')
+    return send(res, 200, { data: await repositories.auditLogs.list({}, { sort: { time: -1 } }) })
+  }
+  if (pathname === '/api/risk-events') {
+    const context = requestContext(req)
+    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能查看全量风险事件')
+    return send(res, 200, { data: await repositories.riskEvents.list({}, { sort: { time: -1 } }) })
+  }
   if (pathname === '/api/rbac') {
     return send(res, 200, {
       data: [
@@ -942,8 +1090,17 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
     send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在，不能保存认购规则' })
     return null
   }
-  const companyFixedAmount = Number(body.companyFixedAmount ?? 0)
-  const minParticipants = Number(body.minParticipants)
+  let shareRule: ReturnType<typeof prepareShareRule> | undefined
+  if (body.sharePrice !== undefined && body.sharePrice !== null && body.sharePrice !== '') {
+    try {
+      shareRule = prepareShareRule(project.costAmount, Number(body.sharePrice), Number(body.companyFrontShares), Number(body.maxSharesPerEmployee))
+    } catch (error) {
+      send(res, 400, { error: 'SHARE_RULE_INVALID', message: error instanceof Error ? error.message : '份额规则无效' })
+      return null
+    }
+  }
+  const companyFixedAmount = shareRule?.companyFixedAmount ?? Number(body.companyFixedAmount ?? 0)
+  const minParticipants = shareRule ? 1 : Number(body.minParticipants)
   const receivingCodeId = String(body.receivingCodeId ?? '').trim()
   if (!body.ruleName) {
     send(res, 400, { error: 'RULE_NAME_REQUIRED', message: '请输入规则名称' })
@@ -974,17 +1131,34 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
     send(res, 400, { error: 'MIN_PARTICIPANTS_INVALID', message: '开放参与人数不能低于 1' })
     return null
   }
-  const totalAmount = Math.max(0, project.costAmount - companyFixedAmount)
+  const totalAmount = shareRule?.totalAmount ?? Math.max(0, project.costAmount - companyFixedAmount)
   if (totalAmount <= 0) {
     send(res, 400, { error: 'TOTAL_AMOUNT_INVALID', message: '开放认购金额必须大于 0 元' })
     return null
   }
-  const minAmount = Math.ceil(totalAmount / minParticipants)
-  return { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId }
+  const minAmount = shareRule?.sharePrice ?? Math.ceil(totalAmount / minParticipants)
+  return { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId, shareRule }
 }
 
 async function routePost(pathname: string, req: IncomingMessage, res: ServerResponse) {
+  const settlementOperator = pathname === '/api/invoices/ocr' || pathname === '/api/invoices/pending/delete'
+    || /^\/api\/projects\/[^/]+\/settlements\/confirm$/.test(pathname)
+    ? financeOperator(req) : undefined
+  if (pathname === '/api/settlements/calc') {
+    const context = requestContext(req)
+    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能访问结算试算')
+  }
+  let manager: ReturnType<typeof managementActor> | undefined
+  if (pathname === '/api/mcp/sync' || pathname === '/api/rules'
+    || (pathname.startsWith('/api/rules/') && ['/update', '/status', '/delete'].some(suffix => pathname.endsWith(suffix)))) {
+    manager = managementActor(req, ['admin'])
+  } else if (pathname.startsWith('/api/projects/') && ['/open', '/terminate', '/interrupt'].some(suffix => pathname.endsWith(suffix))) {
+    manager = managementActor(req, ['admin', 'super_admin'])
+  } else if (pathname.startsWith('/api/takeovers/') && pathname.endsWith('/force')) {
+    manager = managementActor(req, ['super_admin'])
+  }
   if (pathname === '/api/receiving-codes' && String(req.headers['content-type'] ?? '').toLowerCase().startsWith('multipart/form-data;')) {
+    const actor = receivingCodeManager(req)
     const { fields, image } = await readValidatedUpload(
       req,
       ['subject', 'accountNote', 'codeName', 'operator', 'createRequestId'],
@@ -1009,7 +1183,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       subject,
       accountNote,
       codeName,
-      operator: fields.operator?.trim() || 'finance01 · 财务',
+      operator: actor.label,
+      role: actor.role,
       image
     }, {
       receivingCodes: repositories.receivingCodes,
@@ -1029,11 +1204,12 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
 
   const multipartReceivingCodeImageMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/image$/)
   if (multipartReceivingCodeImageMatch) {
+    const actor = receivingCodeManager(req)
     const receivingCodeId = decodeURIComponent(multipartReceivingCodeImageMatch[1])
-    const { fields, image } = await readValidatedUpload(req, ['operator'], ['image/png', 'image/jpeg', 'image/webp'])
     const current = await repositories.receivingCodes.getById(receivingCodeId)
     if (!current) return send(res, 404, { error: 'RECEIVING_CODE_NOT_FOUND', message: '项目收款码不存在' })
-    const actor = uploadActor(fields, 'finance01 · 财务')
+    await requireReceivingCodeMutable(receivingCodeId)
+    const { image } = await readValidatedUpload(req, ['operator'], ['image/png', 'image/jpeg', 'image/webp'])
     const updated = await fileAssetService.replaceBinding({
       ...image,
       purpose: 'receiving-code',
@@ -1044,11 +1220,12 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     }, async (asset, session) => {
       const latest = await repositories.receivingCodes.getById(receivingCodeId, session)
       if (!latest) throw new Error('项目收款码不存在')
+      await requireReceivingCodeMutable(receivingCodeId, session)
       const record = { ...latest, imageAssetId: asset.id, imageName: image.fileName, updatedBy: actor.label, updatedAt: now() }
       await repositories.receivingCodes.replace(record, session)
       await repositories.auditLogs.insert(auditRecord({
         actor: actor.label,
-        role: 'finance',
+        role: actor.role,
         action: latest.imageAssetId ? '更换收款码图片' : '上传收款码图片',
         target: latest.id,
         before: { imageAssetId: latest.imageAssetId, imageName: latest.imageName },
@@ -1062,6 +1239,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/payments/ocr') {
+    const context = requestContext(req)
     const { fields, image } = await readValidatedUpload(
       req,
       ['paymentId', 'subscriptionId', 'expectedAmount', 'operator'],
@@ -1070,10 +1248,15 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = fields.subscriptionId?.trim()
     const current = subscriptionId ? await repositories.subscriptions.getById(subscriptionId) : null
     if (!current) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    if (context.role !== 'employee' || current.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能上传本人认购的支付截图')
+    if (['已缴款', '已收款', '已释放', '公司待出资'].includes(current.pay)) return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
+    if (current.shares !== undefined && Date.now() > new Date(current.paymentDeadlineAt.replace(' ', 'T')).getTime()) {
+      return send(res, 409, { error: 'PAYMENT_DEADLINE_PASSED', message: '该认购的缴款期限已结束' })
+    }
     if ((current.paymentImages?.length ?? 0) >= maxPaymentImagesPerSubscription) {
       return send(res, 429, { error: 'PAYMENT_IMAGE_LIMIT_EXCEEDED', message: `每条认购最多保留 ${maxPaymentImagesPerSubscription} 张支付截图` })
     }
-    const actor = uploadActor(fields, `${current.userId} · 员工`)
+    const actor = { userId: context.userId, label: `${context.userId} · 员工` }
     const asset = await fileAssetService.uploadUnbound({
       ...image,
       purpose: 'payment-proof',
@@ -1113,7 +1296,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const paymentImages = [...(latest.paymentImages ?? []), imageRecord]
         const recognizedTotal = Number(paymentImages.reduce((sum, item) => sum + (item.status === '已识别' ? item.recognizedAmount : 0), 0).toFixed(2))
         const expectedAmount = Number(latest.amount)
-        const pay = recognitionFailure ? '待复核' : recognizedTotal === expectedAmount ? '已缴款' : recognizedTotal < expectedAmount ? '部分缴款' : '待复核'
+        const pay = latest.shares !== undefined
+          ? '待复核'
+          : recognitionFailure ? '待复核' : recognizedTotal === expectedAmount ? '已缴款' : recognizedTotal < expectedAmount ? '部分缴款' : '待复核'
         const record = {
           ...latest,
           paymentImages,
@@ -1163,13 +1348,12 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!['已满额', '已截止', '部分已结算'].includes(project.status)) {
       return send(res, 409, { error: 'PROJECT_NOT_SETTLEMENT_ELIGIBLE', message: '项目当前状态不允许发起结算识别' })
     }
-    const actor = uploadActor(fields, 'finance01 · 财务')
     const asset = await fileAssetService.uploadUnbound({
       ...image,
       purpose: 'settlement-invoice',
       ownerType: 'project',
       ownerId: project.id,
-      createdBy: actor.userId
+      createdBy: settlementOperator!.userId
     })
     try {
       ocrQuota.take('ocr')
@@ -1231,6 +1415,51 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     }
   }
 
+  if (pathname === '/api/invoices/pending/delete') {
+    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''
+    const assetId = typeof body.assetId === 'string' ? body.assetId.trim() : ''
+    const proofId = typeof body.settlementProofId === 'string' ? body.settlementProofId.trim() : ''
+    if (!projectId || !assetId || !proofId) return send(res, 400, { error: 'PENDING_INVOICE_REQUIRED', message: '缺少待确认发票标识' })
+    const asset = await fileAssetService.getReadyAsset(assetId)
+    if (!asset || asset.purpose !== 'settlement-invoice' || asset.ownerType !== 'project' || asset.ownerId !== projectId) {
+      return send(res, 404, { error: 'FILE_NOT_FOUND', message: '待确认发票不存在' })
+    }
+    if (asset.createdBy !== settlementOperator!.userId) throw new AppError(403, 'FORBIDDEN', '只能删除本人上传的待确认发票')
+    const project = await repositories.projects.getById(projectId)
+    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    if (project.settlementInvoices?.some(invoice => invoice.assetId === asset.id)) {
+      return send(res, 409, { error: 'INVOICE_ALREADY_CONFIRMED', message: '已确认结算的凭证不能删除' })
+    }
+    let proof: ReturnType<typeof ocrProofStore.consume>
+    try {
+      proof = ocrProofStore.consume({ proofId, projectId, assetId: asset.id, imageDigest: asset.sha256, fileName: asset.originalName })
+    } catch (error) {
+      return send(res, 409, { error: 'OCR_PROOF_INVALID', message: error instanceof Error ? error.message : '识别凭证无效' })
+    }
+    try {
+      await fileAssetService.deleteBinding(asset.id, async (_asset, session) => {
+        const latestProject = await repositories.projects.getById(projectId, session)
+        if (!latestProject) throw new AppError(404, 'PROJECT_NOT_FOUND', '项目不存在')
+        if (latestProject.settlementInvoices?.some(invoice => invoice.assetId === asset.id)) {
+          throw new AppError(409, 'INVOICE_ALREADY_CONFIRMED', '已确认结算的凭证不能删除')
+        }
+        await repositories.auditLogs.insert(auditRecord({
+          actor: settlementOperator!.label, role: settlementOperator!.role,
+          action: '删除待确认结算凭证', target: asset.id,
+          before: { projectId, status: asset.status }, after: { status: 'pending_delete' }
+        }) as never, session)
+      })
+      return send(res, 200, { message: '待确认发票及文件已删除' })
+    } catch (error) {
+      const latestAsset = await repositories.fileAssets.getById(asset.id)
+      if (!latestAsset || latestAsset.status === 'pending_delete') {
+        return send(res, 202, { message: '待确认发票已停用，存储文件待重试清理' })
+      }
+      ocrProofStore.restore(proof)
+      throw error
+    }
+  }
+
   if (pathname === '/api/mcp/sync') {
     const result = await fetchAllProcurementPages({
       baseUrl: process.env.PROCUREMENT_API_URL ?? 'https://prod-api-admin.fushangyunfu.com/admin-api/erp/offline-order/page',
@@ -1276,8 +1505,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     }
     const summary = { fetched: result.fetched, total: result.total, created, updated, skipped, skippedByReason }
     await pushAudit({
-      actor: '系统',
-      role: 'system',
+      actor: manager!.label,
+      role: manager!.role,
       action: '采购订单分页拉取',
       target: 'procurement-offline-order-page',
       before: null,
@@ -1290,6 +1519,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/receiving-codes') {
+    const actor = receivingCodeManager(req)
     const subject = String(body.subject ?? '').trim()
     const accountNote = String(body.accountNote ?? '').trim()
     const codeName = String(body.codeName ?? '').trim()
@@ -1309,7 +1539,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       subject,
       accountNote,
       codeName,
-      operator: String(body.operator ?? 'finance01 · 财务')
+      operator: actor.label,
+      role: actor.role
     }, {
       receivingCodes: repositories.receivingCodes,
       auditLogs: repositories.auditLogs,
@@ -1328,20 +1559,22 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
 
   const receivingCodeImageMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/image$/)
   if (receivingCodeImageMatch) {
+    const actor = receivingCodeManager(req)
     const receivingCodeId = decodeURIComponent(receivingCodeImageMatch[1])
     const receivingCode = receivingCodes.find(item => item.id === receivingCodeId)
     if (!receivingCode) return send(res, 404, { error: 'RECEIVING_CODE_NOT_FOUND', message: '项目收款码不存在' })
+    await requireReceivingCodeMutable(receivingCodeId)
     const image = validateImagePayload(body, res, 'RECEIVING_CODE')
     if (!image) return
     if (!ensureImageStorageCapacity(res, image.imageUrl, receivingCode.imageUrl ?? '')) return
     const before = { imageName: receivingCode.imageName, updatedBy: receivingCode.updatedBy, updatedAt: receivingCode.updatedAt }
     receivingCode.imageUrl = image.imageUrl
     receivingCode.imageName = image.imageName
-    receivingCode.updatedBy = String(body.operator ?? 'finance01 · 财务')
+    receivingCode.updatedBy = actor.label
     receivingCode.updatedAt = now()
     await pushAudit({
       actor: receivingCode.updatedBy,
-      role: 'finance',
+      role: actor.role,
       action: before.imageName ? '更换收款码图片' : '上传收款码图片',
       target: receivingCode.id,
       before,
@@ -1352,6 +1585,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
 
   const receivingCodeDisableMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/disable$/)
   if (receivingCodeDisableMatch) {
+    const actor = receivingCodeManager(req)
     const receivingCodeId = decodeURIComponent(receivingCodeDisableMatch[1])
     const receivingCode = receivingCodes.find(item => item.id === receivingCodeId)
     if (!receivingCode) return send(res, 404, { error: 'RECEIVING_CODE_NOT_FOUND', message: '项目收款码不存在' })
@@ -1361,23 +1595,51 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const before = { status: receivingCode.status, disabledReason: receivingCode.disabledReason }
     receivingCode.status = '已禁用'
     receivingCode.disabledReason = reason
-    receivingCode.updatedBy = String(body.operator ?? 'finance01 · 财务')
+    receivingCode.updatedBy = actor.label
     receivingCode.updatedAt = now()
-    await pushAudit({ actor: receivingCode.updatedBy, role: 'finance', action: '禁用收款码', target: receivingCode.id, before, after: { status: receivingCode.status, disabledReason: reason } })
+    await pushAudit({ actor: receivingCode.updatedBy, role: actor.role, action: '禁用收款码', target: receivingCode.id, before, after: { status: receivingCode.status, disabledReason: reason } })
     return send(res, 200, { data: receivingCode, message: '收款码已禁用并保存' })
   }
 
   if (pathname === '/api/subscriptions') {
+    const context = requestContext(req)
+    if (context.role !== 'employee' || (body.userId !== undefined && body.userId !== context.userId)) {
+      throw new AppError(403, 'FORBIDDEN', '只能以本人身份认购')
+    }
     const project = projects.find(item => item.id === body.projectId)
-    const amount = Number(body.amount)
+    let amount = Number(body.amount)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
-    if (project.status !== '未满额') return send(res, 409, { error: 'PROJECT_NOT_SUBSCRIBABLE', message: '只有未满额项目可以继续认购' })
     if (!body.agreementsConfirmed) return send(res, 409, { error: 'AGREEMENT_REQUIRED', message: '请先确认当前有效协议' })
     if (!body.idempotencyKey) return send(res, 400, { error: 'IDEMPOTENCY_KEY_REQUIRED', message: '缺少 idempotency_key（幂等键）' })
+    const rule = rules.find(item => item.id === project.ruleId)
+    const userId = context.userId
     const existing = subscriptions.find(item => item.idempotencyKey === body.idempotencyKey)
-    if (existing) return send(res, 200, { data: existing, message: '重复请求已按幂等键返回原认购记录' })
-    if (typeof body.amount !== 'number' || !Number.isFinite(amount)) return send(res, 400, { error: 'AMOUNT_INVALID', message: '认购金额必须是有效数字' })
-    if (amount < 100) return send(res, 400, { error: 'AMOUNT_TOO_SMALL', message: '认购金额不能低于 100 元' })
+    if (existing) {
+      const sameRequest = existing.projectId === project.id && existing.userId === userId && (rule?.sharePrice !== undefined
+        ? existing.shares === Number(body.shares) && (body.amount === undefined || existing.amount === Number(body.amount))
+        : existing.amount === Number(body.amount))
+      if (!sameRequest) return send(res, 409, { error: 'IDEMPOTENCY_KEY_CONFLICT', message: '该幂等键已用于其他认购请求' })
+      return send(res, 200, { data: existing, message: '重复请求已按幂等键返回原认购记录' })
+    }
+    if (project.status !== '未满额') return send(res, 409, { error: 'PROJECT_NOT_SUBSCRIBABLE', message: '只有未满额项目可以继续认购' })
+    let shares: number | undefined
+    if (rule?.sharePrice !== undefined) {
+      const deadline = new Date(project.deadline.replace(' ', 'T')).getTime()
+      if (!Number.isFinite(deadline) || Date.now() > deadline) return send(res, 409, { error: 'SUBSCRIPTION_DEADLINE_PASSED', message: '认购截止时间已过或无效' })
+      const userSubscriptions = subscriptions.filter(item => item.projectId === project.id && item.userId === userId)
+      if (!rule.allowMultiple && userSubscriptions.length > 0) return send(res, 409, { error: 'MULTIPLE_SUBSCRIPTIONS_DISABLED', message: '本项目不允许重复认购' })
+      shares = Number(body.shares)
+      try {
+        amount = calculateShareSubscription(rule.sharePrice, shares, project.remain,
+          userSubscriptions.reduce((sum, item) => sum + (item.shares ?? 0), 0), rule.maxSharesPerEmployee ?? 0)
+      } catch (error) {
+        return send(res, 400, { error: 'SHARE_SUBSCRIPTION_INVALID', message: error instanceof Error ? error.message : '认购份数无效' })
+      }
+      if (body.amount !== undefined && Number(body.amount) !== amount) return send(res, 400, { error: 'SHARE_AMOUNT_MISMATCH', message: '认购金额必须由份数和每份金额计算' })
+    } else {
+      if (typeof body.amount !== 'number' || !Number.isFinite(amount)) return send(res, 400, { error: 'AMOUNT_INVALID', message: '认购金额必须是有效数字' })
+      if (amount < 100) return send(res, 400, { error: 'AMOUNT_TOO_SMALL', message: '认购金额不能低于 100 元' })
+    }
     if (amount > project.remain) return send(res, 409, { error: 'INSUFFICIENT_REMAINING_AMOUNT', message: '剩余可认购金额不足' })
 
     const before = { subscribed: project.subscribed, remain: project.remain, people: project.people, employeeSubscribedAmount: project.employeeSubscribedAmount }
@@ -1394,12 +1656,13 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       id: `SUB-${Date.now()}`,
       projectId: project.id,
       project: project.title,
-      userId: body.userId ?? 'employee01',
+      userId,
       amount,
+      shares,
       pay: '未缴款',
       profit: project.profitAmount,
       action: '去支付',
-      idempotencyKey: body.idempotencyKey,
+      idempotencyKey: String(body.idempotencyKey),
       createdAt,
       paymentDeadlineAt: addHours(createdAt, 12)
     }
@@ -1414,6 +1677,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = decodeURIComponent(receiptMatch[1])
     const subscription = subscriptions.find(item => item.id === subscriptionId)
     if (!subscription) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    const context = requestContext(req)
+    if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能确认本人认购的收款')
     if (subscription.pay !== '待确认收款') {
       return send(res, 409, { error: 'SUBSCRIPTION_STATUS_INVALID', message: '仅待确认收款状态可以确认收款' })
     }
@@ -1421,7 +1686,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     subscription.pay = '已收款'
     subscription.action = '查看支付'
     await pushAudit({
-      actor: body.operator ?? `${subscription.userId} · 员工`,
+      actor: `${context.userId} · 员工`,
       role: 'employee',
       action: '确认收款',
       target: subscription.id,
@@ -1435,6 +1700,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
 
   const reviewMatch = pathname.match(/^\/api\/subscriptions\/([^/]+)\/review$/)
   if (reviewMatch) {
+    const context = requestContext(req)
+    if (context.role !== 'finance') throw new AppError(403, 'FORBIDDEN', '只有财务可以复核支付')
     const subscriptionId = decodeURIComponent(reviewMatch[1])
     const subscription = subscriptions.find(item => item.id === subscriptionId)
     if (!subscription) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
@@ -1449,7 +1716,52 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       return send(res, 400, { error: 'REJECT_REASON_REQUIRED', message: '复核驳回必须填写驳回理由' })
     }
     const reviewedAt = now()
-    const reviewedBy = String(body.operator ?? 'finance01 · 财务')
+    const reviewedBy = `${context.userId} · 财务`
+    if (subscription.shares !== undefined && result === 'pass') {
+      try {
+        const updated = await mongo.withTransaction(async session => {
+          const latest = await repositories.subscriptions.getById(subscription.id, session)
+          if (!latest || latest.pay !== '待复核' || latest.shares === undefined) throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
+          const verified = validateContributionReview({
+            expectedAmount: latest.amount,
+            actualPaidAmount: Number(body.actualPaidAmount),
+            transactionNo: String(body.transactionNo ?? ''),
+            proofs: latest.paymentImages ?? []
+          })
+          for (const assetId of verified.proofAssetIds) {
+            const asset = await repositories.fileAssets.getById(assetId, session)
+            if (!asset || asset.status !== 'ready' || asset.purpose !== 'payment-proof' || asset.ownerType !== 'subscription' || asset.ownerId !== latest.id) {
+              throw new AppError(409, 'PAYMENT_PROOF_INVALID', '缴款凭证不存在或未完成留存')
+            }
+          }
+          const record = {
+            ...latest, pay: '已缴款' as const, action: '查看支付', reviewedBy, reviewedAt,
+            rejectReason: undefined, actualPaidAmount: verified.amountCents / 100, transactionNo: verified.transactionNo
+          }
+          await repositories.subscriptions.replace(record, session)
+          await fundLedger.append({
+            id: `LED-${randomUUID()}`, sourceKey: `contribution:${latest.id}`, type: 'employee_contribution',
+            projectId: latest.projectId, subscriptionId: latest.id, participantId: latest.userId,
+            shares: latest.shares, amountCents: verified.amountCents, transactionNo: verified.transactionNo,
+            transactionKey: JSON.stringify([latest.projectId, 'employee_contribution', verified.transactionNo]),
+            proofAssetIds: verified.proofAssetIds, reviewedBy, createdAt: reviewedAt
+          }, session)
+          await repositories.auditLogs.insert(auditRecord({
+            actor: reviewedBy, role: 'finance', action: '按份认购缴款复核通过', target: latest.id,
+            before: { pay: latest.pay }, after: { pay: record.pay, amountCents: verified.amountCents, transactionNo: verified.transactionNo }
+          }) as never, session)
+          return record
+        })
+        const index = subscriptions.findIndex(item => item.id === updated.id)
+        if (index >= 0) subscriptions.splice(index, 1, updated as Subscription)
+        return send(res, 200, { data: updated, message: '财务复核通过，缴款流水已追加到资金台账' })
+      } catch (error) {
+        if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+        if (error instanceof RangeError) return send(res, 400, { error: 'CONTRIBUTION_REVIEW_MISMATCH', message: error.message })
+        if (isDuplicateKey(error)) return send(res, 409, { error: 'LEDGER_TRANSACTION_DUPLICATE', message: '该交易流水号或认购复核记录已存在' })
+        throw error
+      }
+    }
     const before = {
       pay: subscription.pay,
       action: subscription.action,
@@ -1485,7 +1797,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   if (pathname === '/api/rules') {
     const validated = validateRulePayload(body, res)
     if (!validated) return
-    const { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId } = validated
+    const { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId, shareRule } = validated
     if (rules.some(rule => rule.projectId === project.id)) {
       return send(res, 409, {
         error: 'PROJECT_RULE_EXISTS',
@@ -1505,19 +1817,20 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       projectName: project.title,
       ruleName: body.ruleName,
       totalAmount,
+      ...shareRule,
       companyFixedAmount,
       minAmount,
       minParticipants,
       receivingCodeId,
       allowMultiple: Boolean(body.allowMultiple),
-      companyTakeover: Boolean(body.companyTakeover),
+      companyTakeover: shareRule ? true : Boolean(body.companyTakeover),
       status: normalizeRuleStatus(body.status),
       startAt: body.startAt ?? '',
       endAt: body.endAt ?? '',
       updatedAt: now()
     }
     rules.unshift(record)
-    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '创建认购规则', target: record.id, before: null, after: record })
+    await pushAudit({ actor: manager!.label, role: manager!.role, action: '创建认购规则', target: record.id, before: null, after: record })
     await persistState()
     return send(res, 201, { data: record })
   }
@@ -1534,7 +1847,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     }
     const validated = validateRulePayload(body, res)
     if (!validated) return
-    const { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId } = validated
+    const { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId, shareRule } = validated
     const nextStatus = normalizeRuleStatus(body.status ?? rule.status)
     const hasRealSubscriptions = hasRealUserSubscriptions(project.id)
     if (nextStatus === '已启用' && hasRealSubscriptions) {
@@ -1548,17 +1861,21 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     rule.projectName = project.title
     rule.ruleName = String(body.ruleName)
     rule.totalAmount = totalAmount
+    rule.sharePrice = shareRule?.sharePrice
+    rule.totalShares = shareRule?.totalShares
+    rule.companyFrontShares = shareRule?.companyFrontShares
+    rule.maxSharesPerEmployee = shareRule?.maxSharesPerEmployee
     rule.companyFixedAmount = companyFixedAmount
     rule.minAmount = minAmount
     rule.minParticipants = minParticipants
     rule.receivingCodeId = receivingCodeId
     rule.allowMultiple = Boolean(body.allowMultiple)
-    rule.companyTakeover = Boolean(body.companyTakeover)
+    rule.companyTakeover = shareRule ? true : Boolean(body.companyTakeover)
     rule.status = nextStatus
     rule.startAt = String(body.startAt ?? '')
     rule.endAt = String(body.endAt ?? '')
     rule.updatedAt = now()
-    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: '修改认购规则', target: rule.id, before, after: rule })
+    await pushAudit({ actor: manager!.label, role: manager!.role, action: '修改认购规则', target: rule.id, before, after: rule })
     await persistState()
     return send(res, 200, { data: rule, message: '认购规则已修改' })
   }
@@ -1586,7 +1903,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const before = { ...rule }
     rule.status = nextStatus
     rule.updatedAt = now()
-    await pushAudit({ actor: body.operator ?? 'admin01 · 管理员', role: 'admin', action: nextStatus === '已启用' ? '启用认购规则' : '停用认购规则', target: rule.id, before, after: rule })
+    await pushAudit({ actor: manager!.label, role: manager!.role, action: nextStatus === '已启用' ? '启用认购规则' : '停用认购规则', target: rule.id, before, after: rule })
     await persistState()
     return send(res, 200, { data: rule, message: nextStatus === '已启用' ? '认购规则已启用' : '认购规则已停用' })
   }
@@ -1605,8 +1922,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     await mongo.withTransaction(async session => {
       await repositories.rules.deleteById(rule.id, session)
       await repositories.auditLogs.insert(auditRecord({
-        actor: typeof body.operator === 'string' ? body.operator : 'admin01 · 管理员',
-        role: 'admin', action: '删除认购规则', target: rule.id, before: rule, after: null
+        actor: manager!.label,
+        role: manager!.role, action: '删除认购规则', target: rule.id, before: rule, after: null
       }) as never, session)
       return true
     })
@@ -1650,8 +1967,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     project.interruptedAt = undefined
     project.refundNotice = undefined
     await pushAudit({
-      actor: body.operator ?? 'admin01 · 管理员',
-      role: 'admin',
+      actor: manager!.label,
+      role: manager!.role,
       action: '开放项目认购',
       target: project.id,
       before,
@@ -1681,8 +1998,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     project.interruptedAt = now()
     project.refundNotice = '已缴款金额将在 48h 内原路返款到账'
     await pushAudit({
-      actor: body.operator ?? 'admin01 · 管理员',
-      role: 'admin',
+      actor: manager!.label,
+      role: manager!.role,
       action: '终止项目认购',
       target: project.id,
       before,
@@ -1718,8 +2035,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       status: '已通知员工与财务'
     })
     await pushAudit({
-      actor: body.operator ?? 'admin01 · 管理员',
-      role: 'admin',
+      actor: manager!.label,
+      role: manager!.role,
       action: '中断项目认购',
       target: project.id,
       before,
@@ -1734,6 +2051,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!subscription) {
       return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
+    const context = requestContext(req)
+    if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能删除本人认购的支付截图')
     const imageId = typeof body.imageId === 'string' ? body.imageId.trim() : ''
     const imageIndex = subscription.paymentImages?.findIndex(item => item.id === imageId) ?? -1
     if (imageIndex < 0) {
@@ -1750,7 +2069,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const latestImage = remainingImages.at(-1)
       const recognizedTotal = Number(remainingImages.filter(item => item.status === '已识别').reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
       const hasFailedImage = remainingImages.some(item => item.status === '识别失败')
-      const pay = hasFailedImage ? '待复核' : recognizedTotal === 0 ? '未缴款' : recognizedTotal < latest.amount ? '部分缴款' : '待复核'
+      const pay = latest.shares !== undefined
+        ? remainingImages.length === 0 ? '未缴款' : '待复核'
+        : hasFailedImage ? '待复核' : recognizedTotal === 0 ? '未缴款' : recognizedTotal < latest.amount ? '部分缴款' : '待复核'
       const record = {
         ...latest,
         paymentImages: remainingImages,
@@ -1763,7 +2084,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       }
       await repositories.subscriptions.replace(record, session)
       await repositories.auditLogs.insert(auditRecord({
-        actor: typeof body.operator === 'string' ? body.operator : 'employee01 · 员工',
+        actor: `${context.userId} · 员工`,
         role: 'employee',
         action: '删除识别失败支付截图',
         target: image.id,
@@ -1792,8 +2113,13 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!subscription) {
       return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
-    if (['已缴款', '已收款'].includes(subscription.pay)) {
-      return send(res, 409, { error: 'PAYMENT_ALREADY_COMPLETED', message: '该认购已完成缴款，不能继续上传支付截图' })
+    const context = requestContext(req)
+    if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能上传本人认购的支付截图')
+    if (['已缴款', '已收款', '已释放', '公司待出资'].includes(subscription.pay)) {
+      return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
+    }
+    if (subscription.shares !== undefined && Date.now() > new Date(subscription.paymentDeadlineAt.replace(' ', 'T')).getTime()) {
+      return send(res, 409, { error: 'PAYMENT_DEADLINE_PASSED', message: '该认购的缴款期限已结束' })
     }
     if (!paymentImageUrl || !supportedPaymentImageDataUrl.test(paymentImageUrl) || paymentImageUrl.length > maxImageDataUrlLength) {
       return send(res, 400, { error: 'PAYMENT_IMAGE_INVALID', message: '支付截图仅支持 PNG、JPG 或 BMP 格式，且大小不能超过 5MB' })
@@ -1845,7 +2171,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       .reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
     subscription.recognizedPaidAmount = recognizedTotal
     if (recognized) subscription.paymentSuccessAt = uploadedAt
-    subscription.pay = !recognized
+    subscription.pay = subscription.shares !== undefined
+      ? '待复核'
+      : !recognized
       ? '待复核'
       : recognizedTotal === expectedAmount
         ? '待复核'
@@ -1873,10 +2201,16 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/settlements/calc') {
-    const income = Number(body.income ?? 286000)
-    const cost = Number(body.cost ?? 250000)
-    const fee = Number(body.fee ?? 6480)
-    return send(res, 200, { data: { income, cost, fee, profit: income - cost - fee } })
+    try {
+      return send(res, 200, { data: calculateSettlementProfit({
+        customerReceiptsCents: body.customerReceiptsCents,
+        companyTopUpsCents: body.companyTopUpsCents,
+        procurementPaymentsCents: body.procurementPaymentsCents,
+        confirmedCostsCents: body.confirmedCostsCents
+      }) })
+    } catch (error) {
+      return send(res, 400, { error: 'SETTLEMENT_PROFIT_INPUT_INVALID', message: error instanceof Error ? error.message : '试算金额无效' })
+    }
   }
 
   const settlementConfirmMatch = pathname.match(/^\/api\/projects\/([^/]+)\/settlements\/confirm$/)
@@ -1918,13 +2252,13 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         transactionDate: duplicateInvoice?.transactionDate ?? trustedField('transactionDate'),
         payer: duplicateInvoice?.payer ?? trustedField('payer'),
         payee: duplicateInvoice?.payee ?? trustedField('payee'),
-        operator: typeof body.operator === 'string' ? body.operator.trim() : 'finance01 · 财务'
+        operator: settlementOperator!.label
       }, now())
       await mongo.withTransaction(async session => {
         await repositories.projects.replace(project as never, session)
         await repositories.auditLogs.insert(auditRecord({
-          actor: typeof body.operator === 'string' ? body.operator : 'finance01 · 财务',
-          role: 'finance',
+          actor: settlementOperator!.label,
+          role: settlementOperator!.role,
           action: result.duplicate ? '重复确认结算（幂等命中）' : project.status === '已完结' ? '确认结算 · 项目完结' : '确认结算 · 部分结算',
           target: project.id,
           before,
@@ -1982,8 +2316,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     project.companyForcedTakeoverAmount += forceAmount
     normalizeProjectAmounts(project)
     await pushAudit({
-      actor: body.operator ?? 'superadmin01 · 公司超级管理员',
-      role: 'super_admin',
+      actor: manager!.label,
+      role: manager!.role,
       action: '强制接管',
       target: project.id,
       before,
@@ -2002,7 +2336,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   return send(res, 404, { error: 'NOT_FOUND', message: '接口不存在' })
 }
 
-const server = createServer(async (req, res) => {
+const server = createServer(observeRequests(async (req, res) => {
   if (!req.url) return send(res, 400, { error: 'BAD_REQUEST' })
   if (req.method === 'OPTIONS') return send(res, 204, null)
   const url = new URL(req.url, 'http://127.0.0.1:4100')
@@ -2017,19 +2351,26 @@ const server = createServer(async (req, res) => {
     if (/multipart|图片|文件名|文件内容|扩展名|表单字段|只能上传|必须上传/.test(message)) {
       return send(res, message.includes('超过大小') ? 413 : 400, { error: 'UPLOAD_INVALID', message })
     }
+    logFailure('http.error', error)
     return send(res, 500, { error: 'INTERNAL_ERROR', message: '服务处理失败，请稍后重试' })
   }
-})
+}))
 
 const port = Number(process.env.API_PORT ?? 4100)
 server.requestTimeout = 15_000
 server.headersTimeout = 10_000
 server.listen(port, '127.0.0.1', () => {
   console.log(`subscription-api listening on http://127.0.0.1:${port}`)
+  void runDueBackstops().catch(error => logFailure('company.backstop', error))
 })
+const backstopTimer = setInterval(() => {
+  void runDueBackstops().catch(error => logFailure('company.backstop', error))
+}, 30_000)
+backstopTimer.unref()
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
+    clearInterval(backstopTimer)
     server.close(() => {
       void mongo.close().finally(() => process.exit(0))
     })

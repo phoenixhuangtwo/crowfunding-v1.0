@@ -6,6 +6,7 @@ export const businessCollections = [
   'subscription_rules',
   'receiving_codes',
   'audit_logs',
+  'fund_ledger',
   'risk_events',
   'file_assets'
 ] as const
@@ -25,6 +26,7 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   subscription_rules: [],
   receiving_codes: ['imageUrl'],
   audit_logs: [],
+  fund_ledger: [],
   risk_events: [],
   file_assets: []
 }
@@ -66,6 +68,12 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'uniq_audit_logs_id', key: { id: 1 }, unique: true },
     { name: 'idx_audit_logs_time', key: { time: -1 } },
     { name: 'idx_audit_logs_target', key: { target: 1 } }
+  ],
+  fund_ledger: [
+    { name: 'uniq_fund_ledger_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_fund_ledger_source', key: { sourceKey: 1 }, unique: true },
+    { name: 'uniq_fund_ledger_transaction_key', key: { transactionKey: 1 }, unique: true },
+    { name: 'idx_fund_ledger_project_time', key: { projectId: 1, createdAt: -1 } }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

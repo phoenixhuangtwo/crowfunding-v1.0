@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { InvoiceOcrResult } from './invoice-ocr.ts'
 
+export const DEFAULT_OCR_PROOF_TTL_MS = 10 * 60 * 1000
+
 type OcrProofRecord = {
   proofId: string
   projectId: string
@@ -36,7 +38,7 @@ export class OcrProofStore {
   private readonly idFactory: () => string
 
   constructor(options: OcrProofStoreOptions = {}) {
-    this.ttlMs = options.ttlMs ?? 10 * 60 * 1000
+    this.ttlMs = options.ttlMs ?? DEFAULT_OCR_PROOF_TTL_MS
     this.maxEntries = options.maxEntries ?? 100
     this.maxEntriesPerProject = options.maxEntriesPerProject ?? 20
     this.now = options.now ?? Date.now
@@ -88,6 +90,11 @@ export class OcrProofStore {
 
   remove(proofId: string) {
     this.proofs.delete(proofId)
+  }
+
+  restore(proof: OcrProofRecord) {
+    this.removeExpired()
+    if (proof.expiresAt > this.now()) this.proofs.set(proof.proofId, structuredClone(proof))
   }
 
   consume(input: OcrProofIdentity) {

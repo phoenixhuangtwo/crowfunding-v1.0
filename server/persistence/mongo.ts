@@ -1,3 +1,4 @@
+import { traceOperation } from '../observability.ts'
 import { MongoClient, type ClientSession, type Db } from 'mongodb'
 import type { AppConfig } from '../config.ts'
 import { transactionCapabilityError } from './schema.ts'
@@ -16,11 +17,11 @@ function createMongoContext(client: MongoClient, db: Db): MongoContext {
     async withTransaction<T>(work: (session: ClientSession) => Promise<T>) {
       const session = client.startSession()
       try {
-        const result = await session.withTransaction(() => work(session), {
+        const result = await traceOperation('mongodb', 'transaction', () => session.withTransaction(() => work(session), {
           readPreference: 'primary',
           readConcern: { level: 'snapshot' },
           writeConcern: { w: 'majority' }
-        })
+        }))
         if (result === undefined) throw new Error('MongoDB 事务未返回结果')
         return result
       } finally {

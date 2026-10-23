@@ -1,4 +1,4 @@
-import type { ReceivingCode } from '../domain/models.ts'
+import type { ReceivingCode, RequestContext } from '../domain/models.ts'
 import type { AppRepositories } from '../persistence/repositories.ts'
 
 export function presentReceivingCode(code: ReceivingCode) {
@@ -15,8 +15,9 @@ export class QueryService {
     return this.repos.projects.list({}, { sort: { deadline: 1, id: 1 } })
   }
 
-  listSubscriptions() {
-    return this.repos.subscriptions.list({}, { sort: { createdAt: -1, id: -1 } })
+  listSubscriptions(context?: RequestContext) {
+    const filter = context?.role === 'employee' ? { userId: context.userId } : {}
+    return this.repos.subscriptions.list(filter, { sort: { createdAt: -1, id: -1 } })
   }
 
   async listReceivingCodes() {
