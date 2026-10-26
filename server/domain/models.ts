@@ -147,7 +147,7 @@ export type FileAsset = {
   mimeType: string
   sizeBytes: number
   sha256: string
-  purpose: 'receiving-code' | 'payment-proof' | 'settlement-invoice' | 'procurement-payment-proof' | 'customer-receipt-proof' | 'confirmed-cost-proof'
+  purpose: 'receiving-code' | 'payment-proof' | 'settlement-invoice' | 'procurement-payment-proof' | 'customer-receipt-proof' | 'confirmed-cost-proof' | 'distribution-payout-proof'
   ownerType: 'receiving-code' | 'subscription' | 'project'
   ownerId: string
   status: 'pending' | 'ready' | 'failed' | 'pending_delete'

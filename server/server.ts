@@ -25,7 +25,7 @@ import { createFundLedger } from './finance/fund-ledger.ts'
 import { validateContributionReview } from './finance/contribution-review.ts'
 import { reconcileProcurementFunding, validateProcurementPayment } from './finance/procurement-payment.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
-import { makeDistributionOrder, distributionOrderIsActive, type DistributionOrder } from './finance/distribution-orders.ts'
+import { makeDistributionOrder, distributionOrderIsActive, deriveDistributionStatus, type DistributionOrder } from './finance/distribution-orders.ts'
 import { validateCostRegistration, type ConfirmedCost } from './finance/confirmed-costs.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
 import { unresolvedReceiptDifference, validateReceiptDifference, type ReceiptDifference } from './finance/receipt-differences.ts'
@@ -747,6 +747,14 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     ])
     return send(res, 200, { data: { items, total, page, pageSize } })
   }
+  if (pathname === '/api/my-distribution-payouts') {
+    const context = requestContext(req)
+    if (context.role !== 'employee') throw new AppError(403, 'FORBIDDEN', '仅员工本人可以查看我的收益')
+    const orders = await distributionOrders.find({ 'lines.participantId': context.userId,
+      status: { $nin: ['待审批', '已驳回', '已作废'] } }).sort({ createdAt: -1 }).limit(100).toArray()
+    return send(res, 200, { data: orders.map(order => ({ orderId: order.id, projectId: order.projectId,
+      orderStatus: order.status, line: order.lines.find(line => line.participantId === context.userId) })) })
+  }
   if (pathname === '/api/confirmed-costs') {
     const role = requestContext(req).role
     if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看其他成本')
@@ -936,6 +944,31 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'confirmed-cost-proof',
       ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
     return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '成本凭证已保存' })
+  }
+  const payoutProofMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/lines\/([^/]+)\/proofs$/)
+  if (payoutProofMatch) {
+    const actor = financeOperator(req)
+    const orderId = decodeURIComponent(payoutProofMatch[1])
+    const participantId = decodeURIComponent(payoutProofMatch[2])
+    const order = await distributionOrders.findOne({ id: orderId })
+    const line = order?.lines.find(item => item.participantId === participantId)
+    if (!order || !line || line.kind !== 'employee' || line.status !== '待登记打款'
+      || !['已审批', '打款登记中'].includes(order.status)) {
+      return send(res, 409, { error: 'PAYOUT_LINE_INVALID', message: '该员工明细当前不可上传打款凭证' })
+    }
+    const subscription = await repositories.subscriptions.findOne({ projectId: order.projectId,
+      userId: participantId, pay: '已缴款' })
+    if (!subscription) return send(res, 409, { error: 'PAYOUT_SUBSCRIPTION_INVALID', message: '员工认购单不存在' })
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'subscription', ownerId: subscription.id,
+      purpose: 'distribution-payout-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'PAYOUT_PROOF_LIMIT', message: '该员工打款凭证暂存数量已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'distribution-payout-proof',
+      ownerType: 'subscription', ownerId: subscription.id, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '打款凭证已保存' })
   }
   const paymentProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-payment\/proofs$/)
   if (paymentProofMatch) {
@@ -1203,6 +1236,177 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  const payoutMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/lines\/([^/]+)\/payout$/)
+  if (payoutMatch) {
+    const actor = financeOperator(req)
+    const orderId = decodeURIComponent(payoutMatch[1])
+    const participantId = decodeURIComponent(payoutMatch[2])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const order = await distributionOrders.findOne({ id: orderId }, { session })
+        const index = order?.lines.findIndex(line => line.participantId === participantId) ?? -1
+        if (!order || index < 0 || !['已审批', '打款登记中'].includes(order.status)
+          || order.lines[index].status !== '待登记打款') {
+          throw new AppError(409, 'PAYOUT_LINE_INVALID', '该分配明细当前不能登记打款')
+        }
+        const project = await repositories.projects.getById(order.projectId, session)
+        if (!project || project.status !== '分配中') throw new AppError(409, 'PAYOUT_PROJECT_INVALID', '众筹单当前不允许登记打款')
+        const line = order.lines[index]
+        if (!Number.isSafeInteger(body.amountCents) || body.amountCents !== line.payoutCents) {
+          throw new AppError(400, 'PAYOUT_AMOUNT_INVALID', '打款金额须等于分配金额')
+        }
+        const paidAt = Date.parse(body.paidAt as string)
+        if (!Number.isFinite(paidAt) || paidAt > Date.now()) throw new AppError(400, 'PAYOUT_TIME_INVALID', '打款时间不得晚于当前时间')
+        let transactionNo: string | undefined
+        let proofAssetIds: string[] = []
+        let note: string | undefined
+        if (line.kind === 'company') {
+          if (body.companyTransferConfirmed !== true) throw new AppError(400, 'COMPANY_TRANSFER_UNCONFIRMED', '请确认公司内部结转金额')
+        } else {
+          transactionNo = typeof body.transactionNo === 'string' ? body.transactionNo.trim() : ''
+          if (transactionNo.length < 6 || transactionNo.length > 64) throw new AppError(400, 'PAYOUT_TRANSACTION_INVALID', '打款流水号须为 6 至 64 字')
+          if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.length < 1 || body.proofAssetIds.length > 5
+            || body.proofAssetIds.some(id => typeof id !== 'string' || !id.trim())
+            || new Set(body.proofAssetIds).size !== body.proofAssetIds.length) {
+            throw new AppError(400, 'PAYOUT_PROOFS_INVALID', '打款凭证须提供 1 至 5 张不同的图片')
+          }
+          proofAssetIds = body.proofAssetIds as string[]
+          note = typeof body.note === 'string' ? body.note.trim() : ''
+          if (note.length < 5 || note.length > 500) throw new AppError(400, 'PAYOUT_REVIEW_NOTE_REQUIRED', '请填写 5 至 500 字凭证与银行流水人工核对说明')
+          const subscription = await repositories.subscriptions.findOne({ projectId: order.projectId,
+            userId: participantId, pay: '已缴款' } as never, session)
+          if (!subscription) throw new AppError(409, 'PAYOUT_SUBSCRIPTION_INVALID', '员工认购记录不存在')
+          for (const assetId of proofAssetIds) {
+            const asset = await repositories.fileAssets.getById(assetId, session)
+            if (!asset || asset.status !== 'ready' || asset.purpose !== 'distribution-payout-proof'
+              || asset.ownerType !== 'subscription' || asset.ownerId !== subscription.id
+              || asset.createdBy !== actor.userId
+              || await distributionOrders.findOne({ 'lines.payout.proofAssetIds': assetId }, { session })) {
+              throw new AppError(409, 'PAYOUT_PROOF_INVALID', '打款凭证不存在、未留存或已被使用')
+            }
+          }
+          const occupied = await bankTransactions.findOne({ transactionNo }, { session })
+            || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+              .findOne({ transactionNo }, { session })
+          if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '打款流水号已被使用')
+        }
+        const payout = { amountCents: line.payoutCents, ...(transactionNo ? { transactionNo } : {}),
+          paidAt: new Date(paidAt).toISOString(), proofAssetIds, registeredBy: actor.userId,
+          ...(note ? { note } : {}) }
+        const updatedLine = { ...line, payout,
+          status: line.kind === 'company' ? '已确认' as const : '待员工确认' as const,
+          ...(line.kind === 'company' ? { confirmedAt: new Date().toISOString() } : {}) }
+        const lines = [...order.lines]
+        lines[index] = updatedLine
+        const updated: DistributionOrder = { ...order, lines, status: deriveDistributionStatus(lines) }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: order.projectId }, { $inc: { distributionRevision: 1 } }, { session })
+        if (transactionNo) {
+          await bankTransactions.insertOne({ transactionNo,
+            sourceKey: `distribution-payout:${order.id}:${participantId}`,
+            projectId: order.projectId, createdAt: new Date().toISOString() }, { session })
+        }
+        await distributionOrders.replaceOne({ id: order.id, status: order.status }, updated, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `distribution-payout:${order.id}:${participantId}`,
+          type: line.kind === 'company' ? 'company_internal_transfer' : 'employee_distribution_payout',
+          projectId: order.projectId, participantId, amountCents: line.payoutCents,
+          ...(transactionNo ? { transactionNo } : {}),
+          transactionKey: `distribution-payout:${order.id}:${participantId}`, proofAssetIds,
+          reviewedBy: actor.userId, createdAt: new Date().toISOString()
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance',
+          action: line.kind === 'company' ? '登记公司内部结转' : '登记员工分配打款',
+          target: `${order.id}:${participantId}`, before: { status: line.status },
+          after: { status: updatedLine.status, amountCents: line.payoutCents, transactionNo } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updated, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updated, message: '打款登记成功' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PAYOUT_DUPLICATE', message: '打款明细或银行流水已登记' })
+      throw error
+    }
+  }
+  const payoutConfirmMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/lines\/([^/]+)\/confirm$/)
+  if (payoutConfirmMatch) {
+    const context = requestContext(req)
+    if (context.role !== 'employee') throw new AppError(403, 'FORBIDDEN', '仅员工本人可以确认收款')
+    const orderId = decodeURIComponent(payoutConfirmMatch[1])
+    const participantId = decodeURIComponent(payoutConfirmMatch[2])
+    if (participantId !== context.userId) throw new AppError(404, 'PAYOUT_NOT_FOUND', '收益记录不存在')
+    const decision = body.decision
+    if (decision !== '确认' && decision !== '异议') throw new AppError(400, 'PAYOUT_DECISION_INVALID', '请选择确认收款或提出异议')
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (decision === '异议' && (reason.length < 5 || reason.length > 200)) {
+      throw new AppError(400, 'PAYOUT_ISSUE_REASON_INVALID', '异议原因须为 5 至 200 字')
+    }
+    const result = await mongo.withTransaction(async session => {
+      const order = await distributionOrders.findOne({ id: orderId }, { session })
+      const index = order?.lines.findIndex(line => line.participantId === participantId) ?? -1
+      if (!order || index < 0 || order.lines[index].status !== '待员工确认'
+        || !['待员工确认', '打款登记中'].includes(order.status)) {
+        throw new AppError(409, 'PAYOUT_CONFIRM_INVALID', '收益尚未登记打款或已处理')
+      }
+      const line = order.lines[index]
+      const timestamp = new Date().toISOString()
+      if (decision === '确认') {
+        if (body.agreementsConfirmed !== true) throw new AppError(400, 'AGREEMENT_CONFIRM_REQUIRED', '请先阅读并确认当前免责协议')
+        const agreement = await agreementService.requireCurrent(body.agreementVersion, session)
+        await agreementService.confirm({ version: agreement.version, userId: context.userId,
+          userName: iamDisplayName(req), node: '确认收款', relatedId: `${order.id}:${participantId}` }, session)
+      }
+      const nextLine = { ...line, status: decision === '确认' ? '已确认' as const : '有异议' as const,
+        ...(decision === '确认' ? { confirmedAt: timestamp } : { issueReason: reason, issueAt: timestamp }) }
+      const lines = [...order.lines]
+      lines[index] = nextLine
+      const updated: DistributionOrder = { ...order, lines, status: deriveDistributionStatus(lines) }
+      await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+        .updateOne({ id: order.projectId }, { $inc: { distributionRevision: 1 } }, { session })
+      await distributionOrders.replaceOne({ id: order.id, status: order.status }, updated, { session })
+      const audit = auditRecord({ actor: `${context.userId} · 员工`, role: 'employee',
+        action: decision === '确认' ? '确认分配收款' : '提出分配收款异议', target: `${order.id}:${participantId}`,
+        before: { status: line.status }, after: { status: nextLine.status,
+          ...(decision === '异议' ? { reason } : {}) } }) as AuditLog
+      await repositories.auditLogs.insert(audit as never, session)
+      return { updated, audit }
+    })
+    auditLogs.unshift(result.audit)
+    return send(res, 200, { data: result.updated.lines.find(line => line.participantId === participantId),
+      message: decision === '确认' ? '已确认收款' : '异议已提交' })
+  }
+  const payoutIssueReplyMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/lines\/([^/]+)\/issue-reply$/)
+  if (payoutIssueReplyMatch) {
+    const actor = financeOperator(req)
+    const orderId = decodeURIComponent(payoutIssueReplyMatch[1])
+    const participantId = decodeURIComponent(payoutIssueReplyMatch[2])
+    const reply = typeof body.reply === 'string' ? body.reply.trim() : ''
+    if (reply.length < 5 || reply.length > 200) return send(res, 400, { error: 'PAYOUT_ISSUE_REPLY_INVALID', message: '处理回复须为 5 至 200 字' })
+    const result = await mongo.withTransaction(async session => {
+      const order = await distributionOrders.findOne({ id: orderId }, { session })
+      const index = order?.lines.findIndex(line => line.participantId === participantId) ?? -1
+      if (!order || index < 0 || order.status !== '有异议' || order.lines[index].status !== '有异议') {
+        throw new AppError(409, 'PAYOUT_ISSUE_INVALID', '当前没有待处理的收款异议')
+      }
+      const line = order.lines[index]
+      const lines = [...order.lines]
+      lines[index] = { ...line, status: '待员工确认', issueReply: reply,
+        issueResolvedAt: new Date().toISOString() }
+      const updated: DistributionOrder = { ...order, lines, status: deriveDistributionStatus(lines) }
+      await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+        .updateOne({ id: order.projectId }, { $inc: { distributionRevision: 1 } }, { session })
+      await distributionOrders.replaceOne({ id: order.id, status: '有异议' }, updated, { session })
+      const audit = auditRecord({ actor: actor.label, role: 'finance', action: '回复分配收款异议',
+        target: `${order.id}:${participantId}`, before: { status: line.status, reason: line.issueReason },
+        after: { status: '待员工确认', reply } }) as AuditLog
+      await repositories.auditLogs.insert(audit as never, session)
+      return { line: lines[index], audit }
+    })
+    auditLogs.unshift(result.audit)
+    return send(res, 200, { data: result.line, message: '异议已处理，请员工重新确认' })
+  }
   if (pathname === '/api/confirmed-costs') {
     const actor = financeOperator(req)
     const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''

@@ -45,6 +45,11 @@ export async function authorizeAssetRead(context: RequestContext, asset: FileAss
   if (asset.purpose === 'procurement-payment-proof' && context.role === 'finance') return
   if (asset.purpose === 'customer-receipt-proof' && context.role === 'finance') return
   if (asset.purpose === 'confirmed-cost-proof' && context.role === 'finance') return
+  if (asset.purpose === 'distribution-payout-proof' && context.role === 'finance') return
+  if (asset.purpose === 'distribution-payout-proof' && context.role === 'employee') {
+    const subscription = await repos.subscriptions.getById(asset.ownerId)
+    if (subscription?.userId === context.userId) return
+  }
   if (asset.purpose === 'receiving-code') {
     if (context.role === 'admin' || context.role === 'finance') return
     if (context.role === 'employee') {

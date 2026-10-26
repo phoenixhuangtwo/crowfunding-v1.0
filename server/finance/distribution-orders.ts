@@ -14,7 +14,7 @@ export type DistributionOrder = {
   profitCents: number
   companyRoundingResidualCents: number
   payoutTotalCents: number
-  lines: Array<Distribution['lines'][number] & { status: '待登记打款' | '待员工确认' | '已确认' | '有异议' }>
+  lines: DistributionOrderLine[]
   generatedBy: string
   createdAt: string
   approvedBy?: string
@@ -24,6 +24,32 @@ export type DistributionOrder = {
   rejectReason?: string
   voidedBy?: string
   voidedAt?: string
+}
+
+export type DistributionOrderLine = Distribution['lines'][number] & {
+  status: '待登记打款' | '待员工确认' | '已确认' | '有异议'
+  payout?: {
+    amountCents: number
+    transactionNo?: string
+    paidAt: string
+    proofAssetIds: string[]
+    registeredBy: string
+    note?: string
+  }
+  confirmedAt?: string
+  issueReason?: string
+  issueAt?: string
+  issueReply?: string
+  issueResolvedAt?: string
+}
+
+export function deriveDistributionStatus(lines: DistributionOrderLine[]): DistributionOrderStatus {
+  if (!lines.length) throw new Error('分配明细不能为空')
+  if (lines.some(line => line.status === '有异议')) return '有异议'
+  if (lines.every(line => line.status === '已确认')) return '可结单'
+  if (lines.every(line => line.status !== '待登记打款')) return '待员工确认'
+  if (lines.some(line => line.status !== '待登记打款')) return '打款登记中'
+  return '已审批'
 }
 
 export function distributionOrderIsActive(order: DistributionOrder) {

@@ -103,6 +103,11 @@ try {
   refreshToken = pair.refreshToken
   const claims = await iam.checkToken(accessToken)
   const info = await iam.permissionInfo(accessToken)
+  assert.ok(info.apiPermissions.includes('crowdfunding:payout:my-query'))
+  assert.ok(info.apiPermissions.includes('crowdfunding:payout:confirm'))
+  assert.ok(info.uiPermissions.includes('crowdfunding:payout:my-query'))
+  assert.ok(info.menus.some(menu => menu.componentName === 'myPayouts'
+    || menu.children?.some(child => child.componentName === 'myPayouts')))
   assert.equal(info.user.username, account.username)
   assert.ok(info.roleCodes.includes('crowdfunding_employee'))
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:project:query', claims.tenantId), true)

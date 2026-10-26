@@ -75,6 +75,12 @@ try {
     assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
   }
   await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:cost:review', claims.tenantId), /IAM 权限拒绝/)
+  for (const permission of ['crowdfunding:payout:register', 'crowdfunding:payout:proof-upload',
+    'crowdfunding:payout:issue-reply']) {
+    assert.ok(info.apiPermissions.includes(permission), `${permission} 已授予财务`)
+    assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
+  }
+  await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:payout:confirm', claims.tenantId), /IAM 权限拒绝/)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:register', claims.tenantId), true)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:proof-upload', claims.tenantId), true)
   process.stdout.write('真实 IAM 财务授权联调通过\n')

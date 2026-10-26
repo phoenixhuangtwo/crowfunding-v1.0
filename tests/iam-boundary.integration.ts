@@ -451,6 +451,43 @@ try {
   assert.equal((distributionApproved.body.data as { status: string }).status, '已审批')
   assert.equal((await postAs(`/api/distribution-orders/${order.id}/void`, 'smoke-second-finance-token', {})).status, 409,
     '审批后不允许作废')
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-PAYOUT', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/distribution-payout-proof/ASSET-IAM-PAYOUT.png', originalName: 'payout.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'd'.repeat(64),
+    purpose: 'distribution-payout-proof', ownerType: 'subscription', ownerId: 'SUB-IAM-PAY-EMPLOYEE',
+    status: 'ready', createdBy: '1008', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const employeePayoutPath = `/api/distribution-orders/${order.id}/lines/1001/payout`
+  const employeePayout = { amountCents: 23933, transactionNo: 'BANK-IAM-PAYOUT',
+    paidAt: new Date(Date.now() - 60_000).toISOString(), proofAssetIds: ['ASSET-IAM-PAYOUT'],
+    note: '已核对银行实际打款金额与上传凭证' }
+  assert.equal((await postAs(employeePayoutPath, 'smoke-employee-token', employeePayout)).status, 403)
+  assert.equal((await postAs(employeePayoutPath, 'smoke-second-finance-token', {
+    ...employeePayout, amountCents: 23932 })).status, 400)
+  const employeePaid = await postAs(employeePayoutPath, 'smoke-second-finance-token', employeePayout)
+  assert.equal(employeePaid.status, 200, JSON.stringify(employeePaid.body))
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/lines/company/payout`,
+    'smoke-finance-token', { amountCents: 11967, paidAt: employeePayout.paidAt,
+      companyTransferConfirmed: true })).status, 200)
+  const myPayouts = await request('/api/my-distribution-payouts', employee)
+  assert.equal(myPayouts.status, 200)
+  assert.equal((myPayouts.body.data as Array<{ line: { participantId: string; status: string } }>).length, 1)
+  assert.equal((myPayouts.body.data as Array<{ line: { participantId: string; status: string } }>)[0].line.participantId, '1001')
+  const confirmationPath = `/api/distribution-orders/${order.id}/lines/1001/confirm`
+  assert.equal((await postAs(confirmationPath, 'smoke-employee-token', {
+    decision: '异议', reason: '实际到账金额与登记记录不一致' })).status, 200)
+  assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: order.id }))?.status, '有异议')
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/lines/1001/issue-reply`,
+    'smoke-finance-token', { reply: '已重新核对银行流水，登记金额与实际到账一致' })).status, 200)
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/lines/1001/confirm`,
+    'smoke-finance-token', { decision: '确认', agreementVersion: 1, agreementsConfirmed: true })).status, 403)
+  const employeeConfirmed = await postAs(`/api/distribution-orders/${order.id}/lines/1001/confirm`,
+    'smoke-employee-token', { decision: '确认', agreementVersion: 1, agreementsConfirmed: true })
+  assert.equal(employeeConfirmed.status, 200, JSON.stringify(employeeConfirmed.body))
+  assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: order.id }))?.status, '可结单')
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({
+    projectId: 'PRJ-IAM-PAY-READY', type: 'employee_distribution_payout' }), 1)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

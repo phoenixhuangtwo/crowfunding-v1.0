@@ -36,12 +36,14 @@ import AuthStateView from './components/AuthStateView.vue'
 import ProcurementPaymentPage from './components/ProcurementPaymentPage.vue'
 import CustomerReceiptsPage from './components/CustomerReceiptsPage.vue'
 import DistributionOrdersPage from './components/DistributionOrdersPage.vue'
+import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
 type PageKey =
   | 'projects'
   | 'detail'
   | 'mine'
+  | 'myPayouts'
   | 'payment'
   | 'adminProjects'
   | 'rules'
@@ -242,7 +244,8 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
     title: '员工端',
     pages: [
       { key: 'projects', label: '项目列表', req: 'P0', icon: Briefcase, permission: 'crowdfunding:project:query' },
-      { key: 'mine', label: '我的认购', req: 'P0', icon: Wallet, permission: 'crowdfunding:subscription:query' }
+      { key: 'mine', label: '我的认购', req: 'P0', icon: Wallet, permission: 'crowdfunding:subscription:query' },
+      { key: 'myPayouts', label: '我的收益', req: 'P0', icon: Wallet, permission: 'crowdfunding:payout:my-query' }
     ]
   },
   {
@@ -272,6 +275,7 @@ const pageTitleMap: Record<PageKey, string> = {
   projects: '项目列表',
   detail: '项目详情 / 认购',
   mine: '我的认购',
+  myPayouts: '我的收益',
   payment: '支付收款码与 OCR',
   adminProjects: '项目管理',
   rules: '认购规则配置',
@@ -3245,6 +3249,8 @@ watch(() => authSession.permissionInfo.value, info => {
           @updated="loadData"
         />
 
+        <MyPayoutsPage v-if="currentPage === 'myPayouts' && currentRole === 'employee'" />
+
         <DistributionOrdersPage
           v-if="currentPage === 'distributionOrders' && (currentRole === 'finance' || currentRole === 'super_admin')"
           :projects="projects" :role="currentRole"
@@ -3256,6 +3262,9 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-register-cost="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:register')"
           :can-upload-cost-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:proof-upload')"
           :can-review-cost="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:review')"
+          :can-register-payout="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:register')"
+          :can-upload-payout-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:proof-upload')"
+          :can-reply-payout-issue="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:issue-reply')"
           @updated="loadData"
         />
 
