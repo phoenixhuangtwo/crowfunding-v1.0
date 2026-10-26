@@ -52,6 +52,16 @@ try {
     employeeSubscribedAmount: 0, subscribed: 0, people: 0
   })
   await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-OVERDUE-SWEEP', title: '超期回款定时触发项目', source: 'integration-test',
+    status: '回款中', statusType: 'warning', progress: 100, remain: 0,
+    deadline: '2020-01-01 00:00', total: 100, costAmount: 100, salesAmount: 120,
+    profitAmount: 20, companyFixedAmount: 0, companyTakeoverAmount: 0,
+    companyForcedTakeoverAmount: 0, employeeSubscribedAmount: 100,
+    subscribed: 100, people: 1, purchasePaidAt: '2020-01-02T00:00:00.000Z',
+    ruleParametersSnapshot: { paymentHours: 12, paymentReminderHours: 4,
+      proxyConfirmDays: 7, receiptWarningDays: 30, issueHandlingHours: 72 }
+  })
+  await db.collection(`${prefix}projects`).insertOne({
     id: 'PRJ-IAM-ADMIN-DRAFT', title: '管理员待发布项目', source: 'integration-test',
     status: '未开放', statusType: 'info', progress: 0, remain: 300, deadline: '2099-12-31 23:59',
     total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
@@ -130,6 +140,17 @@ try {
     await delay(100)
   }
   assert.ok(ready, '隔离 API 已启动')
+  let sweptCase = null
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    sweptCase = await db.collection(`${prefix}receipt_overdue_cases`).findOne({
+      projectId: 'PRJ-IAM-OVERDUE-SWEEP' })
+    if (sweptCase) break
+    await delay(100)
+  }
+  assert.equal(sweptCase?.status, '待处置')
+  assert.equal(sweptCase?.gapCents, 12000)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    recipientId: 'role:super_admin', projectId: 'PRJ-IAM-OVERDUE-SWEEP', type: '回款超期预警' }), 1)
   const request = async (path: string, headers: Record<string, string> = {}) => {
     const response = await fetch(`${base}${path}`, { headers })
     return { status: response.status, body: await response.json() as Record<string, unknown> }
@@ -955,6 +976,48 @@ try {
     type: '代确认通过', recipientId: '1001', projectId: 'PRJ-IAM-PAYOUT-PROXY' }), 1)
   assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: 'DIST-IAM-PAYOUT-PROXY' }))?.status, '可结单')
   assert.equal((await postAs(payoutProxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
+  for (const suffix of ['WAIT', 'TOPUP', 'FAIL']) {
+    const projectId = `PRJ-IAM-OVERDUE-${suffix}`
+    await db.collection(`${prefix}projects`).insertOne({
+      id: projectId, title: `回款超期处置 ${suffix}`, source: 'integration-test',
+      status: '回款中', statusType: 'warning', progress: 100, remain: 0,
+      deadline: '2020-01-01 00:00', total: 100, costAmount: 100, salesAmount: 120,
+      profitAmount: 20, companyFixedAmount: 0, companyTakeoverAmount: 0,
+      companyForcedTakeoverAmount: 0, employeeSubscribedAmount: 100,
+      subscribed: 100, people: 1, purchasePaidAt: '2020-01-02T00:00:00.000Z'
+    })
+    await db.collection(`${prefix}receipt_overdue_cases`).insertOne({
+      id: `ROD-IAM-${suffix}`, projectId, status: '待处置', gapCents: 12000,
+      warningCount: 1, lastWarnedAt: new Date().toISOString()
+    })
+  }
+  assert.equal((await request('/api/receipt-overdue-cases', { Authorization: 'Bearer smoke-finance-token' })).status, 403)
+  assert.equal((await request('/api/receipt-overdue-cases', { Authorization: 'Bearer smoke-super-admin-token' })).status, 200)
+  const waitCasePath = '/api/receipt-overdue-cases/ROD-IAM-WAIT/resolve'
+  assert.equal((await postAs(waitCasePath, 'smoke-finance-token', {
+    action: '继续等待', note: '客户约定稍后付款', nextWarningDate: '2099-01-01' })).status, 403)
+  assert.equal((await postAs(waitCasePath, 'smoke-super-admin-token', {
+    action: '继续等待', note: '客户约定稍后付款', nextWarningDate: '2020-01-01' })).status, 400)
+  const nextWarningDate = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10)
+  assert.equal((await postAs(waitCasePath, 'smoke-super-admin-token', {
+    action: '继续等待', note: '客户约定稍后付款', nextWarningDate })).status, 200)
+  assert.equal((await db.collection(`${prefix}receipt_overdue_cases`).findOne({ id: 'ROD-IAM-WAIT' }))?.status,
+    '等待下次预警')
+  assert.equal((await postAs(waitCasePath, 'smoke-super-admin-token', {
+    action: '继续等待', note: '重复处置不得成功', nextWarningDate })).status, 409)
+  const topupPath = '/api/receipt-overdue-cases/ROD-IAM-TOPUP/resolve'
+  assert.equal((await postAs(topupPath, 'smoke-super-admin-token', {
+    action: '公司补款', note: '由公司补足客户回款缺口' })).status, 200)
+  assert.equal((await db.collection(`${prefix}receipt_overdue_cases`).findOne({ id: 'ROD-IAM-TOPUP' }))?.status,
+    '已处置')
+  await db.collection(`${prefix}procurement_payments`).insertOne({ id: 'PP-IAM-OVERDUE-FAIL',
+    projectId: 'PRJ-IAM-OVERDUE-FAIL', amountCents: 10000, transactionNo: 'BANK-IAM-OVERDUE-FAIL',
+    paidAt: '2020-01-02T00:00:00.000Z', proofAssetIds: [], operatorId: '1003' })
+  const overdueFailPath = '/api/receipt-overdue-cases/ROD-IAM-FAIL/resolve'
+  assert.equal((await postAs(overdueFailPath, 'smoke-super-admin-token', {
+    action: '采购失败终止', note: '长期拖欠，采购项目无法继续履约' })).status, 200)
+  assert.equal((await db.collection(`${prefix}procurement_failure_requests`).findOne({
+    projectId: 'PRJ-IAM-OVERDUE-FAIL' }))?.requestedBy, 'system')
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

@@ -36,6 +36,7 @@ import type { DistributionPayoutProxyRequest } from './finance/distribution-payo
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
 import { paymentReminderDue, recipientNotification, subscriptionNotification, type Notification } from './notifications.ts'
 import { planEscalationNotifications } from './notification-escalations.ts'
+import { validateOverdueResolution, type ReceiptOverdueCase } from './finance/receipt-overdue.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -322,6 +323,7 @@ const projectRefundProxyRequests = mongo.db.collection<ProjectRefundProxyRequest
 const distributionPayoutProxyRequests = mongo.db.collection<DistributionPayoutProxyRequest>(`${appConfig.mongodb.collectionPrefix}distribution_payout_proxy_requests`)
 const ruleParameters = mongo.db.collection<StoredRuleParameters>(`${appConfig.mongodb.collectionPrefix}rule_parameters`)
 const notifications = mongo.db.collection<Notification>(`${appConfig.mongodb.collectionPrefix}notifications`)
+const receiptOverdueCases = mongo.db.collection<ReceiptOverdueCase>(`${appConfig.mongodb.collectionPrefix}receipt_overdue_cases`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -590,14 +592,38 @@ async function runDueEscalations() {
   try {
     const candidates = await repositories.projects.list({ status: { $in: ['待回款', '回款中', '分配中'] } } as never)
     const projectIds = candidates.map(project => project.id)
-    if (!projectIds.length) return
     const [orders, receipts] = await Promise.all([
       distributionOrders.find({ projectId: { $in: projectIds }, status: '有异议' }).toArray(),
       receiptBatches.find({ 'lines.projectId': { $in: projectIds } }).toArray()
     ])
-    for (const notice of planEscalationNotifications({ projects: candidates, orders, receipts,
-      at: new Date() })) {
-      await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+    const at = new Date()
+    const planned = planEscalationNotifications({ projects: candidates, orders, receipts, at })
+    const overdueIds = planned.filter(notice => notice.type === '回款超期预警')
+      .map(notice => notice.projectId).filter((id): id is string => Boolean(id))
+    await receiptOverdueCases.updateMany({ projectId: { $nin: overdueIds },
+      status: { $in: ['待处置', '等待下次预警'] } }, { $set: { status: '已解除' } })
+    for (const notice of planned) {
+      if (notice.type !== '回款超期预警') {
+        await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+        continue
+      }
+      const projectId = notice.projectId!
+      const candidate = candidates.find(project => project.id === projectId)!
+      const gapCents = summarizeProjectReceipts(receipts, projectId,
+        Math.round(candidate.salesAmount! * 100)).gapCents
+      await mongo.withTransaction(async session => {
+        const current = await receiptOverdueCases.findOne({ projectId }, { session })
+        if (current && (current.status === '待处置' || current.status === '已处置')) return
+        if (current?.status === '等待下次预警' && current.nextWarningDate
+          && at.getTime() < Date.parse(`${current.nextWarningDate}T00:00:00+08:00`)) return
+        const next: ReceiptOverdueCase = { id: current?.id ?? `ROD-${randomUUID()}`,
+          projectId, status: '待处置', gapCents,
+          warningCount: (current?.warningCount ?? 0) + 1, lastWarnedAt: at.toISOString() }
+        await receiptOverdueCases.replaceOne({ projectId }, next, { upsert: true, session })
+        await notifications.updateOne({ id: `${notice.id}:${next.warningCount}` },
+          { $setOnInsert: { ...notice, id: `${notice.id}:${next.warningCount}`, targetPage: 'receiptOverdue' } },
+          { upsert: true, session })
+      })
     }
   } finally { escalationSweepRunning = false }
 }
@@ -768,6 +794,21 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
       notifications.countDocuments({ recipientId, readAt: { $exists: false } })
     ])
     return send(res, 200, { data: { items, total, unread, page, pageSize } })
+  }
+  if (pathname === '/api/receipt-overdue-cases') {
+    managementActor(req, ['super_admin'])
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const status = searchParams.get('status')
+    const filter: { status?: ReceiptOverdueCase['status'] } = status
+      && ['待处置', '等待下次预警', '已处置', '已解除'].includes(status)
+      ? { status: status as ReceiptOverdueCase['status'] } : {}
+    const [items, total] = await Promise.all([
+      receiptOverdueCases.find(filter).sort({ lastWarnedAt: -1, id: -1 })
+        .skip((page - 1) * pageSize).limit(pageSize).toArray(),
+      receiptOverdueCases.countDocuments(filter)
+    ])
+    return send(res, 200, { data: { items, total, page, pageSize } })
   }
   if (pathname === '/api/agreements/current') {
     requestContext(req)
@@ -1595,6 +1636,72 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const result = await notifications.updateMany({ recipientId, readAt: { $exists: false } },
       { $set: { readAt: new Date().toISOString() } })
     return send(res, 200, { data: { updated: result.modifiedCount }, message: '已标记为已读' })
+  }
+  const overdueResolveMatch = pathname.match(/^\/api\/receipt-overdue-cases\/([^/]+)\/resolve$/)
+  if (overdueResolveMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    let choice: ReturnType<typeof validateOverdueResolution>
+    try { choice = validateOverdueResolution(body, new Date()) }
+    catch (error) { return send(res, 400, { error: 'RECEIPT_OVERDUE_ACTION_INVALID',
+      message: error instanceof Error ? error.message : '超期回款处置无效' }) }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const current = await receiptOverdueCases.findOne({ id: decodeURIComponent(overdueResolveMatch[1]) }, { session })
+        if (!current || current.status !== '待处置') {
+          throw new AppError(409, 'RECEIPT_OVERDUE_CHANGED', '该回款超期事项已处理或不存在')
+        }
+        const project = await repositories.projects.getById(current.projectId, session)
+        if (!project || !['待回款', '回款中'].includes(project.status)) {
+          throw new AppError(409, 'RECEIPT_OVERDUE_RESOLVED', '众筹单已不处于待回款状态')
+        }
+        const batches = await receiptBatches.find({ 'lines.projectId': project.id }, { session }).toArray()
+        const gapCents = summarizeProjectReceipts(batches, project.id,
+          Math.round(project.salesAmount * 100)).gapCents
+        if (gapCents <= 0) throw new AppError(409, 'RECEIPT_OVERDUE_RESOLVED', '回款已足额，无需处置')
+        let requestId: string | undefined
+        if (choice.action === '采购失败终止') {
+          if (!await procurementPayments.findOne({ projectId: project.id }, { session })) {
+            throw new AppError(409, 'PROCUREMENT_PAYMENT_REQUIRED', '采购付款登记不存在，不能发起终止')
+          }
+          if (await distributionOrders.findOne({ projectId: project.id,
+            status: { $nin: ['待审批', '已驳回', '已作废'] } }, { session })) {
+            throw new AppError(409, 'DISTRIBUTION_ALREADY_APPROVED', '分配单已审批，不能终止')
+          }
+          const previous = await procurementFailureRequests.findOne({ projectId: project.id }, { session })
+          if (previous && previous.status !== '已驳回') {
+            throw new AppError(409, 'PROCUREMENT_FAILURE_DUPLICATE', '已有待处理或已通过的采购失败终止申请')
+          }
+          const failure: ProcurementFailureRequest = {
+            id: previous?.id ?? `PFAIL-${randomUUID()}`, projectId: project.id,
+            reason: choice.note, status: '待公司复核', requestedBy: 'system',
+            requestedAt: new Date().toISOString()
+          }
+          await procurementFailureRequests.replaceOne({ projectId: project.id }, failure,
+            { upsert: true, session })
+          requestId = failure.id
+        }
+        const handledAt = new Date().toISOString()
+        const next: ReceiptOverdueCase = { ...current, gapCents,
+          status: choice.action === '继续等待' ? '等待下次预警' : '已处置',
+          action: choice.action, note: choice.note, nextWarningDate: choice.nextWarningDate,
+          procurementFailureRequestId: requestId, handledBy: actor.userId, handledAt }
+        const changed = await receiptOverdueCases.replaceOne({ id: current.id,
+          status: '待处置', warningCount: current.warningCount }, next, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'RECEIPT_OVERDUE_CHANGED', '回款超期事项已变化')
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '处置超期回款',
+          target: project.id, before: { status: current.status, gapCents: current.gapCents },
+          after: { status: next.status, gapCents, action: next.action, note: next.note,
+            nextWarningDate: next.nextWarningDate, procurementFailureRequestId: requestId } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { next, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.next, message: '处置已记录' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'RECEIPT_OVERDUE_CHANGED', message: '事项已变化，请刷新后重试' })
+      throw error
+    }
   }
   const notificationReadMatch = pathname.match(/^\/api\/notifications\/([^/]+)\/read$/)
   if (notificationReadMatch) {

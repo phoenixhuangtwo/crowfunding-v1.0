@@ -22,6 +22,7 @@ export const businessCollections = [
   'distribution_payout_proxy_requests',
   'rule_parameters',
   'notifications',
+  'receipt_overdue_cases',
   'risk_events',
   'file_assets'
 ] as const
@@ -57,6 +58,7 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   distribution_payout_proxy_requests: [],
   rule_parameters: [],
   notifications: [],
+  receipt_overdue_cases: [],
   risk_events: [],
   file_assets: []
 }
@@ -176,6 +178,10 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
   notifications: [
     { name: 'uniq_notification_id', key: { id: 1 }, unique: true },
     { name: 'idx_notification_recipient', key: { recipientId: 1, readAt: 1, createdAt: -1 } }
+  ],
+  receipt_overdue_cases: [
+    { name: 'uniq_receipt_overdue_project', key: { projectId: 1 }, unique: true },
+    { name: 'idx_receipt_overdue_status', key: { status: 1, lastWarnedAt: -1 } }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

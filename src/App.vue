@@ -41,6 +41,7 @@ import ProjectRefundsPage from './components/ProjectRefundsPage.vue'
 import ProcurementFailurePage from './components/ProcurementFailurePage.vue'
 import RuleParametersPage from './components/RuleParametersPage.vue'
 import NotificationsPage from './components/NotificationsPage.vue'
+import ReceiptOverduePage from './components/ReceiptOverduePage.vue'
 import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -64,6 +65,7 @@ type PageKey =
   | 'procurementFailure'
   | 'ruleParameters'
   | 'notifications'
+  | 'receiptOverdue'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -274,6 +276,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
       { key: 'rules', label: '认购规则配置', req: 'P0', icon: Document, permission: 'crowdfunding:rule:query' },
       { key: 'agreements', label: '免责协议版本', req: 'P0', icon: Document, permission: 'crowdfunding:agreement:manage' },
       { key: 'ruleParameters', label: '规则参数', req: 'P1', icon: Document, permission: 'crowdfunding:rule-parameters:query' },
+      { key: 'receiptOverdue', label: '回款超期处置', req: 'P1', icon: Tickets, permission: 'crowdfunding:receipt-overdue:query' },
       { key: 'receivingCode', label: '项目收款码管理', req: 'P0', icon: CreditCard, permission: 'crowdfunding:receiving-code:query' },
       { key: 'rbac', label: '权限管理', req: 'P0', icon: Lock, permission: 'crowdfunding:access' },
       { key: 'audit', label: '审计日志', req: 'P0', icon: User, permission: 'crowdfunding:audit:query' }
@@ -314,6 +317,7 @@ const pageTitleMap: Record<PageKey, string> = {
   procurementFailure: '采购失败终止',
   ruleParameters: '规则参数',
   notifications: '消息中心',
+  receiptOverdue: '回款超期处置',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -3406,6 +3410,9 @@ watch(() => authSession.permissionInfo.value, info => {
         />
 
         <NotificationsPage v-if="currentPage === 'notifications'" @open="openNotificationTarget" />
+
+        <ReceiptOverduePage v-if="currentPage === 'receiptOverdue' && currentRole === 'super_admin'"
+          :can-resolve="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt-overdue:resolve')" />
 
         <DistributionOrdersPage
           v-if="currentPage === 'distributionOrders' && (currentRole === 'finance' || currentRole === 'super_admin')"
