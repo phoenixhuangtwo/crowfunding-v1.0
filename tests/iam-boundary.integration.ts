@@ -662,6 +662,82 @@ try {
     { Authorization: 'Bearer smoke-finance-token' })
   assert.equal(transferFunding.status, 200, JSON.stringify(transferFunding.body))
   assert.equal((transferFunding.body.data as { balanced: boolean }).balanced, true)
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-CLOSE', title: '项目关闭退款测试', source: 'integration-test',
+    tenantId: '0', ownerUserId: '1002', ownerDeptId: '200',
+    status: '未满额', statusType: 'primary', progress: 100, remain: 0, deadline: '2099-12-31 12:00',
+    total: 100, costAmount: 100, salesAmount: 120, profitAmount: 20,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 100, subscribed: 100, people: 1, ruleId: 'RULE-IAM-CLOSE'
+  })
+  await db.collection(`${prefix}subscription_rules`).insertOne({
+    id: 'RULE-IAM-CLOSE', projectId: 'PRJ-IAM-CLOSE', projectName: '项目关闭退款测试',
+    tenantId: '0', ownerUserId: '1002', ownerDeptId: '200',
+    ruleName: '原关闭项目规则', sharePrice: 100, totalShares: 1, companyFrontShares: 0,
+    totalAmount: 100, companyFixedAmount: 0, minAmount: 100, minParticipants: 1,
+    allowMultiple: false, companyTakeover: false, status: '已启用',
+    startAt: '', endAt: '2099-12-31 12:00', paymentCutoffAt: '2099-12-31 18:00',
+    plannedPaymentDate: '2100-01-01', updatedAt: new Date().toISOString()
+  })
+  await db.collection(`${prefix}subscriptions`).insertOne({
+    id: 'SUB-IAM-CLOSE', projectId: 'PRJ-IAM-CLOSE', project: '项目关闭退款测试',
+    userId: '1001', amount: 100, shares: 1, pay: '已缴款', profit: 20,
+    action: '查看支付', idempotencyKey: 'SUB-IAM-CLOSE', createdAt: new Date().toISOString(),
+    paymentDeadlineAt: '2099-12-31 12:00'
+  })
+  await db.collection(`${prefix}fund_ledger`).insertOne({
+    id: 'LED-IAM-CLOSE', sourceKey: 'contribution:SUB-IAM-CLOSE', type: 'employee_contribution',
+    projectId: 'PRJ-IAM-CLOSE', subscriptionId: 'SUB-IAM-CLOSE', participantId: '1001', shares: 1,
+    amountCents: 10000, transactionNo: 'BANK-IAM-CLOSE-CONTRIBUTION',
+    transactionKey: 'BANK-IAM-CLOSE-CONTRIBUTION', proofAssetIds: [], reviewedBy: '1003',
+    createdAt: new Date().toISOString()
+  })
+  const closeProjectPath = '/api/projects/PRJ-IAM-CLOSE/close'
+  assert.equal((await postAs(closeProjectPath, 'smoke-employee-token', { reason: '供应商取消订单需要关闭项目' })).status, 403)
+  assert.equal((await postAs(closeProjectPath, 'smoke-admin-full-token', { reason: '短' })).status, 400)
+  const closingProject = await postAs(closeProjectPath, 'smoke-admin-full-token', { reason: '供应商取消订单需要关闭项目' })
+  assert.equal(closingProject.status, 200, JSON.stringify(closingProject.body))
+  assert.equal((closingProject.body.data as { status: string }).status, '关闭中')
+  assert.equal((await postAs(closeProjectPath, 'smoke-admin-full-token', { reason: '重复发起关闭请求' })).status, 409)
+  const refundList = await request('/api/project-refunds?projectId=PRJ-IAM-CLOSE',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal(refundList.status, 200)
+  assert.equal((refundList.body.data as { total: number }).total, 1)
+  const projectRefundId = (refundList.body.data as { items: Array<{ id: string }> }).items[0].id
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-PROJECT-REFUND', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/subscription-refund-proof/ASSET-IAM-PROJECT-REFUND.png', originalName: 'project-refund.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'e'.repeat(64),
+    purpose: 'subscription-refund-proof', ownerType: 'subscription', ownerId: 'SUB-IAM-CLOSE',
+    status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const projectRefundPaymentPath = `/api/project-refunds/${projectRefundId}/payment`
+  const projectRefundInput = { amountCents: 10000, transactionNo: 'BANK-IAM-PROJECT-REFUND',
+    paidAt: new Date(Date.now() - 60_000).toISOString(), proofAssetIds: ['ASSET-IAM-PROJECT-REFUND'],
+    manualVerificationNote: '已人工核对实际退款流水和收款人' }
+  assert.equal((await postAs(projectRefundPaymentPath, 'smoke-finance-token', {
+    ...projectRefundInput, amountCents: 9999 })).status, 400)
+  assert.equal((await postAs(projectRefundPaymentPath, 'smoke-finance-token', projectRefundInput)).status, 200)
+  assert.equal((await postAs(projectRefundPaymentPath, 'smoke-finance-token', projectRefundInput)).status, 409)
+  const myProjectRefunds = await request('/api/my-project-refunds', employee)
+  assert.equal(myProjectRefunds.status, 200)
+  assert.equal((myProjectRefunds.body.data as Array<{ id: string }>).length, 1)
+  const projectRefundConfirmPath = `/api/project-refunds/${projectRefundId}/confirm`
+  assert.equal((await postAs(projectRefundConfirmPath, 'smoke-finance-token', {})).status, 403)
+  assert.equal((await postAs(projectRefundConfirmPath, 'smoke-employee-token', {})).status, 200)
+  assert.equal((await postAs(projectRefundConfirmPath, 'smoke-employee-token', {})).status, 409)
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-CLOSE' }))?.status, '已关闭')
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({
+    projectId: 'PRJ-IAM-CLOSE', type: 'subscription_refund_confirmed' }), 1)
+  const reopened = await postAs('/api/projects/PRJ-IAM-CLOSE/reopen', 'smoke-admin-full-token', {})
+  assert.equal(reopened.status, 201, JSON.stringify(reopened.body))
+  const reopenedProject = reopened.body.data as { id: string; status: string; reopenedFromProjectId: string; ruleId: string }
+  assert.equal(reopenedProject.status, '未开放')
+  assert.equal(reopenedProject.reopenedFromProjectId, 'PRJ-IAM-CLOSE')
+  assert.equal((await db.collection(`${prefix}subscription_rules`).findOne({ id: reopenedProject.ruleId }))?.status, '未启用')
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-CLOSE' }))?.reopenedByProjectId,
+    reopenedProject.id)
+  assert.equal((await postAs('/api/projects/PRJ-IAM-CLOSE/reopen', 'smoke-admin-full-token', {})).status, 409)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

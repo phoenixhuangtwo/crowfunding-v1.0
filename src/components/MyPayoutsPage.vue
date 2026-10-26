@@ -14,9 +14,13 @@ type Agreement = { version: number; title: string; body: string }
 type MyExceptionRefund = { fundId: string; projectId?: string; transactionNo: string;
   allocation: { id: string; amountCents: number; status: string; transactionNo?: string;
     paidAt?: string; proofAssetIds?: string[]; reason: string } }
+type MyProjectRefund = { id: string; projectId: string; subscriptionId: string;
+  amountCents: number; status: string; transactionNo?: string; paidAt?: string;
+  proofAssetIds?: string[] }
 const authSession = useAuthSession()
 const items = ref<MyPayout[]>([])
 const exceptionRefunds = ref<MyExceptionRefund[]>([])
+const projectRefunds = ref<MyProjectRefund[]>([])
 const loading = ref(false)
 const submitting = ref(false)
 const agreement = ref<Agreement>()
@@ -34,6 +38,10 @@ async function refresh() {
     if (canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:my-refunds')) {
       const refunds = await apiRequest<{ data: MyExceptionRefund[] }>('/api/my-exception-refunds')
       exceptionRefunds.value = refunds.data
+    }
+    if (canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:my-query')) {
+      const refunds = await apiRequest<{ data: MyProjectRefund[] }>('/api/my-project-refunds')
+      projectRefunds.value = refunds.data
     }
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '读取我的收益失败') }
   finally { loading.value = false }
@@ -117,6 +125,22 @@ async function confirmExceptionRefund(item: MyExceptionRefund) {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '确认退款失败') }
   finally { submitting.value = false }
 }
+
+async function confirmProjectRefund(item: MyProjectRefund) {
+  if (!canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:confirm') || submitting.value) return
+  try {
+    await ElMessageBox.confirm(`请核对实际收到的 ${money(item.amountCents)}，确认这笔认购退款已到账？`,
+      '确认项目退款', { type: 'warning' })
+  } catch { return }
+  submitting.value = true
+  try {
+    await apiRequest(`/api/project-refunds/${encodeURIComponent(item.id)}/confirm`, {
+      method: 'POST', body: JSON.stringify({}) })
+    ElMessage.success('退款已确认')
+    await refresh()
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '确认退款失败') }
+  finally { submitting.value = false }
+}
 </script>
 
 <template>
@@ -140,6 +164,17 @@ async function confirmExceptionRefund(item: MyExceptionRefund) {
         <el-table-column label="退回流水 / 时间" min-width="190"><template #default="scope">{{ scope.row.allocation.transactionNo }}<br>{{ scope.row.allocation.paidAt }}</template></el-table-column>
         <el-table-column label="凭证" width="125"><template #default="scope"><el-button v-for="assetId in scope.row.allocation.proofAssetIds" :key="assetId" link type="primary" @click="openProof(assetId)">查看凭证</el-button></template></el-table-column>
         <el-table-column label="状态与操作" min-width="170"><template #default="scope">{{ scope.row.allocation.status }}<div v-if="scope.row.allocation.status === '待确认'"><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:refund-confirm')" size="small" type="primary" :disabled="submitting" @click="confirmExceptionRefund(scope.row)">确认退款到账</el-button></div></template></el-table-column>
+      </el-table>
+    </section>
+    <section v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:my-query')" class="panel">
+      <h2>我的认购退款</h2>
+      <el-table :data="projectRefunds" v-loading="loading" empty-text="暂无认购退款记录" style="width:100%">
+        <el-table-column prop="projectId" label="众筹单" min-width="180" />
+        <el-table-column prop="subscriptionId" label="认购编号" min-width="180" />
+        <el-table-column label="应退金额" width="140"><template #default="scope">{{ money(scope.row.amountCents) }}</template></el-table-column>
+        <el-table-column label="退款流水 / 时间" min-width="190"><template #default="scope">{{ scope.row.transactionNo || '待财务登记' }}<br>{{ scope.row.paidAt }}</template></el-table-column>
+        <el-table-column label="凭证" width="125"><template #default="scope"><el-button v-for="assetId in scope.row.proofAssetIds" :key="assetId" link type="primary" @click="openProof(assetId)">查看凭证</el-button></template></el-table-column>
+        <el-table-column label="状态与操作" min-width="160"><template #default="scope">{{ scope.row.status }}<div v-if="scope.row.status === '待员工确认'"><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:confirm')" size="small" type="primary" :disabled="submitting" @click="confirmProjectRefund(scope.row)">确认退款到账</el-button></div></template></el-table-column>
       </el-table>
     </section>
     <el-dialog :model-value="Boolean(confirmationTarget)" title="确认收款及免责协议" width="660px" @update:model-value="(value: boolean) => { if (!value) confirmationTarget = undefined }">

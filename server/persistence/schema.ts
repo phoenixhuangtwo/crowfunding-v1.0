@@ -14,6 +14,7 @@ export const businessCollections = [
   'distribution_orders',
   'confirmed_costs',
   'exception_funds',
+  'project_refunds',
   'risk_events',
   'file_assets'
 ] as const
@@ -41,6 +42,7 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   distribution_orders: [],
   confirmed_costs: [],
   exception_funds: [],
+  project_refunds: [],
   risk_events: [],
   file_assets: []
 }
@@ -50,7 +52,9 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'uniq_projects_id', key: { id: 1 }, unique: true },
     { name: 'idx_projects_status', key: { status: 1 } },
     { name: 'idx_projects_deadline', key: { deadline: 1 } },
-    { name: 'idx_projects_rule_id', key: { ruleId: 1 } }
+    { name: 'idx_projects_rule_id', key: { ruleId: 1 } },
+    { name: 'uniq_projects_reopened_from', key: { reopenedFromProjectId: 1 }, unique: true,
+      partialFilterExpression: { reopenedFromProjectId: { $exists: true } } }
   ],
   subscriptions: [
     { name: 'uniq_subscriptions_id', key: { id: 1 }, unique: true },
@@ -121,6 +125,12 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'uniq_exception_fund_id', key: { id: 1 }, unique: true },
     { name: 'idx_exception_fund_project', key: { projectId: 1, createdAt: -1 } },
     { name: 'uniq_exception_fund_transaction', key: { transactionNo: 1 }, unique: true }
+  ],
+  project_refunds: [
+    { name: 'uniq_project_refund_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_project_refund_subscription', key: { subscriptionId: 1 }, unique: true },
+    { name: 'idx_project_refund_project_status', key: { projectId: 1, status: 1 } },
+    { name: 'idx_project_refund_participant', key: { participantId: 1, createdAt: -1 } }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

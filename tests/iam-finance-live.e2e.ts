@@ -89,7 +89,9 @@ try {
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:exception-fund:register', claims.tenantId), true)
   for (const permission of ['crowdfunding:exception-fund:refund',
     'crowdfunding:exception-fund:refund-proof-upload', 'crowdfunding:exception-fund:transfer',
-    'crowdfunding:exception-fund:assign-project', 'crowdfunding:distribution:close']) {
+    'crowdfunding:exception-fund:assign-project', 'crowdfunding:distribution:close',
+    'crowdfunding:project:finish-close', 'crowdfunding:project-refund:query',
+    'crowdfunding:project-refund:proof-upload', 'crowdfunding:project-refund:register']) {
     assert.ok(info.apiPermissions.includes(permission))
     assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
   }

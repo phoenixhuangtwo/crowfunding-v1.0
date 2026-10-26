@@ -1,8 +1,8 @@
 import type { SettlementInvoiceRecord } from '../project-settlement.ts'
 
 export type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-export type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '部分已结算' | '已完结'
-export type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '待确认收款' | '已释放' | '公司待出资'
+export type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '部分已结算' | '已完结'
+export type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '待确认收款' | '已释放' | '公司待出资' | '待退款' | '待确认退款' | '已退款'
 export type Actor = { userId: string; label: string; role: Role }
 export type RequestContext = Pick<Actor, 'userId' | 'role'>
 
@@ -25,6 +25,8 @@ export type Project = {
   tenantId?: string
   ownerUserId?: string
   ownerDeptId?: string
+  reopenedFromProjectId?: string
+  reopenedByProjectId?: string
   status: ProjectStatus
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
@@ -147,7 +149,7 @@ export type FileAsset = {
   mimeType: string
   sizeBytes: number
   sha256: string
-  purpose: 'receiving-code' | 'payment-proof' | 'settlement-invoice' | 'procurement-payment-proof' | 'customer-receipt-proof' | 'confirmed-cost-proof' | 'distribution-payout-proof' | 'exception-fund-proof' | 'exception-refund-proof'
+  purpose: 'receiving-code' | 'payment-proof' | 'settlement-invoice' | 'procurement-payment-proof' | 'customer-receipt-proof' | 'confirmed-cost-proof' | 'distribution-payout-proof' | 'exception-fund-proof' | 'exception-refund-proof' | 'subscription-refund-proof'
   ownerType: 'receiving-code' | 'subscription' | 'project'
   ownerId: string
   status: 'pending' | 'ready' | 'failed' | 'pending_delete'

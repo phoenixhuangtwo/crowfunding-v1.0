@@ -28,6 +28,7 @@ import { calculateSettlementProfit } from './finance/settlement-profit.ts'
 import { makeDistributionOrder, distributionOrderIsActive, deriveDistributionStatus, type DistributionOrder } from './finance/distribution-orders.ts'
 import { validateCostRegistration, type ConfirmedCost } from './finance/confirmed-costs.ts'
 import { reconcileProjectFinancials } from './finance/financial-reconciliation.ts'
+import { validateProjectRefundPayment, type ProjectRefund } from './finance/project-refunds.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -43,8 +44,8 @@ import { ownershipFrom } from './iam/data-scope.ts'
 import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '部分已结算' | '已完结'
-type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资'
+type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '部分已结算' | '已完结'
+type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资' | '待退款' | '待确认退款' | '已退款'
 
 type PaymentImage = {
   id: string
@@ -66,6 +67,8 @@ type Project = {
   tenantId?: string
   ownerUserId?: string
   ownerDeptId?: string
+  reopenedFromProjectId?: string
+  reopenedByProjectId?: string
   status: ProjectStatus
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
@@ -302,6 +305,7 @@ const receiptDifferences = mongo.db.collection<ReceiptDifference>(`${appConfig.m
 const distributionOrders = mongo.db.collection<DistributionOrder>(`${appConfig.mongodb.collectionPrefix}distribution_orders`)
 const confirmedCosts = mongo.db.collection<ConfirmedCost>(`${appConfig.mongodb.collectionPrefix}confirmed_costs`)
 const exceptionFunds = mongo.db.collection<ExceptionFund>(`${appConfig.mongodb.collectionPrefix}exception_funds`)
+const projectRefunds = mongo.db.collection<ProjectRefund>(`${appConfig.mongodb.collectionPrefix}project_refunds`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -852,6 +856,26 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
       .map(allocation => ({ fundId: record.id, projectId: record.projectId,
         transactionNo: record.transactionNo, allocation }))) })
   }
+  if (pathname === '/api/project-refunds') {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看项目退款')
+    const projectId = searchParams.get('projectId')?.trim()
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const filter = projectId ? { projectId } : {}
+    const [items, total] = await Promise.all([
+      projectRefunds.find(filter).sort({ createdAt: -1, id: -1 }).skip((page - 1) * pageSize).limit(pageSize).toArray(),
+      projectRefunds.countDocuments(filter)
+    ])
+    return send(res, 200, { data: { items, total, page, pageSize } })
+  }
+  if (pathname === '/api/my-project-refunds') {
+    const context = requestContext(req)
+    if (context.role !== 'employee') throw new AppError(403, 'FORBIDDEN', '只有员工本人可以查看自己的退款')
+    const records = await projectRefunds.find({ participantId: context.userId })
+      .sort({ createdAt: -1 }).limit(100).toArray()
+    return send(res, 200, { data: records })
+  }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()
@@ -1026,6 +1050,25 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'exception-refund-proof',
       ownerType: 'project', ownerId, createdBy: actor.userId })
     return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '退回凭证已保存' })
+  }
+  const projectRefundProofMatch = pathname.match(/^\/api\/project-refunds\/([^/]+)\/proofs$/)
+  if (projectRefundProofMatch) {
+    const actor = financeOperator(req)
+    const refundId = decodeURIComponent(projectRefundProofMatch[1])
+    const refund = await projectRefunds.findOne({ id: refundId })
+    if (!refund || refund.status !== '待退款') {
+      return send(res, 409, { error: 'PROJECT_REFUND_INVALID', message: '该退款事项当前不可上传凭证' })
+    }
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'subscription', ownerId: refund.subscriptionId,
+      purpose: 'subscription-refund-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'PROJECT_REFUND_PROOF_LIMIT', message: '该退款事项暂存凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'subscription-refund-proof',
+      ownerType: 'subscription', ownerId: refund.subscriptionId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '退款凭证已保存' })
   }
   const receiptProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-proofs$/)
   if (receiptProofMatch) {
@@ -1222,7 +1265,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!current) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     if ((await repositories.projects.getById(current.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     if (context.role !== 'employee' || current.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能上传本人认购的支付截图')
-    if (['已缴款', '已收款', '已释放', '公司待出资'].includes(current.pay)) return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
+    if (['已缴款', '已收款', '已释放', '公司待出资', '待退款', '待确认退款', '已退款'].includes(current.pay)) return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
     if (current.shares !== undefined && Date.now() > new Date(current.paymentDeadlineAt.replace(' ', 'T')).getTime()) {
       return send(res, 409, { error: 'PAYMENT_DEADLINE_PASSED', message: '该认购的缴款期限已结束' })
     }
@@ -1358,6 +1401,333 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  const projectRefundPaymentMatch = pathname.match(/^\/api\/project-refunds\/([^/]+)\/payment$/)
+  if (projectRefundPaymentMatch) {
+    const actor = financeOperator(req)
+    const refundId = decodeURIComponent(projectRefundPaymentMatch[1])
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'PROJECT_REFUND_PROOFS_INVALID', message: '请提供已上传的退款凭证编号' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const refund = await projectRefunds.findOne({ id: refundId }, { session })
+        if (!refund || refund.status !== '待退款') throw new AppError(409, 'PROJECT_REFUND_INVALID', '退款事项不存在或已登记')
+        const project = await repositories.projects.getById(refund.projectId, session)
+        const subscription = await repositories.subscriptions.getById(refund.subscriptionId, session)
+        if (!project || project.status !== '关闭中' || !subscription || subscription.pay !== '待退款') {
+          throw new AppError(409, 'PROJECT_REFUND_STATE_INVALID', '众筹单或认购单当前不可登记退款')
+        }
+        const payment = validateProjectRefundPayment({ amountCents: body.amountCents as number,
+          transactionNo: typeof body.transactionNo === 'string' ? body.transactionNo : '',
+          paidAt: body.paidAt as string, proofAssetIds: body.proofAssetIds as string[],
+          manualVerificationNote: typeof body.manualVerificationNote === 'string' ? body.manualVerificationNote : '' },
+        refund.amountCents, new Date())
+        const occupied = await bankTransactions.findOne({ transactionNo: payment.transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .findOne({ transactionNo: payment.transactionNo }, { session })
+        if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '退款流水号已被使用')
+        for (const assetId of payment.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'subscription-refund-proof'
+            || asset.ownerType !== 'subscription' || asset.ownerId !== refund.subscriptionId
+            || asset.createdBy !== actor.userId
+            || await projectRefunds.findOne({ proofAssetIds: assetId }, { session })) {
+            throw new AppError(409, 'PROJECT_REFUND_PROOF_INVALID', '退款凭证不存在、未留存或已被使用')
+          }
+        }
+        const updatedRefund: ProjectRefund = { ...refund, ...payment, status: '待员工确认', registeredBy: actor.userId }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: '关闭中' }, { $inc: { refundRevision: 1 } }, { session })
+        const changed = await projectRefunds.replaceOne({ id: refund.id, status: '待退款' }, updatedRefund, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_REFUND_CHANGED', '退款事项已变化，请刷新后重试')
+        const updatedSubscription: Subscription = { ...subscription, pay: '待确认退款', action: '确认退款到账' }
+        await repositories.subscriptions.replace(updatedSubscription, session)
+        await bankTransactions.insertOne({ transactionNo: payment.transactionNo,
+          sourceKey: `project-refund:${refund.id}`, projectId: refund.projectId,
+          createdAt: new Date().toISOString() }, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `project-refund:${refund.id}`,
+          type: 'subscription_refund_sent', projectId: refund.projectId,
+          subscriptionId: refund.subscriptionId, participantId: refund.participantId,
+          amountCents: refund.amountCents, transactionNo: payment.transactionNo,
+          transactionKey: `project-refund:${refund.id}`, proofAssetIds: payment.proofAssetIds,
+          reviewedBy: actor.userId, createdAt: new Date().toISOString()
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记员工认购款退款',
+          target: refund.id, before: { status: refund.status },
+          after: { status: updatedRefund.status, transactionNo: payment.transactionNo,
+            amountCents: refund.amountCents } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updatedRefund, updatedSubscription, audit }
+      })
+      const index = subscriptions.findIndex(item => item.id === result.updatedSubscription.id)
+      if (index >= 0) subscriptions.splice(index, 1, result.updatedSubscription)
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updatedRefund, message: '退款已登记，请等待员工确认' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_DUPLICATE', message: '退款流水号或单据已存在' })
+      if (error instanceof Error && /退款|流水号|凭证|时间|金额/.test(error.message)) {
+        return send(res, 400, { error: 'PROJECT_REFUND_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const projectRefundConfirmMatch = pathname.match(/^\/api\/project-refunds\/([^/]+)\/confirm$/)
+  if (projectRefundConfirmMatch) {
+    const context = requestContext(req)
+    if (context.role !== 'employee') throw new AppError(403, 'FORBIDDEN', '只有退款员工本人可以确认到账')
+    const refundId = decodeURIComponent(projectRefundConfirmMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const refund = await projectRefunds.findOne({ id: refundId }, { session })
+        if (!refund || refund.status !== '待员工确认') throw new AppError(409, 'PROJECT_REFUND_INVALID', '退款事项不存在或未待确认')
+        if (refund.participantId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能确认本人退款')
+        const subscription = await repositories.subscriptions.getById(refund.subscriptionId, session)
+        const project = await repositories.projects.getById(refund.projectId, session)
+        if (!subscription || subscription.pay !== '待确认退款' || !project || project.status !== '关闭中') {
+          throw new AppError(409, 'PROJECT_REFUND_STATE_INVALID', '退款状态已变化')
+        }
+        const confirmedAt = new Date().toISOString()
+        const updatedRefund: ProjectRefund = { ...refund, status: '已退款', confirmedAt }
+        const changed = await projectRefunds.replaceOne({ id: refund.id, status: '待员工确认' }, updatedRefund, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_REFUND_CHANGED', '退款事项已变化')
+        const updatedSubscription: Subscription = { ...subscription, pay: '已退款', action: '查看退款' }
+        await repositories.subscriptions.replace(updatedSubscription, session)
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id }, { $inc: { refundRevision: 1 } }, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `project-refund-confirm:${refund.id}`,
+          type: 'subscription_refund_confirmed', projectId: refund.projectId,
+          subscriptionId: refund.subscriptionId, participantId: refund.participantId,
+          amountCents: refund.amountCents, transactionNo: refund.transactionNo,
+          transactionKey: `project-refund-confirm:${refund.id}`,
+          proofAssetIds: refund.proofAssetIds ?? [], reviewedBy: context.userId, createdAt: confirmedAt
+        }, { session })
+        const pending = await projectRefunds.countDocuments({ projectId: project.id,
+          status: { $ne: '已退款' }, id: { $ne: refund.id } }, { session })
+        let closed = false
+        if (pending === 0) {
+          const contributions = await fundLedger.listProjectContributions(project.id, session)
+          const outflow = await mongo.db.collection<{ projectId: string; type: string; amountCents: number }>(
+            `${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .find({ projectId: project.id, type: 'subscription_refund_confirmed' }, { session }).toArray()
+          const incomingCents = contributions.reduce((sum, item) => sum + item.amountCents, 0)
+          const refundedCents = outflow.reduce((sum, item) => sum + item.amountCents, 0)
+          const exceptions = await exceptionFunds.countDocuments({ projectId: project.id, remainingCents: { $gt: 0 } }, { session })
+          if (incomingCents === refundedCents && exceptions === 0) {
+            await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+              .updateOne({ id: project.id, status: '关闭中' }, { $set: { status: '已关闭', statusType: 'info',
+                closedAt: confirmedAt, closedBy: context.userId } }, { session })
+            closed = true
+          }
+        }
+        const audit = auditRecord({ actor: context.userId, role: 'employee', action: '员工确认项目退款到账',
+          target: refund.id, before: { status: refund.status },
+          after: { status: updatedRefund.status, closed } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updatedRefund, updatedSubscription, audit, closed, projectId: project.id, confirmedAt }
+      })
+      const index = subscriptions.findIndex(item => item.id === result.updatedSubscription.id)
+      if (index >= 0) subscriptions.splice(index, 1, result.updatedSubscription)
+      if (result.closed) {
+        const projectIndex = projects.findIndex(item => item.id === result.projectId)
+        if (projectIndex >= 0) projects.splice(projectIndex, 1, {
+          ...projects[projectIndex], status: '已关闭', statusType: 'info',
+          closedAt: result.confirmedAt, closedBy: context.userId })
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updatedRefund,
+        message: result.closed ? '退款已确认，众筹单已关闭' : '退款已确认' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_CONFIRMED', message: '退款已确认' })
+      throw error
+    }
+  }
+  const projectCloseMatch = pathname.match(/^\/api\/projects\/([^/]+)\/close$/)
+  if (projectCloseMatch) {
+    const actor = managementActor(req, ['admin'])
+    const projectId = decodeURIComponent(projectCloseMatch[1])
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (reason.length < 5 || reason.length > 200) {
+      return send(res, 400, { error: 'PROJECT_CLOSE_REASON_INVALID', message: '关闭原因须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        if (!project) throw new AppError(404, 'PROJECT_NOT_FOUND', '众筹单不存在')
+        requireAdminOwned(req, project)
+        if (!['未满额', '已满额', '已截止'].includes(project.status)
+          || await procurementPayments.findOne({ projectId }, { session })) {
+          throw new AppError(409, 'PROJECT_CLOSE_INVALID', '只有采购付款前的已发布众筹单可以关闭')
+        }
+        const records = await repositories.subscriptions.list({ projectId }, {}, session)
+        if (records.some(record => record.pay === '待复核' || record.pay === '待确认收款')) {
+          throw new AppError(409, 'PROJECT_CLOSE_PENDING_REVIEW', '仍有待复核款项，请先核对到账；无法匹配的款项须登记为异常款项')
+        }
+        const ledger = await fundLedger.listProjectContributions(projectId, session)
+        const refundOrders: ProjectRefund[] = []
+        const updatedRecords: Subscription[] = []
+        for (const record of records) {
+          const fundedCents = ledger.filter(entry => entry.subscriptionId === record.id)
+            .reduce((sum, entry) => sum + entry.amountCents, 0)
+          const expectedCents = Math.round(record.amount * 100)
+          if (record.userId === 'company' && fundedCents > 0) {
+            throw new AppError(409, 'COMPANY_FUNDING_UNRECONCILED', '公司出资已到账，请先核对，不可直接关闭')
+          }
+          if (record.userId !== 'company' && ((record.pay === '已缴款' && fundedCents !== expectedCents)
+            || (record.pay === '部分缴款' && (fundedCents <= 0 || fundedCents > expectedCents
+              || Math.round((record.actualPaidAmount ?? 0) * 100) !== fundedCents))
+            || (!['已缴款', '部分缴款'].includes(record.pay) && fundedCents !== 0))) {
+            throw new AppError(409, 'FUNDING_LEDGER_INCONSISTENT', '员工缴款与资金台账不一致，不能关闭')
+          }
+          if (record.userId !== 'company' && fundedCents > 0) {
+            refundOrders.push({ id: `REF-${randomUUID()}`, projectId, subscriptionId: record.id,
+              participantId: record.userId, amountCents: fundedCents, reason: '众筹关闭退款',
+              status: '待退款', createdAt: new Date().toISOString() })
+            updatedRecords.push({ ...record, pay: '待退款', action: '等待退款' })
+          } else updatedRecords.push({ ...record, pay: '已释放', action: '认购已作废' })
+        }
+        const unresolvedExceptions = await exceptionFunds.countDocuments({ projectId, remainingCents: { $gt: 0 } }, { session })
+        const status = refundOrders.length || unresolvedExceptions ? '关闭中' as const : '已关闭' as const
+        const updatedProject = { ...project, status,
+          statusType: status === '关闭中' ? 'warning' : 'info',
+          interruptReason: reason, interruptedAt: new Date().toISOString(), refundNotice: undefined,
+          ...(status === '已关闭' ? { closedAt: new Date().toISOString(), closedBy: actor.userId } : {}) } as Project
+        await repositories.projects.replace(updatedProject, session)
+        for (const record of updatedRecords) await repositories.subscriptions.replace(record, session)
+        if (refundOrders.length) await projectRefunds.insertMany(refundOrders, { session })
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '发起众筹关闭',
+          target: projectId, before: { status: project.status },
+          after: { status, reason, refundCount: refundOrders.length,
+            refundTotalCents: refundOrders.reduce((sum, item) => sum + item.amountCents, 0) } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updatedProject, updatedRecords, refundOrders, audit }
+      })
+      const projectIndex = projects.findIndex(item => item.id === projectId)
+      if (projectIndex >= 0) projects.splice(projectIndex, 1, result.updatedProject)
+      for (const record of result.updatedRecords) {
+        const index = subscriptions.findIndex(item => item.id === record.id)
+        if (index >= 0) subscriptions.splice(index, 1, record)
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updatedProject,
+        message: result.updatedProject.status === '关闭中'
+          ? '已发起关闭，请财务核对退款和未处理异常款项' : '众筹单已关闭' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_CLOSE_DUPLICATE', message: '关闭退款事项已生成，请刷新' })
+      throw error
+    }
+  }
+  const projectReopenMatch = pathname.match(/^\/api\/projects\/([^/]+)\/reopen$/)
+  if (projectReopenMatch) {
+    const actor = managementActor(req, ['admin'])
+    const sourceId = decodeURIComponent(projectReopenMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const original = await repositories.projects.getById(sourceId, session)
+        if (!original) throw new AppError(404, 'PROJECT_NOT_FOUND', '原众筹单不存在')
+        requireAdminOwned(req, original)
+        if (original.status !== '已关闭' || original.reopenedByProjectId) {
+          throw new AppError(409, 'PROJECT_REOPEN_INVALID', '仅已关闭且尚未重开的众筹单可以重开')
+        }
+        const originalRule = original.ruleId ? await repositories.rules.getById(original.ruleId, session) : null
+        if (!originalRule) throw new AppError(409, 'PROJECT_REOPEN_RULE_MISSING', '原众筹单缺少发布规则快照，无法自动带入')
+        if (!Number.isFinite(original.costAmount) || original.costAmount <= 0
+          || !Number.isFinite(original.salesAmount) || original.salesAmount <= original.costAmount
+          || !Number.isFinite(original.total) || original.total <= 0) {
+          throw new AppError(409, 'PROJECT_REOPEN_AMOUNT_INVALID', '原众筹单采购和应收金额无效，请先核对')
+        }
+        if (original.offlineSalesOrder) {
+          const active = await mongo.db.collection<Project>(`${appConfig.mongodb.collectionPrefix}projects`)
+            .findOne({ offlineSalesOrder: original.offlineSalesOrder,
+              status: { $nin: ['已关闭', '已中断', '已完结'] }, id: { $ne: original.id } }, { session })
+          if (active) throw new AppError(409, 'PROCUREMENT_PROJECT_ACTIVE', '同一采购单已有未关闭的众筹单')
+        }
+        const identity = ownershipFrom(iamContextFor(req))
+        const id = `PRJ-REOPEN-${randomUUID()}`
+        const title = `${original.title}（重开）`
+        const ruleId = `RULE-REOPEN-${randomUUID()}`
+        const reopened: Project = {
+          id, title, source: original.source, offlineSalesOrder: original.offlineSalesOrder,
+          createdAt: new Date().toISOString(), projectOwner: actor.label, ...identity,
+          reopenedFromProjectId: original.id, status: '未开放', statusType: 'info',
+          progress: 0, remain: original.costAmount, deadline: original.deadline,
+          total: original.total, costAmount: original.costAmount, salesAmount: original.salesAmount,
+          profitAmount: original.profitAmount, companyFixedAmount: original.companyFixedAmount,
+          companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+          employeeSubscribedAmount: 0, subscribed: 0, people: 0, ruleId
+        }
+        const copiedRule: SubscriptionRule = { ...originalRule, id: ruleId, projectId: id,
+          projectName: title, ...identity, status: '未启用', updatedAt: new Date().toISOString() }
+        const changed = await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: original.id, status: '已关闭', reopenedByProjectId: { $exists: false } },
+            { $set: { reopenedByProjectId: id } }, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_REOPEN_CHANGED', '原众筹单已变化，请刷新')
+        await repositories.projects.insert(reopened, session)
+        await repositories.rules.insert(copiedRule, session)
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '重开已关闭众筹单',
+          target: id, before: { sourceId: original.id, status: original.status },
+          after: { projectId: id, status: reopened.status, copiedRuleId: ruleId } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { reopened, copiedRule, audit }
+      })
+      projects.unshift(result.reopened)
+      rules.unshift(result.copiedRule)
+      const index = projects.findIndex(item => item.id === sourceId)
+      if (index >= 0) projects.splice(index, 1, { ...projects[index], reopenedByProjectId: result.reopened.id })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.reopened,
+        message: '重开草稿已创建，请更新规则日期、核对收款码并重新发布' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REOPEN_DUPLICATE', message: '原众筹单已重开' })
+      throw error
+    }
+  }
+  const finishProjectCloseMatch = pathname.match(/^\/api\/projects\/([^/]+)\/finish-close$/)
+  if (finishProjectCloseMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(finishProjectCloseMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        if (!project || project.status !== '关闭中') throw new AppError(409, 'PROJECT_NOT_CLOSING', '众筹单当前不是关闭中')
+        const pending = await projectRefunds.countDocuments({ projectId, status: { $ne: '已退款' } }, { session })
+        if (pending > 0) throw new AppError(409, 'PROJECT_REFUNDS_PENDING', `仍有 ${pending} 笔员工退款待确认`)
+        const contributions = await fundLedger.listProjectContributions(projectId, session)
+        const outflow = await mongo.db.collection<{ amountCents: number }>(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+          .find({ projectId, type: 'subscription_refund_confirmed' }, { session }).toArray()
+        const incomingCents = contributions.reduce((sum, item) => sum + item.amountCents, 0)
+        const refundedCents = outflow.reduce((sum, item) => sum + item.amountCents, 0)
+        const exceptions = await exceptionFunds.countDocuments({ projectId, remainingCents: { $gt: 0 } }, { session })
+        if (incomingCents !== refundedCents || exceptions > 0) {
+          throw new AppError(409, 'PROJECT_CLOSE_RECONCILIATION_FAILED',
+            `关闭前对账未通过：员工缴款与确认退款差额 ${((incomingCents - refundedCents) / 100).toFixed(2)} 元，未处理异常款项 ${exceptions} 笔`)
+        }
+        const closedAt = new Date().toISOString()
+        const changed = await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId, status: '关闭中' }, { $set: { status: '已关闭',
+            statusType: 'info', closedAt, closedBy: actor.userId } }, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_CHANGED', '众筹单状态已变化')
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '完成众筹关闭',
+          target: projectId, before: { status: project.status },
+          after: { status: '已关闭', incomingCents, refundedCents, exceptions } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { audit, closedAt }
+      })
+      const index = projects.findIndex(item => item.id === projectId)
+      if (index >= 0) projects.splice(index, 1, { ...projects[index], status: '已关闭',
+        statusType: 'info', closedAt: result.closedAt, closedBy: actor.userId })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: { projectId, status: '已关闭', closedAt: result.closedAt }, message: '众筹单已关闭' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      throw error
+    }
+  }
   const closeOrderMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/close$/)
   if (closeOrderMatch) {
     const actor = financeOperator(req)
@@ -3118,15 +3488,15 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const project = projects.find(item => item.id === projectId)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
     requireAdminOwned(req, project)
-    if (project.status !== '未开放' && project.status !== '未满额') {
-      return send(res, 409, { error: 'PROJECT_STATUS_INVALID', message: '只有未开放或未满额项目可以终止' })
+    if (project.status !== '未开放') {
+      return send(res, 409, { error: 'PROJECT_CLOSE_REQUIRED', message: '已发布众筹单请使用关闭及退款流程' })
     }
     const before = { status: project.status, remain: project.remain }
     project.status = '已中断'
     project.statusType = 'danger'
     project.interruptReason = '管理端终止认购'
     project.interruptedAt = now()
-    project.refundNotice = '已缴款金额将在 48h 内原路返款到账'
+    project.refundNotice = undefined
     await pushAudit({
       actor: manager!.label,
       role: manager!.role,
@@ -3140,7 +3510,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       }
     })
     await persistState()
-    return send(res, 200, { data: project, message: '项目已终止并进入已中断状态' })
+    return send(res, 200, { data: project, message: '未开放项目已停止' })
   }
 
   if (pathname.startsWith('/api/projects/') && pathname.endsWith('/interrupt')) {
@@ -3150,31 +3520,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
     requireAdminOwned(req, project)
     if (!reason) return send(res, 400, { error: 'INTERRUPT_REASON_REQUIRED', message: '中断认购必须填写中断原因' })
-    if (project.status !== '未满额') {
-      return send(res, 409, { error: 'PROJECT_NOT_OPEN', message: '只有未满额项目可以中断认购' })
-    }
-    const before = { status: project.status, remain: project.remain, interruptReason: project.interruptReason }
-    project.status = '已中断'
-    project.statusType = 'danger'
-    project.interruptReason = reason
-    project.interruptedAt = now()
-    project.refundNotice = '已缴款金额将在 48h 内原路返款到账'
-    riskEvents.unshift({
-      time: now(),
-      level: '高',
-      desc: `项目「${project.title}」已中断认购：${reason}；已缴款金额将在 48h 内返款到账`,
-      status: '已通知员工与财务'
-    })
-    await pushAudit({
-      actor: manager!.label,
-      role: manager!.role,
-      action: '中断项目认购',
-      target: project.id,
-      before,
-      after: { status: project.status, interruptReason: reason, refundNotice: project.refundNotice }
-    })
-    await persistState()
-    return send(res, 200, { data: project, message: project.refundNotice })
+    return send(res, 409, { error: 'PROJECT_CLOSE_REQUIRED', message: '已发布众筹单请使用关闭及退款流程' })
   }
 
   if (pathname === '/api/payments/images/delete') {

@@ -37,6 +37,7 @@ import ProcurementPaymentPage from './components/ProcurementPaymentPage.vue'
 import CustomerReceiptsPage from './components/CustomerReceiptsPage.vue'
 import DistributionOrdersPage from './components/DistributionOrdersPage.vue'
 import ExceptionFundsPage from './components/ExceptionFundsPage.vue'
+import ProjectRefundsPage from './components/ProjectRefundsPage.vue'
 import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -56,6 +57,7 @@ type PageKey =
   | 'customerReceipts'
   | 'distributionOrders'
   | 'exceptionFunds'
+  | 'projectRefunds'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -67,9 +69,11 @@ type Project = {
   title: string
   source: string
   offlineSalesOrder?: string
+  reopenedFromProjectId?: string
+  reopenedByProjectId?: string
   createdAt?: string
   projectOwner?: string
-  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '部分已结算' | '已完结'
+  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '部分已结算' | '已完结'
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
   remain: number
@@ -269,6 +273,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
       { key: 'customerReceipts', label: '客户回款', req: 'P0', icon: Money, permission: 'crowdfunding:receipt:query' },
       { key: 'distributionOrders', label: '利润分配', req: 'P0', icon: Money, permission: 'crowdfunding:distribution:query' },
       { key: 'exceptionFunds', label: '异常款项', req: 'P0', icon: Money, permission: 'crowdfunding:exception-fund:query' },
+      { key: 'projectRefunds', label: '项目退款', req: 'P0', icon: Money, permission: 'crowdfunding:project-refund:query' },
       { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money, permission: 'crowdfunding:settlement:query' }
     ]
   }
@@ -290,6 +295,7 @@ const pageTitleMap: Record<PageKey, string> = {
   customerReceipts: '客户回款',
   distributionOrders: '利润分配',
   exceptionFunds: '异常款项',
+  projectRefunds: '项目退款',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -1333,7 +1339,40 @@ async function handleAdminProjectMoreCommand(command: string, project: Project) 
     await updateProjectLifecycle(project, 'terminate')
     return
   }
+  if (command === 'close') { await closeProject(project); return }
+  if (command === 'reopen') { await reopenProject(project); return }
   if (command === 'takeover') await forceTakeover(project)
+}
+
+async function closeProject(project: Project) {
+  let reason = ''
+  try {
+    const result = await ElMessageBox.prompt('请填写 5 至 200 字关闭原因', '关闭众筹单', { inputType: 'textarea' })
+    reason = result.value.trim()
+    if (reason.length < 5 || reason.length > 200) { ElMessage.warning('关闭原因须为 5 至 200 字'); return }
+    await ElMessageBox.confirm('关闭后不再接受认购，已缴款员工需逐笔办理并确认退款。确认关闭？',
+      '确认关闭', { type: 'warning' })
+  } catch { return }
+  try {
+    const result = await api<{ message: string }>(`/api/projects/${encodeURIComponent(project.id)}/close`, {
+      method: 'POST', body: JSON.stringify({ reason }) })
+    ElMessage.success(result.message)
+    await loadData()
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '发起关闭失败') }
+}
+
+async function reopenProject(project: Project) {
+  try {
+    await ElMessageBox.confirm('系统将创建新草稿并带入原规则。发布前须更新截止时间并核对收款码，确认重开？',
+      '重开众筹单', { type: 'warning' })
+  } catch { return }
+  try {
+    const result = await api<{ data: Project; message: string }>(
+      `/api/projects/${encodeURIComponent(project.id)}/reopen`, { method: 'POST', body: JSON.stringify({}) })
+    ElMessage.success(result.message)
+    await loadData()
+    selectedProjectId.value = result.data.id
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '重开失败') }
 }
 
 function goProjectSettlement(project: Project) {
@@ -1478,11 +1517,11 @@ async function updateProjectLifecycle(project: Project, action: 'open' | 'termin
     openProjectRuleDialog(project)
     return
   }
-  const title = isOpenAction ? '开放项目认购' : '终止项目认购'
+  const title = isOpenAction ? '开放项目认购' : '停止未开放项目'
   const message = isOpenAction
     ? `确认开放「${project.title}」？开放后员工端可查看并发起认购。`
-    : `确认终止「${project.title}」？终止后项目状态将变为“已中断”，员工不可继续认购；已缴款金额将在 48h 内原路返款到账。`
-  const confirmButtonText = isOpenAction ? '确认开放' : '确认终止'
+    : `确认停止尚未开放的「${project.title}」？`
+  const confirmButtonText = isOpenAction ? '确认开放' : '确认停止'
   try {
     await ElMessageBox.confirm(message, title, {
       confirmButtonText,
@@ -2430,11 +2469,11 @@ watch(() => authSession.permissionInfo.value, info => {
                     v-if="row.status === '已中断'"
                     placement="top-start"
                     effect="light"
-                    :content="`${row.interruptReason || '已中断认购'} ${row.refundNotice || '已缴款金额将在 48h 内返款到账'}`"
+                    :content="`${row.interruptReason || '已中断认购'} ${row.refundNotice || '请在项目退款事项中核对实际退款进度'}`"
                   >
                     <div class="interrupt-summary">
                       <span>{{ row.interruptReason || '已中断认购' }}</span>
-                      <strong>{{ row.refundNotice || '已缴款金额将在 48h 内返款到账' }}</strong>
+                      <strong>{{ row.refundNotice || '请在项目退款事项中核对实际退款进度' }}</strong>
                     </div>
                   </el-tooltip>
                 </template>
@@ -2809,11 +2848,11 @@ watch(() => authSession.permissionInfo.value, info => {
                     v-if="row.status === '已中断'"
                     placement="top-start"
                     effect="light"
-                    :content="`${row.interruptReason || '已中断认购'} ${row.refundNotice || '已缴款金额将在 48h 内返款到账'}`"
+                    :content="`${row.interruptReason || '已中断认购'} ${row.refundNotice || '请在项目退款事项中核对实际退款进度'}`"
                   >
                     <div class="interrupt-summary">
                       <span>{{ row.interruptReason || '已中断认购' }}</span>
-                      <strong>{{ row.refundNotice || '已缴款金额将在 48h 内返款到账' }}</strong>
+                      <strong>{{ row.refundNotice || '请在项目退款事项中核对实际退款进度' }}</strong>
                     </div>
                   </el-tooltip>
                 </template>
@@ -2923,7 +2962,7 @@ watch(() => authSession.permissionInfo.value, info => {
                       开放
                     </el-button>
                     <el-dropdown
-                      v-if="adminProjectActionLayout(row).showMore && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
+                      v-if="(adminProjectActionLayout(row).showMore || ['已满额', '已截止', '已关闭'].includes(row.status)) && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:close') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
                       trigger="click"
                       popper-class="project-action-menu"
                       @command="handleAdminProjectMoreCommand($event, row)"
@@ -2934,12 +2973,21 @@ watch(() => authSession.permissionInfo.value, info => {
                       <template #dropdown>
                         <el-dropdown-menu>
                           <el-dropdown-item
-                            v-if="adminProjectActionLayout(row).showTerminate && canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate')"
+                            v-if="row.status === '未开放' && canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate')"
                             command="terminate"
                             class="danger-menu-item"
                           >
-                            终止项目
+                            停止未开放项目
                           </el-dropdown-item>
+                          <el-dropdown-item
+                            v-if="['未满额', '已满额', '已截止'].includes(row.status) && canApi(authSession.permissionInfo.value, 'crowdfunding:project:close')"
+                            command="close"
+                            class="danger-menu-item"
+                          >关闭众筹单</el-dropdown-item>
+                          <el-dropdown-item
+                            v-if="row.status === '已关闭' && !row.reopenedByProjectId && canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen')"
+                            command="reopen"
+                          >重开众筹单</el-dropdown-item>
                           <el-dropdown-item
                             v-if="adminProjectActionLayout(row).showTakeover && canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force')"
                             command="takeover"
@@ -3266,6 +3314,15 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-transfer="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:transfer')"
           :can-review-transfer="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:transfer-review')"
           :can-assign-project="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:assign-project')"
+          @updated="loadData"
+        />
+
+        <ProjectRefundsPage
+          v-if="currentPage === 'projectRefunds' && (currentRole === 'finance' || currentRole === 'super_admin')"
+          :projects="projects" :role="currentRole"
+          :can-register="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:register')"
+          :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:proof-upload')"
+          :can-finish-close="canApi(authSession.permissionInfo.value, 'crowdfunding:project:finish-close')"
           @updated="loadData"
         />
 
@@ -3904,7 +3961,7 @@ watch(() => authSession.permissionInfo.value, info => {
         :closable="false"
         class="mb12"
       >
-        该规则已被有真实认购记录的项目使用，当前仅支持查看详情，不支持修改规则配置内容；如需停止，请执行“中断认购”。中断后已缴款金额将在 48h 内返款到账。
+        该规则已被有真实认购记录的项目使用，当前仅支持查看详情，不支持修改规则配置内容；如需停止，请执行“关闭众筹单”并跟踪逐笔退款。
       </el-alert>
       <template #footer>
         <el-button @click="ruleCreateVisible = false">{{ ruleReadonly ? '关闭' : '取消' }}</el-button>
@@ -3952,7 +4009,7 @@ watch(() => authSession.permissionInfo.value, info => {
 
     <el-dialog v-model="interruptVisible" title="中断项目认购" width="620px">
       <el-alert type="warning" :closable="false" class="mb12">
-        中断后项目列表将同步为“已中断”，员工不可继续认购；已缴款金额将在 48h 内返款到账。
+        已发布众筹单请使用“关闭众筹单”及项目退款流程。
       </el-alert>
       <el-form label-width="120px">
         <el-form-item label="项目名称">
