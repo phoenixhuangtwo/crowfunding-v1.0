@@ -488,6 +488,180 @@ try {
   assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: order.id }))?.status, '可结单')
   assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({
     projectId: 'PRJ-IAM-PAY-READY', type: 'employee_distribution_payout' }), 1)
+  const financialReconciliation = await request('/api/projects/PRJ-IAM-PAY-READY/financial-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal(financialReconciliation.status, 200, JSON.stringify(financialReconciliation.body))
+  assert.equal((financialReconciliation.body.data as { closeReady: boolean }).closeReady, true)
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-EXCEPTION', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/exception-fund-proof/ASSET-IAM-EXCEPTION.png', originalName: 'exception.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'e'.repeat(64),
+    purpose: 'exception-fund-proof', ownerType: 'project', ownerId: 'exception-staging:1003',
+    status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const exceptionInput = { projectId: 'PRJ-IAM-PAY-READY', amountCents: 250,
+    transactionNo: 'BANK-IAM-EXCEPTION', bookedAt: new Date(Date.now() - 60_000).toISOString(),
+    sourceNote: '付款人转错款项，暂未能匹配认购单', manualVerificationNote: '已人工核对银行流水与到账时间',
+    proofAssetIds: ['ASSET-IAM-EXCEPTION'] }
+  assert.equal((await postAs('/api/exception-funds', 'smoke-employee-token', exceptionInput)).status, 403)
+  assert.equal((await postAs('/api/exception-funds', 'smoke-finance-token', {
+    ...exceptionInput, manualVerificationNote: '' })).status, 400)
+  const exceptionCreated = await postAs('/api/exception-funds', 'smoke-finance-token', exceptionInput)
+  assert.equal(exceptionCreated.status, 201, JSON.stringify(exceptionCreated.body))
+  assert.equal((await postAs('/api/exception-funds', 'smoke-finance-token', exceptionInput)).status, 409)
+  const exceptionList = await request('/api/exception-funds?projectId=PRJ-IAM-PAY-READY',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal(exceptionList.status, 200)
+  assert.equal((exceptionList.body.data as { total: number }).total, 1)
+  const blockedReconciliation = await request('/api/projects/PRJ-IAM-PAY-READY/financial-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal((blockedReconciliation.body.data as { closeReady: boolean; unprocessedExceptionCents: number }).closeReady, false)
+  assert.equal((blockedReconciliation.body.data as { unprocessedExceptionCents: number }).unprocessedExceptionCents, 250)
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/close`,
+    'smoke-finance-token', {})).status, 409, '未处理异常款项阻止结单')
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({ type: 'exception_fund_received' }), 1)
+  const fundId = (exceptionCreated.body.data as { id: string }).id
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-EXCEPTION-REFUND', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/exception-refund-proof/ASSET-IAM-EXCEPTION-REFUND.png', originalName: 'refund.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'f'.repeat(64),
+    purpose: 'exception-refund-proof', ownerType: 'project',
+    ownerId: `exception-refund-staging:${fundId}:1003`, status: 'ready', createdBy: '1003',
+    createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const refundInput = { amountCents: 250, transactionNo: 'BANK-IAM-EX-REFUND',
+    paidAt: new Date(Date.now() - 60_000).toISOString(), reason: '已向原付款人退回异常到账款项',
+    proofAssetIds: ['ASSET-IAM-EXCEPTION-REFUND'] }
+  assert.equal((await postAs(`/api/exception-funds/${fundId}/refunds`, 'smoke-employee-token', refundInput)).status, 403)
+  const refundCreated = await postAs(`/api/exception-funds/${fundId}/refunds`, 'smoke-finance-token', refundInput)
+  assert.equal(refundCreated.status, 201, JSON.stringify(refundCreated.body))
+  assert.equal((await postAs(`/api/exception-funds/${fundId}/refunds`, 'smoke-finance-token', refundInput)).status, 400)
+  const refundId = (refundCreated.body.data as { id: string }).id
+  const refundConfirmPath = `/api/exception-funds/${fundId}/refunds/${refundId}/confirm`
+  assert.equal((await postAs(refundConfirmPath, 'smoke-employee-token', {})).status, 403)
+  assert.equal((await postAs(refundConfirmPath, 'smoke-super-admin-token', {})).status, 200)
+  assert.equal((await postAs(refundConfirmPath, 'smoke-super-admin-token', {})).status, 409)
+  const clearedReconciliation = await request('/api/projects/PRJ-IAM-PAY-READY/financial-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal((clearedReconciliation.body.data as { closeReady: boolean }).closeReady, true)
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({ type: 'exception_fund_refund_confirmed' }), 1)
+  await db.collection(`${prefix}file_assets`).insertMany([
+    { id: 'ASSET-IAM-EXCEPTION-EMPLOYEE', provider: 'tencent-cos', bucket: 'test', region: 'test',
+      objectKey: 'test/exception-fund-proof/ASSET-IAM-EXCEPTION-EMPLOYEE.png', originalName: 'employee.png',
+      extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'a'.repeat(64),
+      purpose: 'exception-fund-proof', ownerType: 'project', ownerId: 'exception-staging:1003',
+      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' },
+    { id: 'ASSET-IAM-EXCEPTION-EMPLOYEE-REFUND', provider: 'tencent-cos', bucket: 'test', region: 'test',
+      objectKey: 'test/exception-refund-proof/ASSET-IAM-EXCEPTION-EMPLOYEE-REFUND.png', originalName: 'employee-refund.png',
+      extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'b'.repeat(64),
+      purpose: 'exception-refund-proof', ownerType: 'project', ownerId: 'pending',
+      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' }
+  ])
+  const employeeFundCreated = await postAs('/api/exception-funds', 'smoke-finance-token', {
+    ...exceptionInput, payerUserId: '1001', amountCents: 125,
+    transactionNo: 'BANK-IAM-EX-EMPLOYEE', proofAssetIds: ['ASSET-IAM-EXCEPTION-EMPLOYEE'] })
+  assert.equal(employeeFundCreated.status, 201, JSON.stringify(employeeFundCreated.body))
+  const employeeFundId = (employeeFundCreated.body.data as { id: string }).id
+  await db.collection(`${prefix}file_assets`).updateOne({ id: 'ASSET-IAM-EXCEPTION-EMPLOYEE-REFUND' },
+    { $set: { ownerId: `exception-refund-staging:${employeeFundId}:1003` } })
+  const employeeRefundCreated = await postAs(`/api/exception-funds/${employeeFundId}/refunds`, 'smoke-finance-token', {
+    ...refundInput, amountCents: 125, transactionNo: 'BANK-IAM-EX-EMPLOYEE-REFUND',
+    proofAssetIds: ['ASSET-IAM-EXCEPTION-EMPLOYEE-REFUND'] })
+  assert.equal(employeeRefundCreated.status, 201, JSON.stringify(employeeRefundCreated.body))
+  const employeeRefundId = (employeeRefundCreated.body.data as { id: string }).id
+  const myExceptionRefunds = await request('/api/my-exception-refunds', employee)
+  assert.equal(myExceptionRefunds.status, 200)
+  assert.equal((myExceptionRefunds.body.data as Array<{ fundId: string }>).length, 1)
+  assert.equal((myExceptionRefunds.body.data as Array<{ fundId: string }>)[0].fundId, employeeFundId)
+  const employeeRefundConfirmPath = `/api/exception-funds/${employeeFundId}/refunds/${employeeRefundId}/confirm`
+  assert.equal((await postAs(employeeRefundConfirmPath, 'smoke-super-admin-token', {})).status, 403)
+  assert.equal((await postAs(employeeRefundConfirmPath, 'smoke-employee-token', {})).status, 200)
+  assert.equal((await postAs(employeeRefundConfirmPath, 'smoke-employee-token', {})).status, 409)
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/close`,
+    'smoke-employee-token', {})).status, 403)
+  const closedOrder = await postAs(`/api/distribution-orders/${order.id}/close`, 'smoke-finance-token', {})
+  assert.equal(closedOrder.status, 200, JSON.stringify(closedOrder.body))
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PAY-READY' }))?.status, '已完结')
+  assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: order.id }))?.status, '已完成')
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/close`,
+    'smoke-finance-token', {})).status, 409)
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-TRANSFER', title: '异常款项拆分转入项目', source: 'integration-test',
+    status: '未满额', statusType: 'primary', progress: 50, remain: 100, deadline: '2099-12-30 12:00',
+    total: 100, costAmount: 100, salesAmount: 120, profitAmount: 20,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 100, subscribed: 100, people: 1, ruleId: 'RULE-IAM-TRANSFER'
+  })
+  await db.collection(`${prefix}subscription_rules`).insertOne({
+    id: 'RULE-IAM-TRANSFER', projectId: 'PRJ-IAM-TRANSFER', ruleName: '异常款项转入规则',
+    sharePrice: 100, totalShares: 1, companyFrontShares: 0, totalAmount: 100,
+    companyFixedAmount: 0, paymentCutoffAt: '2099-12-31 12:00',
+    status: '已启用', updatedAt: new Date().toISOString()
+  })
+  await db.collection(`${prefix}subscriptions`).insertOne({
+    id: 'SUB-IAM-TRANSFER', projectId: 'PRJ-IAM-TRANSFER', project: '异常款项拆分转入项目',
+    userId: '1001', amount: 100, shares: 1, pay: '未缴款', profit: 20,
+    action: '查看支付', idempotencyKey: 'SUB-IAM-TRANSFER', createdAt: new Date().toISOString(),
+    paymentDeadlineAt: '2099-12-31 12:00'
+  })
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-UNATTRIBUTED', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/exception-fund-proof/ASSET-IAM-UNATTRIBUTED.png', originalName: 'unattributed.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'd'.repeat(64),
+    purpose: 'exception-fund-proof', ownerType: 'project', ownerId: 'exception-staging:1003',
+    status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const unattributed = await postAs('/api/exception-funds', 'smoke-finance-token', {
+    ...exceptionInput, projectId: undefined, amountCents: 50,
+    transactionNo: 'BANK-IAM-UNATTRIBUTED', proofAssetIds: ['ASSET-IAM-UNATTRIBUTED'] })
+  assert.equal(unattributed.status, 201, JSON.stringify(unattributed.body))
+  const unattributedId = (unattributed.body.data as { id: string }).id
+  const assignPath = `/api/exception-funds/${unattributedId}/assign-project`
+  assert.equal((await postAs(assignPath, 'smoke-super-admin-token', {
+    projectId: 'PRJ-IAM-TRANSFER', reason: '已核对付款人信息与众筹单' })).status, 403)
+  assert.equal((await postAs(assignPath, 'smoke-finance-token', {
+    projectId: 'PRJ-IAM-TRANSFER', reason: '已核对付款人信息与众筹单' })).status, 200)
+  assert.equal((await postAs(assignPath, 'smoke-finance-token', {
+    projectId: 'PRJ-IAM-TRANSFER', reason: '重复归属核实请求' })).status, 409)
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({
+    type: 'exception_fund_attributed', projectId: 'PRJ-IAM-TRANSFER' }), 1)
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-TRANSFER', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/exception-fund-proof/ASSET-IAM-TRANSFER.png', originalName: 'transfer.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'c'.repeat(64),
+    purpose: 'exception-fund-proof', ownerType: 'project', ownerId: 'exception-staging:1003',
+    status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const transferFundCreated = await postAs('/api/exception-funds', 'smoke-finance-token', {
+    ...exceptionInput, projectId: 'PRJ-IAM-TRANSFER', amountCents: 10000,
+    transactionNo: 'BANK-IAM-TRANSFER', proofAssetIds: ['ASSET-IAM-TRANSFER'] })
+  assert.equal(transferFundCreated.status, 201, JSON.stringify(transferFundCreated.body))
+  const transferFundId = (transferFundCreated.body.data as { id: string }).id
+  const transferPath = `/api/exception-funds/${transferFundId}/transfers`
+  const firstTransfer = await postAs(transferPath, 'smoke-finance-token', {
+    subscriptionId: 'SUB-IAM-TRANSFER', amountCents: 4000, reason: '异常到账款项转入本人认购单' })
+  assert.equal(firstTransfer.status, 201, JSON.stringify(firstTransfer.body))
+  assert.equal((await postAs(transferPath, 'smoke-finance-token', {
+    subscriptionId: 'SUB-IAM-TRANSFER', amountCents: 7000, reason: '超过剩余可转入金额的请求' })).status, 400)
+  const secondTransfer = await postAs(transferPath, 'smoke-finance-token', {
+    subscriptionId: 'SUB-IAM-TRANSFER', amountCents: 6000, reason: '剩余款项转入本人认购单' })
+  assert.equal(secondTransfer.status, 201, JSON.stringify(secondTransfer.body))
+  for (const allocation of [firstTransfer, secondTransfer]) {
+    const allocationId = (allocation.body.data as { id: string }).id
+    const reviewPath = `/api/exception-funds/${transferFundId}/transfers/${allocationId}/review`
+    assert.equal((await postAs(reviewPath, 'smoke-finance-token', { decision: '通过' })).status, 403)
+    assert.equal((await postAs(reviewPath, 'smoke-super-admin-token', { decision: '通过' })).status, 200)
+    assert.equal((await postAs(reviewPath, 'smoke-super-admin-token', { decision: '通过' })).status, 409)
+  }
+  const paidTransferSubscription = await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-IAM-TRANSFER' })
+  assert.equal(paidTransferSubscription?.pay, '已缴款')
+  assert.equal(paidTransferSubscription?.actualPaidAmount, 100)
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({
+    subscriptionId: 'SUB-IAM-TRANSFER', type: 'employee_contribution' }), 2)
+  const transferFunding = await request('/api/projects/PRJ-IAM-TRANSFER/funding-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal(transferFunding.status, 200, JSON.stringify(transferFunding.body))
+  assert.equal((transferFunding.body.data as { balanced: boolean }).balanced, true)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

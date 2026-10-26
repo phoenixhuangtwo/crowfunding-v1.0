@@ -81,6 +81,20 @@ try {
     assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
   }
   await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:payout:confirm', claims.tenantId), /IAM 权限拒绝/)
+  assert.ok(info.apiPermissions.includes('crowdfunding:financial-reconciliation:query'))
+  assert.equal(await iam.decideApi(accessToken, 'crowdfunding:financial-reconciliation:query', claims.tenantId), true)
+  assert.ok(info.apiPermissions.includes('crowdfunding:exception-fund:query'))
+  assert.ok(info.apiPermissions.includes('crowdfunding:exception-fund:register'))
+  assert.ok(info.apiPermissions.includes('crowdfunding:exception-fund:proof-upload'))
+  assert.equal(await iam.decideApi(accessToken, 'crowdfunding:exception-fund:register', claims.tenantId), true)
+  for (const permission of ['crowdfunding:exception-fund:refund',
+    'crowdfunding:exception-fund:refund-proof-upload', 'crowdfunding:exception-fund:transfer',
+    'crowdfunding:exception-fund:assign-project', 'crowdfunding:distribution:close']) {
+    assert.ok(info.apiPermissions.includes(permission))
+    assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
+  }
+  await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:exception-fund:refund-confirm', claims.tenantId), /IAM 权限拒绝/)
+  await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:exception-fund:transfer-review', claims.tenantId), /IAM 权限拒绝/)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:register', claims.tenantId), true)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:proof-upload', claims.tenantId), true)
   process.stdout.write('真实 IAM 财务授权联调通过\n')

@@ -13,6 +13,7 @@ export const businessCollections = [
   'receipt_differences',
   'distribution_orders',
   'confirmed_costs',
+  'exception_funds',
   'risk_events',
   'file_assets'
 ] as const
@@ -39,6 +40,7 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   receipt_differences: [],
   distribution_orders: [],
   confirmed_costs: [],
+  exception_funds: [],
   risk_events: [],
   file_assets: []
 }
@@ -114,6 +116,11 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'uniq_confirmed_cost_id', key: { id: 1 }, unique: true },
     { name: 'idx_confirmed_cost_project', key: { projectId: 1, createdAt: -1 } },
     { name: 'idx_confirmed_cost_status', key: { status: 1 } }
+  ],
+  exception_funds: [
+    { name: 'uniq_exception_fund_id', key: { id: 1 }, unique: true },
+    { name: 'idx_exception_fund_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'uniq_exception_fund_transaction', key: { transactionNo: 1 }, unique: true }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

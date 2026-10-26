@@ -36,6 +36,7 @@ import AuthStateView from './components/AuthStateView.vue'
 import ProcurementPaymentPage from './components/ProcurementPaymentPage.vue'
 import CustomerReceiptsPage from './components/CustomerReceiptsPage.vue'
 import DistributionOrdersPage from './components/DistributionOrdersPage.vue'
+import ExceptionFundsPage from './components/ExceptionFundsPage.vue'
 import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -54,6 +55,7 @@ type PageKey =
   | 'procurementPayment'
   | 'customerReceipts'
   | 'distributionOrders'
+  | 'exceptionFunds'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -266,6 +268,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
       { key: 'procurementPayment', label: '采购付款登记', req: 'P0', icon: Money, permission: 'crowdfunding:procurement-payment:register' },
       { key: 'customerReceipts', label: '客户回款', req: 'P0', icon: Money, permission: 'crowdfunding:receipt:query' },
       { key: 'distributionOrders', label: '利润分配', req: 'P0', icon: Money, permission: 'crowdfunding:distribution:query' },
+      { key: 'exceptionFunds', label: '异常款项', req: 'P0', icon: Money, permission: 'crowdfunding:exception-fund:query' },
       { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money, permission: 'crowdfunding:settlement:query' }
     ]
   }
@@ -286,6 +289,7 @@ const pageTitleMap: Record<PageKey, string> = {
   procurementPayment: '采购付款登记',
   customerReceipts: '客户回款',
   distributionOrders: '利润分配',
+  exceptionFunds: '异常款项',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -3251,6 +3255,20 @@ watch(() => authSession.permissionInfo.value, info => {
 
         <MyPayoutsPage v-if="currentPage === 'myPayouts' && currentRole === 'employee'" />
 
+        <ExceptionFundsPage
+          v-if="currentPage === 'exceptionFunds' && (currentRole === 'finance' || currentRole === 'super_admin')"
+          :projects="projects" :role="currentRole"
+          :can-register="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:register')"
+          :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:proof-upload')"
+          :can-refund="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:refund')"
+          :can-upload-refund-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:refund-proof-upload')"
+          :can-confirm-refund="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:refund-confirm')"
+          :can-transfer="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:transfer')"
+          :can-review-transfer="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:transfer-review')"
+          :can-assign-project="canApi(authSession.permissionInfo.value, 'crowdfunding:exception-fund:assign-project')"
+          @updated="loadData"
+        />
+
         <DistributionOrdersPage
           v-if="currentPage === 'distributionOrders' && (currentRole === 'finance' || currentRole === 'super_admin')"
           :projects="projects" :role="currentRole"
@@ -3265,6 +3283,8 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-register-payout="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:register')"
           :can-upload-payout-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:proof-upload')"
           :can-reply-payout-issue="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:issue-reply')"
+          :can-query-financial-reconciliation="canApi(authSession.permissionInfo.value, 'crowdfunding:financial-reconciliation:query')"
+          :can-close="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution:close')"
           @updated="loadData"
         />
 

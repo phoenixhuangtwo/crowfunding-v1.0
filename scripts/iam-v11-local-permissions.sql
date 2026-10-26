@@ -102,6 +102,7 @@ FROM (
   UNION ALL SELECT 'crowdfunding:distribution:approve', '审批分配单', 'POST', '/api/distribution-orders/*/approve'
   UNION ALL SELECT 'crowdfunding:distribution:reject', '驳回分配单', 'POST', '/api/distribution-orders/*/reject'
   UNION ALL SELECT 'crowdfunding:distribution:void', '作废分配单', 'POST', '/api/distribution-orders/*/void'
+  UNION ALL SELECT 'crowdfunding:distribution:close', '利润分配结单', 'POST', '/api/distribution-orders/*/close'
   UNION ALL SELECT 'crowdfunding:cost:query', '其他成本查询', 'GET', '/api/confirmed-costs'
   UNION ALL SELECT 'crowdfunding:cost:register', '其他成本登记', 'POST', '/api/confirmed-costs'
   UNION ALL SELECT 'crowdfunding:cost:proof-upload', '其他成本凭证上传', 'POST', '/api/projects/*/confirmed-cost-proofs'
@@ -111,6 +112,7 @@ FROM (
   UNION ALL SELECT 'crowdfunding:payout:proof-upload', '分配打款凭证上传', 'POST', '/api/distribution-orders/*/lines/*/proofs'
   UNION ALL SELECT 'crowdfunding:payout:confirm', '员工确认分配收款', 'POST', '/api/distribution-orders/*/lines/*/confirm'
   UNION ALL SELECT 'crowdfunding:payout:issue-reply', '回复收款异议', 'POST', '/api/distribution-orders/*/lines/*/issue-reply'
+  UNION ALL SELECT 'crowdfunding:financial-reconciliation:query', '结单前资金对账', 'GET', '/api/projects/*/financial-reconciliation'
 ) codes
 WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
   AND resource.code = codes.code AND resource.deleted = b'0');
@@ -199,7 +201,7 @@ SELECT role.id, resource.id, 0
 FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
   AND resource.code IN ('crowdfunding:distribution:query', 'crowdfunding:distribution:generate',
     'crowdfunding:distribution:approve', 'crowdfunding:distribution:reject',
-    'crowdfunding:distribution:void') AND resource.deleted = b'0'
+    'crowdfunding:distribution:void', 'crowdfunding:distribution:close') AND resource.deleted = b'0'
 WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
   AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
     AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
@@ -223,6 +225,15 @@ WHERE role.code IN ('crowdfunding_finance', 'crowdfunding_super_admin') AND role
 INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
 SELECT role.id, resource.id, 0
 FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code = 'crowdfunding:financial-reconciliation:query' AND resource.deleted = b'0'
+WHERE role.code IN ('crowdfunding_finance', 'crowdfunding_super_admin')
+  AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
   AND resource.code IN ('crowdfunding:cost:query', 'crowdfunding:cost:register',
     'crowdfunding:cost:proof-upload') AND resource.deleted = b'0'
 WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
@@ -236,5 +247,68 @@ FROM system_role role JOIN system_api_resource resource ON resource.client_id = 
 WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
   AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
     AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', codes.code, codes.name, codes.method, codes.path, 0, 'v11-local', 'v11-local'
+FROM (
+  SELECT 'crowdfunding:exception-fund:query' AS code, '异常款项查询' AS name, 'GET' AS method, '/api/exception-funds' AS path
+  UNION ALL SELECT 'crowdfunding:exception-fund:register', '异常款项登记', 'POST', '/api/exception-funds'
+  UNION ALL SELECT 'crowdfunding:exception-fund:proof-upload', '异常款项凭证上传', 'POST', '/api/exception-funds/proofs'
+  UNION ALL SELECT 'crowdfunding:exception-fund:refund', '异常款项退回登记', 'POST', '/api/exception-funds/*/refunds'
+  UNION ALL SELECT 'crowdfunding:exception-fund:refund-proof-upload', '异常款项退回凭证上传', 'POST', '/api/exception-funds/*/refund-proofs'
+  UNION ALL SELECT 'crowdfunding:exception-fund:refund-confirm', '异常款项退回确认', 'POST', '/api/exception-funds/*/refunds/*/confirm'
+  UNION ALL SELECT 'crowdfunding:exception-fund:my-refunds', '我的异常款项退回', 'GET', '/api/my-exception-refunds'
+  UNION ALL SELECT 'crowdfunding:exception-fund:transfer', '异常款项转入认购单', 'POST', '/api/exception-funds/*/transfers'
+  UNION ALL SELECT 'crowdfunding:exception-fund:transfer-review', '异常款项转入公司复核', 'POST', '/api/exception-funds/*/transfers/*/review'
+  UNION ALL SELECT 'crowdfunding:exception-fund:assign-project', '核实异常款项归属', 'POST', '/api/exception-funds/*/assign-project'
+) codes
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
+  AND resource.code = codes.code AND resource.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:register',
+    'crowdfunding:exception-fund:proof-upload', 'crowdfunding:exception-fund:refund',
+    'crowdfunding:exception-fund:refund-proof-upload', 'crowdfunding:exception-fund:transfer',
+    'crowdfunding:exception-fund:assign-project') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:refund-confirm',
+    'crowdfunding:exception-fund:transfer-review')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:exception-fund:my-refunds', 'crowdfunding:exception-fund:refund-confirm')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_employee' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_menu (client_id, parent_id, name, component_name, type, sort, visible, permission, status, tenant_id)
+SELECT 'crowdfunding', parent.id, '异常款项', 'exceptionFunds', 2, 65, 0, 'crowdfunding:exception-fund:query', 0, 0
+FROM system_menu parent
+WHERE parent.client_id = 'crowdfunding' AND parent.component_name = 'crowdfunding'
+  AND parent.tenant_id = 0 AND parent.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_menu WHERE client_id = 'crowdfunding'
+    AND permission = 'crowdfunding:exception-fund:query' AND deleted = b'0');
+
+INSERT INTO system_role_menu (role_id, menu_id, tenant_id)
+SELECT role.id, menu.id, 0
+FROM system_role role JOIN system_menu menu ON menu.client_id = 'crowdfunding'
+  AND menu.permission = 'crowdfunding:exception-fund:query' AND menu.tenant_id = 0 AND menu.deleted = b'0'
+WHERE role.code IN ('crowdfunding_finance', 'crowdfunding_super_admin') AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_menu grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
 
 COMMIT;

@@ -24,6 +24,8 @@ export type DistributionOrder = {
   rejectReason?: string
   voidedBy?: string
   voidedAt?: string
+  closedBy?: string
+  closedAt?: string
 }
 
 export type DistributionOrderLine = Distribution['lines'][number] & {

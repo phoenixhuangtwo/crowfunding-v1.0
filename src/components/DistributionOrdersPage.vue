@@ -16,7 +16,8 @@ type Cost = { id: string; projectId: string; amountCents: number; transactionNo:
 const props = defineProps<{ projects: Project[]; role: 'finance' | 'super_admin';
   canGenerate: boolean; canApprove: boolean; canReject: boolean; canVoid: boolean;
   canQueryCost: boolean; canRegisterCost: boolean; canUploadCostProof: boolean; canReviewCost: boolean;
-  canRegisterPayout: boolean; canUploadPayoutProof: boolean; canReplyPayoutIssue: boolean }>()
+  canRegisterPayout: boolean; canUploadPayoutProof: boolean; canReplyPayoutIssue: boolean;
+  canQueryFinancialReconciliation: boolean; canClose: boolean }>()
 const emit = defineEmits<{ updated: [] }>()
 const projectId = ref('')
 const orders = ref<Order[]>([])
@@ -40,18 +41,20 @@ const payoutNote = ref('')
 const payoutProofs = ref<Array<{ id: string; fileName: string }>>([])
 const payoutUploading = ref(false)
 const companyTransferConfirmed = ref(false)
+const reconciliation = ref<Record<string, number | boolean | string>>()
 const eligible = computed(() => props.projects.filter(item => item.status === '待分配'))
 const costEligible = computed(() => props.projects.filter(item => ['待回款', '回款中', '待分配'].includes(item.status)))
 const money = (cents: number) => `¥ ${(cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
 watch(eligible, items => {
-  if (!items.some(item => item.id === projectId.value)) projectId.value = items[0]?.id ?? ''
+  if (!projectId.value) projectId.value = items[0]?.id ?? ''
 }, { immediate: true })
 watch(costEligible, items => {
   if (!items.some(item => item.id === costProjectId.value)) costProjectId.value = items[0]?.id ?? ''
 }, { immediate: true })
 watch(costProjectId, () => { costProofs.value = [] })
 watch([projectId, page], () => { void refresh() }, { immediate: true })
+watch(projectId, () => { reconciliation.value = undefined })
 
 async function refresh() {
   loading.value = true
@@ -67,6 +70,15 @@ async function refresh() {
     }
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '读取分配单失败') }
   finally { loading.value = false }
+}
+
+async function loadReconciliation() {
+  if (!projectId.value || !props.canQueryFinancialReconciliation) return
+  try {
+    const result = await apiRequest<{ data: Record<string, number | boolean | string> }>(
+      `/api/projects/${encodeURIComponent(projectId.value)}/financial-reconciliation`)
+    reconciliation.value = result.data
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '结单前对账失败') }
 }
 
 async function uploadCostProofs(event: Event) {
@@ -239,6 +251,23 @@ async function act(order: Order, action: 'approve' | 'reject' | 'void') {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '处理分配单失败') }
   finally { submitting.value = false }
 }
+
+async function closeOrder(order: Order) {
+  if (!props.canClose || order.status !== '可结单' || submitting.value) return
+  try {
+    await ElMessageBox.confirm('结单后不可再修改分配结果，确认结单？', '结单确认', { type: 'warning' })
+  } catch { return }
+  submitting.value = true
+  try {
+    await apiRequest(`/api/distribution-orders/${encodeURIComponent(order.id)}/close`, {
+      method: 'POST', body: JSON.stringify({}) })
+    ElMessage.success('结单成功')
+    reconciliation.value = undefined
+    await refresh()
+    emit('updated')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '结单失败') }
+  finally { submitting.value = false }
+}
 </script>
 
 <template>
@@ -246,7 +275,8 @@ async function act(order: Order, action: 'approve' | 'reject' | 'void') {
     <header class="page-head"><div><h1>利润分配</h1><p>以实际回款和已确认成本为依据，按认购份数生成分配快照。</p></div></header>
     <section class="panel">
       <el-alert title="利润按已复核客户回款＋公司补款－补款返还－超额差异－采购实付－已确认其他成本计算；份额利润向下取整，尾差归公司。审批后仍须逐笔登记打款并由员工确认。" type="info" :closable="false" />
-      <div class="toolbar"><el-select v-model="projectId" filterable clearable placeholder="全部众筹单"><el-option v-for="item in projects" :key="item.id" :value="item.id" :label="`${item.title} · ${item.id}`" /></el-select><el-button @click="refresh">查询</el-button><el-button v-if="canGenerate && projectId && eligible.some(item => item.id === projectId)" type="primary" :loading="submitting" @click="generate">生成分配单</el-button></div>
+      <div class="toolbar"><el-select v-model="projectId" filterable clearable placeholder="全部众筹单"><el-option v-for="item in projects" :key="item.id" :value="item.id" :label="`${item.title} · ${item.id}`" /></el-select><el-button @click="refresh">查询</el-button><el-button v-if="canGenerate && projectId && eligible.some(item => item.id === projectId)" type="primary" :loading="submitting" @click="generate">生成分配单</el-button><el-button v-if="canQueryFinancialReconciliation && projectId" @click="loadReconciliation">结单前对账</el-button></div>
+      <div v-if="reconciliation" class="reconciliation"><el-alert :title="reconciliation.closeReady ? '各层对账相符，满足已实现的结单校验条件' : '对账未通过，请核对下列差额和待处理项目'" :type="reconciliation.closeReady ? 'success' : 'warning'" :closable="false" /><div class="reconciliation-grid"><div>付款前资金差额：{{ money(Number(reconciliation.fundingDifferenceCents)) }}</div><div>采购付款差额：{{ money(Number(reconciliation.purchaseDifferenceCents)) }}</div><div>回款缺口：{{ money(Number(reconciliation.receiptGapCents)) }}</div><div>未处理回款差异：{{ money(Number(reconciliation.unresolvedReceiptDifferenceCents)) }}</div><div>成本台账差额：{{ money(Number(reconciliation.costLedgerDifferenceCents)) }}</div><div>分配差额：{{ money(Number(reconciliation.distributionDifferenceCents)) }}</div><div>打款台账差额：{{ money(Number(reconciliation.payoutDifferenceCents)) }}</div><div>未处理异常款项：{{ money(Number(reconciliation.unprocessedExceptionCents)) }}</div></div></div>
       <el-table :data="orders" v-loading="loading" empty-text="暂无分配单" style="width:100%">
         <el-table-column prop="projectId" label="众筹单编号" min-width="190" />
         <el-table-column label="应收" width="140"><template #default="scope">{{ money(scope.row.receivableCents) }}</template></el-table-column>
@@ -254,7 +284,7 @@ async function act(order: Order, action: 'approve' | 'reject' | 'void') {
         <el-table-column label="所得合计" width="140"><template #default="scope">{{ money(scope.row.payoutTotalCents) }}</template></el-table-column>
         <el-table-column label="公司尾差" width="120"><template #default="scope">{{ money(scope.row.companyRoundingResidualCents) }}</template></el-table-column>
         <el-table-column prop="status" label="状态" width="100" />
-        <el-table-column label="操作" min-width="270"><template #default="scope"><el-button size="small" @click="expanded = expanded === scope.row.id ? '' : scope.row.id">明细</el-button><el-button v-if="scope.row.status === '待审批' && canApprove" size="small" type="primary" :disabled="submitting" @click="act(scope.row, 'approve')">审批通过</el-button><el-button v-if="scope.row.status === '待审批' && canReject" size="small" :disabled="submitting" @click="act(scope.row, 'reject')">驳回</el-button><el-button v-if="['待审批', '已驳回'].includes(scope.row.status) && canVoid" size="small" :disabled="submitting" @click="act(scope.row, 'void')">作废</el-button></template></el-table-column>
+        <el-table-column label="操作" min-width="270"><template #default="scope"><el-button size="small" @click="expanded = expanded === scope.row.id ? '' : scope.row.id">明细</el-button><el-button v-if="scope.row.status === '待审批' && canApprove" size="small" type="primary" :disabled="submitting" @click="act(scope.row, 'approve')">审批通过</el-button><el-button v-if="scope.row.status === '待审批' && canReject" size="small" :disabled="submitting" @click="act(scope.row, 'reject')">驳回</el-button><el-button v-if="['待审批', '已驳回'].includes(scope.row.status) && canVoid" size="small" :disabled="submitting" @click="act(scope.row, 'void')">作废</el-button><el-button v-if="scope.row.status === '可结单' && canClose" size="small" type="primary" :disabled="submitting" @click="closeOrder(scope.row)">结单</el-button></template></el-table-column>
       </el-table>
       <el-pagination v-model:current-page="page" :page-size="10" :total="total" layout="prev, pager, next, total" />
       <template v-for="order in orders" :key="order.id"><section v-if="expanded === order.id" class="details"><h2>分配明细 · {{ order.id }}</h2><p>已确认其他成本 {{ money(order.confirmedCostsCents) }}；审批前须核对实际成本是否已全部入账。</p><el-table :data="order.lines"><el-table-column label="认购主体"><template #default="scope">{{ scope.row.kind === 'company' ? '公司' : scope.row.participantId }}</template></el-table-column><el-table-column prop="shares" label="份数" /><el-table-column label="本金"><template #default="scope">{{ money(scope.row.principalCents) }}</template></el-table-column><el-table-column label="利润"><template #default="scope">{{ money(scope.row.profitCents) }}</template></el-table-column><el-table-column label="所得"><template #default="scope">{{ money(scope.row.payoutCents) }}</template></el-table-column><el-table-column prop="status" label="明细状态" /><el-table-column v-if="canRegisterPayout || canReplyPayoutIssue" label="操作" width="150"><template #default="scope"><el-button v-if="canRegisterPayout && scope.row.status === '待登记打款' && ['已审批', '打款登记中'].includes(order.status)" size="small" type="primary" @click="openPayout(order, scope.row)">登记打款</el-button><el-button v-if="canReplyPayoutIssue && scope.row.status === '有异议'" size="small" @click="replyIssue(order, scope.row)">回复异议</el-button></template></el-table-column></el-table></section></template>
@@ -304,4 +334,6 @@ async function act(order: Order, action: 'approve' | 'reject' | 'void') {
 .toolbar .el-select { width:min(360px, 100%); }
 .details { margin-top:20px; padding:18px; background:#f7f9fc; border-radius:8px; }
 .cost-form { max-width:800px; margin-top:20px; }
+.reconciliation { margin:16px 0; }
+.reconciliation-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-top:12px; }
 </style>

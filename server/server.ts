@@ -27,6 +27,9 @@ import { reconcileProcurementFunding, validateProcurementPayment } from './finan
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
 import { makeDistributionOrder, distributionOrderIsActive, deriveDistributionStatus, type DistributionOrder } from './finance/distribution-orders.ts'
 import { validateCostRegistration, type ConfirmedCost } from './finance/confirmed-costs.ts'
+import { reconcileProjectFinancials } from './finance/financial-reconciliation.ts'
+import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
+  validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
 import { unresolvedReceiptDifference, validateReceiptDifference, type ReceiptDifference } from './finance/receipt-differences.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
@@ -87,6 +90,8 @@ type Project = {
   purchasePaymentId?: string
   purchasePaidAt?: string
   purchasePaidAmount?: number
+  closedAt?: string
+  closedBy?: string
   settlementInvoices?: SettlementInvoiceRecord[]
 }
 
@@ -296,6 +301,7 @@ const receiptBatches = mongo.db.collection<ReceiptBatch>(`${appConfig.mongodb.co
 const receiptDifferences = mongo.db.collection<ReceiptDifference>(`${appConfig.mongodb.collectionPrefix}receipt_differences`)
 const distributionOrders = mongo.db.collection<DistributionOrder>(`${appConfig.mongodb.collectionPrefix}distribution_orders`)
 const confirmedCosts = mongo.db.collection<ConfirmedCost>(`${appConfig.mongodb.collectionPrefix}confirmed_costs`)
+const exceptionFunds = mongo.db.collection<ExceptionFund>(`${appConfig.mongodb.collectionPrefix}exception_funds`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -400,10 +406,22 @@ async function procurementFundingSnapshot(projectId: string, session?: import('m
   const [records, ledger] = await Promise.all([
     repositories.subscriptions.list({ projectId }, {}, session), fundLedger.listProjectContributions(projectId, session)
   ])
-  const approved = new Map(records.filter(record => record.userId !== 'company' && record.pay === '已缴款')
-    .map(record => [record.id, record]))
-  if (ledger.some(entry => !approved.has(entry.subscriptionId) || entry.amountCents !== Math.round(approved.get(entry.subscriptionId)!.amount * 100))
-    || [...approved.keys()].some(id => ledger.filter(entry => entry.subscriptionId === id).length !== 1)) {
+  const employeeRecords = new Map(records.filter(record => record.userId !== 'company').map(record => [record.id, record]))
+  const contributionTotals = new Map<string, number>()
+  for (const entry of ledger) {
+    const record = employeeRecords.get(entry.subscriptionId)
+    if (!record || !['已缴款', '部分缴款'].includes(record.pay)
+      || !Number.isSafeInteger(entry.amountCents) || entry.amountCents <= 0) {
+      throw new AppError(409, 'FUNDING_LEDGER_INCONSISTENT', '已生效缴款与资金台账不一致，请先核对')
+    }
+    contributionTotals.set(entry.subscriptionId, (contributionTotals.get(entry.subscriptionId) ?? 0) + entry.amountCents)
+  }
+  if ([...employeeRecords.values()].some(record => {
+    const total = contributionTotals.get(record.id) ?? 0
+    const expected = Math.round(record.amount * 100)
+    return record.pay === '已缴款' ? total !== expected
+      : record.pay === '部分缴款' ? total > expected : total !== 0
+  })) {
     throw new AppError(409, 'FUNDING_LEDGER_INCONSISTENT', '已生效缴款与资金台账不一致，请先核对')
   }
   const cents = (value: number, name: string) => {
@@ -415,7 +433,8 @@ async function procurementFundingSnapshot(projectId: string, session?: import('m
   }
   const fundingInput = {
     purchaseCents: cents(project.costAmount, '采购'),
-    approvedEmployeeCents: ledger.reduce((sum, entry) => sum + entry.amountCents, 0),
+    approvedEmployeeCents: ledger.filter(entry => employeeRecords.get(entry.subscriptionId)?.pay === '已缴款')
+      .reduce((sum, entry) => sum + entry.amountCents, 0),
     companyFrontCents: records.filter(record => record.companyKind === 'front').reduce((sum, record) => sum + cents(record.amount, '公司前置'), 0),
     companyBackstopCents: records.filter(record => record.companyKind === 'backstop').reduce((sum, record) => sum + cents(record.amount, '公司兜底'), 0),
     pendingReviewCount: records.filter(record => record.pay === '待复核' || record.pay === '部分缴款').length
@@ -469,6 +488,36 @@ async function distributionSnapshot(projectId: string, session: import('mongodb'
     companyTopUpsCents: summary.companyTopUpsCents, companyReturnsCents: summary.companyReturnsCents,
     procurementPaymentsCents: payment.amountCents, confirmedCostsCents
   } }
+}
+
+async function financialReconciliationSnapshot(projectId: string, session?: import('mongodb').ClientSession) {
+  const { project, funding } = await procurementFundingSnapshot(projectId, session)
+  const payment = await procurementPayments.findOne({ projectId }, { session })
+  const batches = await receiptBatches.find({ 'lines.projectId': projectId }, { session }).toArray()
+  const receivableCents = Math.round(project.salesAmount * 100)
+  const receipts = summarizeProjectReceipts(batches, projectId, receivableCents)
+  const differences = await receiptDifferences.find({ projectId }, { session }).toArray()
+  const costRecords = await confirmedCosts.find({ projectId, status: '已确认' }, { session }).toArray()
+  const costCents = costRecords.reduce((sum, record) => sum + record.amountCents, 0)
+  const ledgerEntries = await mongo.db.collection<{ projectId: string; type: string; amountCents: number }>(
+    `${appConfig.mongodb.collectionPrefix}fund_ledger`).find({ projectId }, { session }).toArray()
+  const ledgerTotal = (type: string) => ledgerEntries.filter(entry => entry.type === type)
+    .reduce((sum, entry) => sum + entry.amountCents, 0)
+  const orders = await distributionOrders.find({ projectId }, { session }).sort({ createdAt: -1 }).toArray()
+  const active = orders.find(distributionOrderIsActive)
+  const exceptions = await exceptionFunds.find({ projectId }, { session }).toArray()
+  const reconciled = reconcileProjectFinancials({ purchaseCents: funding.purchaseCents,
+    approvedEmployeeCents: funding.employeeCents,
+    confirmedCompanyCents: payment ? funding.companyCents : 0,
+    procurementPaymentCents: payment?.amountCents ?? 0, receivableCents,
+    distributableReceiptsCents: Math.min(receipts.distributableCents, receivableCents),
+    unresolvedReceiptDifferenceCents: unresolvedReceiptDifference(receipts.excessCents, differences).unresolvedCents,
+    confirmedCostsCents: costCents, confirmedCostLedgerCents: ledgerTotal('other_confirmed_cost'),
+    orderStatus: active?.status, orderPayoutTotalCents: active?.payoutTotalCents,
+    orderLinesCents: active?.lines.reduce((sum, line) => sum + line.payoutCents, 0),
+    payoutLedgerCents: ledgerTotal('employee_distribution_payout') + ledgerTotal('company_internal_transfer'),
+    unprocessedExceptionCents: exceptions.reduce((sum, item) => sum + item.remainingCents, 0) })
+  return { project, order: active, data: { projectId, checkedAt: new Date().toISOString(), ...reconciled } }
 }
 
 function addHours(datetime: string, hours: number) {
@@ -656,7 +705,11 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const context = requestContext(req)
     const asset = await fileAssetService.getReadyAsset(decodeURIComponent(fileMatch[1]))
     if (!asset) return send(res, 404, { error: 'FILE_NOT_FOUND', message: '文件不存在或无权访问' })
-    await authorizeAssetRead(context, asset, repositories)
+    if (asset.purpose === 'exception-refund-proof' && context.role === 'employee') {
+      const owned = await exceptionFunds.findOne({ payerUserId: context.userId,
+        'allocations.proofAssetIds': asset.id })
+      if (!owned) return send(res, 404, { error: 'FILE_NOT_FOUND', message: '文件不存在或无权访问' })
+    } else await authorizeAssetRead(context, asset, repositories)
     if (asset.purpose === 'receiving-code' && context.role === 'employee') {
       const current = await agreementService.current()
       const accepted = current && await agreementService.hasRecentCodeConfirmation(context.userId, asset.ownerId, current.version, new Date(Date.now() - 5 * 60_000))
@@ -755,6 +808,14 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, { data: orders.map(order => ({ orderId: order.id, projectId: order.projectId,
       orderStatus: order.status, line: order.lines.find(line => line.participantId === context.userId) })) })
   }
+  const financialReconciliationMatch = pathname.match(/^\/api\/projects\/([^/]+)\/financial-reconciliation$/)
+  if (financialReconciliationMatch) {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看结单前对账')
+    const projectId = decodeURIComponent(financialReconciliationMatch[1])
+    const snapshot = await financialReconciliationSnapshot(projectId)
+    return send(res, 200, { data: snapshot.data })
+  }
   if (pathname === '/api/confirmed-costs') {
     const role = requestContext(req).role
     if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看其他成本')
@@ -762,6 +823,34 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const filter = projectId ? { projectId } : {}
     const items = await confirmedCosts.find(filter).sort({ createdAt: -1, id: -1 }).limit(200).toArray()
     return send(res, 200, { data: items })
+  }
+  if (pathname === '/api/exception-funds') {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看异常款项')
+    const projectId = searchParams.get('projectId')?.trim()
+    const status = searchParams.get('status')?.trim()
+    if (status && !['待处理', '退回待确认', '转入待复核', '已处理'].includes(status)) {
+      return send(res, 400, { error: 'EXCEPTION_STATUS_INVALID', message: '异常款项状态无效' })
+    }
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const filter: import('mongodb').Filter<ExceptionFund> = {
+      ...(projectId ? { projectId } : {}), ...(status ? { status: status as ExceptionFund['status'] } : {}) }
+    const [items, total] = await Promise.all([
+      exceptionFunds.find(filter).sort({ bookedAt: -1, id: -1 }).skip((page - 1) * pageSize).limit(pageSize).toArray(),
+      exceptionFunds.countDocuments(filter)
+    ])
+    return send(res, 200, { data: { items, total, page, pageSize } })
+  }
+  if (pathname === '/api/my-exception-refunds') {
+    const context = requestContext(req)
+    if (context.role !== 'employee') throw new AppError(403, 'FORBIDDEN', '只有员工本人可以查看退款确认')
+    const records = await exceptionFunds.find({ payerUserId: context.userId,
+      'allocations.kind': '退回' }).sort({ createdAt: -1 }).limit(100).toArray()
+    return send(res, 200, { data: records.flatMap(record => record.allocations
+      .filter(allocation => allocation.kind === '退回' && allocation.recipientUserId === context.userId)
+      .map(allocation => ({ fundId: record.id, projectId: record.projectId,
+        transactionNo: record.transactionNo, allocation }))) })
   }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
@@ -904,6 +993,39 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const created = await agreementService.create({ title: body.title, body: body.body, createdBy: actor.label })
     await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '新增免责协议版本', target: created.id, before: null, after: { version: created.version, title: created.title } }) as never)
     return send(res, 201, { data: created, message: '新版本已生效' })
+  }
+  const exceptionProofMatch = pathname.match(/^\/api\/exception-funds\/proofs$/)
+  if (exceptionProofMatch) {
+    const actor = financeOperator(req)
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const ownerId = `exception-staging:${actor.userId}`
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId,
+      purpose: 'exception-fund-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'EXCEPTION_PROOF_LIMIT', message: '暂存异常款项凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'exception-fund-proof',
+      ownerType: 'project', ownerId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '异常款项凭证已保存' })
+  }
+  const exceptionRefundProofMatch = pathname.match(/^\/api\/exception-funds\/([^/]+)\/refund-proofs$/)
+  if (exceptionRefundProofMatch) {
+    const actor = financeOperator(req)
+    const fundId = decodeURIComponent(exceptionRefundProofMatch[1])
+    const fund = await exceptionFunds.findOne({ id: fundId })
+    if (!fund || fund.remainingCents <= 0) return send(res, 409, { error: 'EXCEPTION_FUND_INVALID', message: '该异常款项不可退回' })
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const ownerId = `exception-refund-staging:${fundId}:${actor.userId}`
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId,
+      purpose: 'exception-refund-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'EXCEPTION_REFUND_PROOF_LIMIT', message: '暂存退回凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'exception-refund-proof',
+      ownerType: 'project', ownerId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '退回凭证已保存' })
   }
   const receiptProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-proofs$/)
   if (receiptProofMatch) {
@@ -1236,6 +1358,405 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  const closeOrderMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/close$/)
+  if (closeOrderMatch) {
+    const actor = financeOperator(req)
+    const orderId = decodeURIComponent(closeOrderMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const order = await distributionOrders.findOne({ id: orderId }, { session })
+        if (!order || order.status !== '可结单') throw new AppError(409, 'DISTRIBUTION_NOT_CLOSE_READY', '分配单尚未完成全部收款确认')
+        const project = await repositories.projects.getById(order.projectId, session)
+        if (!project || project.status !== '分配中') throw new AppError(409, 'PROJECT_NOT_CLOSE_READY', '众筹单当前不能结单')
+        const lock = await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: '分配中' }, { $inc: { closeRevision: 1 } }, { session })
+        if (lock.modifiedCount !== 1) throw new AppError(409, 'PROJECT_CHANGED', '众筹单状态已变化，请刷新后重试')
+        const snapshot = await financialReconciliationSnapshot(project.id, session)
+        if (!snapshot.data.closeReady || snapshot.order?.id !== order.id) {
+          throw new AppError(409, 'FINANCIAL_RECONCILIATION_FAILED',
+            `结单前对账未通过：分配差额 ${(snapshot.data.distributionDifferenceCents / 100).toFixed(2)} 元，打款差额 ${(snapshot.data.payoutDifferenceCents / 100).toFixed(2)} 元，异常款项待处理 ${(snapshot.data.unprocessedExceptionCents / 100).toFixed(2)} 元`)
+        }
+        const closedAt = new Date().toISOString()
+        const completed: DistributionOrder = { ...order, status: '已完成', closedAt, closedBy: actor.userId }
+        const changed = await distributionOrders.replaceOne({ id: order.id, status: '可结单' }, completed, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'DISTRIBUTION_CHANGED', '分配单状态已变化，请刷新后重试')
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`).updateOne({ id: project.id },
+          { $set: { status: '已完结', statusType: 'success', closedAt, closedBy: actor.userId } }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '结单', target: project.id,
+          before: { projectStatus: project.status, distributionStatus: order.status },
+          after: { projectStatus: '已完结', distributionStatus: '已完成', checkedAt: snapshot.data.checkedAt,
+            closeReady: snapshot.data.closeReady } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { completed, audit, projectId: project.id, closedAt }
+      })
+      const projectIndex = projects.findIndex(item => item.id === result.projectId)
+      if (projectIndex >= 0) projects.splice(projectIndex, 1, {
+        ...projects[projectIndex], status: '已完结', statusType: 'success',
+        closedAt: result.closedAt, closedBy: actor.userId })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.completed, message: '结单成功' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      throw error
+    }
+  }
+  if (pathname === '/api/exception-funds') {
+    const actor = financeOperator(req)
+    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'EXCEPTION_PROOFS_INVALID', message: '请提供已上传的异常款项凭证编号' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        if (projectId) {
+          const project = await repositories.projects.getById(projectId, session)
+          if (!project || project.status === '已完结') throw new AppError(409, 'EXCEPTION_PROJECT_INVALID', '所属众筹单不存在或已结单')
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: projectId, status: { $ne: '已完结' } },
+              { $inc: { exceptionRevision: 1 } }, { session })
+        }
+        const record = validateExceptionFund({ id: `EXF-${randomUUID()}`,
+          ...(projectId ? { projectId } : {}), amountCents: body.amountCents as number,
+          ...(typeof body.payerUserId === 'string' && body.payerUserId.trim()
+            ? { payerUserId: body.payerUserId.trim() } : {}),
+          transactionNo: typeof body.transactionNo === 'string' ? body.transactionNo : '',
+          bookedAt: body.bookedAt as string,
+          sourceNote: typeof body.sourceNote === 'string' ? body.sourceNote : '',
+          manualVerificationNote: typeof body.manualVerificationNote === 'string' ? body.manualVerificationNote : '',
+          proofAssetIds: body.proofAssetIds as string[], registeredBy: actor.userId }, new Date())
+        const occupied = await bankTransactions.findOne({ transactionNo: record.transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .findOne({ transactionNo: record.transactionNo }, { session })
+        if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', `流水号【${record.transactionNo}】已被使用，请核对`)
+        for (const assetId of record.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'exception-fund-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== `exception-staging:${actor.userId}`
+            || asset.createdBy !== actor.userId
+            || await exceptionFunds.findOne({ proofAssetIds: assetId }, { session })) {
+            throw new AppError(409, 'EXCEPTION_PROOF_INVALID', '异常款项凭证不存在、未留存或已被使用')
+          }
+        }
+        await bankTransactions.insertOne({ transactionNo: record.transactionNo,
+          sourceKey: `exception-fund:${record.id}`, projectId, createdAt: record.createdAt }, { session })
+        await exceptionFunds.insertOne(record, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `exception-fund:${record.id}`,
+          type: 'exception_fund_received', projectId, amountCents: record.amountCents,
+          transactionNo: record.transactionNo, transactionKey: `exception-fund:${record.id}`,
+          proofAssetIds: record.proofAssetIds, reviewedBy: actor.userId, createdAt: record.createdAt
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记异常款项',
+          target: record.id, before: null, after: { projectId, amountCents: record.amountCents,
+            transactionNo: record.transactionNo } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { record, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.record, message: '异常款项登记成功' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'EXCEPTION_DUPLICATE', message: '异常款项流水号或单据已存在' })
+      if (error instanceof Error && /异常款项|金额|流水号|凭证|到账时间|识别/.test(error.message)) {
+        return send(res, 400, { error: 'EXCEPTION_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const exceptionRefundMatch = pathname.match(/^\/api\/exception-funds\/([^/]+)\/refunds$/)
+  if (exceptionRefundMatch) {
+    const actor = financeOperator(req)
+    const fundId = decodeURIComponent(exceptionRefundMatch[1])
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'EXCEPTION_REFUND_PROOFS_INVALID', message: '请提供已上传的退回凭证编号' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const current = await exceptionFunds.findOne({ id: fundId }, { session })
+        if (!current) throw new AppError(404, 'EXCEPTION_FUND_NOT_FOUND', '异常款项不存在')
+        if (current.projectId) {
+          const project = await repositories.projects.getById(current.projectId, session)
+          if (!project || project.status === '已完结') throw new AppError(409, 'EXCEPTION_PROJECT_CLOSED', '众筹单已结单')
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: current.projectId }, { $inc: { exceptionRevision: 1 } }, { session })
+        }
+        const updated = reserveExceptionRefund(current, { id: `EXR-${randomUUID()}`,
+          amountCents: body.amountCents as number,
+          transactionNo: typeof body.transactionNo === 'string' ? body.transactionNo : '',
+          paidAt: body.paidAt as string, reason: typeof body.reason === 'string' ? body.reason : '',
+          proofAssetIds: body.proofAssetIds as string[], registeredBy: actor.userId }, new Date())
+        const allocation = updated.allocations.at(-1)!
+        const occupied = await bankTransactions.findOne({ transactionNo: allocation.transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .findOne({ transactionNo: allocation.transactionNo }, { session })
+        if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', `流水号【${allocation.transactionNo}】已被使用，请核对`)
+        for (const assetId of allocation.proofAssetIds ?? []) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'exception-refund-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== `exception-refund-staging:${fundId}:${actor.userId}`
+            || asset.createdBy !== actor.userId
+            || await exceptionFunds.findOne({ 'allocations.proofAssetIds': assetId }, { session })) {
+            throw new AppError(409, 'EXCEPTION_REFUND_PROOF_INVALID', '退回凭证不存在、未留存或已被使用')
+          }
+        }
+        const changed = await exceptionFunds.replaceOne({ id: fundId, revision: current.revision }, updated, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'EXCEPTION_FUND_CHANGED', '异常款项已变化，请刷新后重试')
+        await bankTransactions.insertOne({ transactionNo: allocation.transactionNo!,
+          sourceKey: `exception-refund:${allocation.id}`, projectId: current.projectId ?? '',
+          createdAt: allocation.createdAt }, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `exception-refund:${allocation.id}`,
+          type: 'exception_fund_refund_sent', projectId: current.projectId ?? '',
+          amountCents: allocation.amountCents, transactionNo: allocation.transactionNo,
+          transactionKey: `exception-refund:${allocation.id}`, proofAssetIds: allocation.proofAssetIds,
+          reviewedBy: actor.userId, createdAt: allocation.createdAt
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记异常款项退回',
+          target: fundId, before: { remainingCents: current.remainingCents },
+          after: { allocationId: allocation.id, amountCents: allocation.amountCents,
+            transactionNo: allocation.transactionNo, recipientKind: allocation.recipientKind } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { allocation, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.allocation, message: '退回已登记，等待收款确认' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'EXCEPTION_REFUND_DUPLICATE', message: '退回流水号已被使用' })
+      if (error instanceof Error && /退回|金额|流水号|凭证|时间/.test(error.message)) {
+        return send(res, 400, { error: 'EXCEPTION_REFUND_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const exceptionAssignMatch = pathname.match(/^\/api\/exception-funds\/([^/]+)\/assign-project$/)
+  if (exceptionAssignMatch) {
+    const actor = financeOperator(req)
+    const fundId = decodeURIComponent(exceptionAssignMatch[1])
+    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (reason.length < 5 || reason.length > 200) {
+      return send(res, 400, { error: 'EXCEPTION_ASSIGN_REASON_INVALID', message: '归属核实说明须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const current = await exceptionFunds.findOne({ id: fundId }, { session })
+        if (!current || current.projectId || current.allocations.length > 0) {
+          throw new AppError(409, 'EXCEPTION_ASSIGN_INVALID', '款项不存在、已归属或已有处理记录')
+        }
+        const project = await repositories.projects.getById(projectId, session)
+        if (!project || project.status === '已完结') throw new AppError(409, 'EXCEPTION_PROJECT_INVALID', '目标众筹单不存在或已结单')
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId, status: { $ne: '已完结' } },
+            { $inc: { exceptionRevision: 1 } }, { session })
+        const updated: ExceptionFund = { ...current, projectId, revision: current.revision + 1 }
+        const changed = await exceptionFunds.replaceOne({ id: fundId, revision: current.revision,
+          projectId: { $exists: false } }, updated, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'EXCEPTION_FUND_CHANGED', '款项归属已变化，请刷新后重试')
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `exception-attribution:${fundId}`,
+          type: 'exception_fund_attributed', projectId, amountCents: current.amountCents,
+          transactionKey: `exception-attribution:${fundId}`, proofAssetIds: current.proofAssetIds,
+          reviewedBy: actor.userId, createdAt: new Date().toISOString()
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '核实异常款项所属众筹单',
+          target: fundId, before: { projectId: null }, after: { projectId, reason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updated, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updated, message: '众筹单归属已核实' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'EXCEPTION_ASSIGN_DUPLICATE', message: '款项归属已记录' })
+      throw error
+    }
+  }
+  const exceptionRefundConfirmMatch = pathname.match(/^\/api\/exception-funds\/([^/]+)\/refunds\/([^/]+)\/confirm$/)
+  if (exceptionRefundConfirmMatch) {
+    const context = requestContext(req)
+    const fundId = decodeURIComponent(exceptionRefundConfirmMatch[1])
+    const allocationId = decodeURIComponent(exceptionRefundConfirmMatch[2])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const current = await exceptionFunds.findOne({ id: fundId }, { session })
+        if (!current) throw new AppError(404, 'EXCEPTION_FUND_NOT_FOUND', '异常款项不存在')
+        if (current.projectId) {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: current.projectId }, { $inc: { exceptionRevision: 1 } }, { session })
+        }
+        const allocation = current.allocations.find(item => item.id === allocationId)
+        if (!allocation || allocation.status !== '待确认' || allocation.kind !== '退回') {
+          throw new AppError(409, 'EXCEPTION_REFUND_INVALID', '退回单不存在或已确认')
+        }
+        if (allocation.recipientKind === 'employee' && (context.role !== 'employee'
+          || allocation.recipientUserId !== context.userId)) {
+          throw new AppError(403, 'FORBIDDEN', '仅付款员工本人可以确认该笔退回')
+        }
+        if (allocation.recipientKind === 'external' && context.role !== 'super_admin') {
+          throw new AppError(403, 'FORBIDDEN', '非员工退回须由公司复核')
+        }
+        const updated = confirmExceptionRefund(current, allocationId, context.userId, new Date())
+        const changed = await exceptionFunds.replaceOne({ id: fundId, revision: current.revision }, updated, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'EXCEPTION_FUND_CHANGED', '异常款项已变化，请刷新后重试')
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `exception-refund-confirm:${allocationId}`,
+          type: 'exception_fund_refund_confirmed', projectId: current.projectId ?? '',
+          amountCents: allocation.amountCents, transactionNo: allocation.transactionNo,
+          transactionKey: `exception-refund-confirm:${allocationId}`,
+          proofAssetIds: allocation.proofAssetIds ?? [], reviewedBy: context.userId,
+          createdAt: new Date().toISOString()
+        }, { session })
+        const audit = auditRecord({ actor: context.userId, role: context.role,
+          action: '确认异常款项退回到账', target: fundId,
+          before: { remainingCents: current.remainingCents },
+          after: { allocationId, remainingCents: updated.remainingCents } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updated, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updated, message: '退回确认完成' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'EXCEPTION_REFUND_CONFIRMED', message: '该笔退回已确认' })
+      throw error
+    }
+  }
+  const exceptionTransferMatch = pathname.match(/^\/api\/exception-funds\/([^/]+)\/transfers$/)
+  if (exceptionTransferMatch) {
+    const actor = financeOperator(req)
+    const fundId = decodeURIComponent(exceptionTransferMatch[1])
+    const subscriptionId = typeof body.subscriptionId === 'string' ? body.subscriptionId.trim() : ''
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const current = await exceptionFunds.findOne({ id: fundId }, { session })
+        if (!current || !current.projectId) throw new AppError(409, 'EXCEPTION_FUND_UNATTRIBUTED', '异常款项不存在或尚未核实所属众筹单')
+        const subscription = await repositories.subscriptions.getById(subscriptionId, session)
+        if (!subscription || subscription.projectId !== current.projectId || subscription.userId === 'company'
+          || !['未缴款', '部分缴款'].includes(subscription.pay) || !subscription.shares) {
+          throw new AppError(409, 'EXCEPTION_SUBSCRIPTION_INVALID', '认购单不存在或当前不可转入')
+        }
+        const deadline = Date.parse(subscription.paymentDeadlineAt.replace(' ', 'T'))
+        if (!Number.isFinite(deadline) || Date.now() > deadline || Date.parse(current.bookedAt) > deadline) {
+          throw new AppError(409, 'EXCEPTION_SUBSCRIPTION_EXPIRED', '该认购单已过缴款截止时间，不可转入')
+        }
+        if (await procurementPayments.findOne({ projectId: current.projectId }, { session })) {
+          throw new AppError(409, 'EXCEPTION_SUBSCRIPTION_LOCKED', '采购付款后不可再转入认购单')
+        }
+        const existingContributions = await fundLedger.listProjectContributions(current.projectId, session)
+        const fundedCents = existingContributions.filter(entry => entry.subscriptionId === subscriptionId)
+          .reduce((sum, entry) => sum + entry.amountCents, 0)
+        if (subscription.pay === '部分缴款' && Math.round((subscription.actualPaidAmount ?? 0) * 100) !== fundedCents) {
+          throw new AppError(409, 'PARTIAL_PAYMENT_UNRECONCILED', '该部分缴款尚未与资金台账核对，暂不能转入')
+        }
+        const pending = await exceptionFunds.find({ allocations: { $elemMatch: {
+          subscriptionId, kind: '转入认购单', status: '待确认' } } }, { session }).toArray()
+        const reservedCents = pending.flatMap(fund => fund.allocations)
+          .filter(item => item.subscriptionId === subscriptionId && item.kind === '转入认购单' && item.status === '待确认')
+          .reduce((sum, item) => sum + item.amountCents, 0)
+        const unpaidCents = Math.round(subscription.amount * 100) - fundedCents - reservedCents
+        if (!Number.isSafeInteger(body.amountCents) || Number(body.amountCents) <= 0
+          || Number(body.amountCents) > unpaidCents) {
+          throw new AppError(400, 'EXCEPTION_TRANSFER_AMOUNT_INVALID',
+            `转入金额超出可转入范围，最多可转入 ${(Math.max(0, unpaidCents) / 100).toFixed(2)} 元`)
+        }
+        const updated = reserveExceptionTransfer(current, { id: `EXT-${randomUUID()}`, subscriptionId,
+          amountCents: body.amountCents as number, reason: typeof body.reason === 'string' ? body.reason : '' }, new Date())
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: current.projectId }, { $inc: { fundingRevision: 1 } }, { session })
+        const changed = await exceptionFunds.replaceOne({ id: fundId, revision: current.revision }, updated, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'EXCEPTION_FUND_CHANGED', '异常款项已变化，请刷新后重试')
+        const allocation = updated.allocations.at(-1)!
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '异常款项申请转入认购单',
+          target: fundId, before: { remainingCents: current.remainingCents },
+          after: { allocationId: allocation.id, subscriptionId, amountCents: allocation.amountCents } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { allocation, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.allocation, message: '转入已提交公司复核' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (error instanceof RangeError || error instanceof Error && /转入|认购单/.test(error.message)) {
+        return send(res, 400, { error: 'EXCEPTION_TRANSFER_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const exceptionTransferReviewMatch = pathname.match(/^\/api\/exception-funds\/([^/]+)\/transfers\/([^/]+)\/review$/)
+  if (exceptionTransferReviewMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const fundId = decodeURIComponent(exceptionTransferReviewMatch[1])
+    const allocationId = decodeURIComponent(exceptionTransferReviewMatch[2])
+    const decision = body.decision === '通过' || body.decision === '驳回' ? body.decision : undefined
+    if (!decision) return send(res, 400, { error: 'EXCEPTION_TRANSFER_DECISION_INVALID', message: '请选择通过或驳回' })
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const current = await exceptionFunds.findOne({ id: fundId }, { session })
+        const allocation = current?.allocations.find(item => item.id === allocationId)
+        if (!current || !allocation || allocation.kind !== '转入认购单' || allocation.status !== '待确认'
+          || !current.projectId || !allocation.subscriptionId) {
+          throw new AppError(409, 'EXCEPTION_TRANSFER_INVALID', '转入单不存在或已复核')
+        }
+        if (decision === '通过' && actor.userId === current.registeredBy) {
+          throw new AppError(403, 'SELF_REVIEW_FORBIDDEN', '登记人不得复核本人登记的异常款项')
+        }
+        let updatedSubscription: Subscription | undefined
+        if (decision === '通过') {
+          const subscription = await repositories.subscriptions.getById(allocation.subscriptionId, session)
+          if (!subscription || subscription.projectId !== current.projectId || subscription.userId === 'company'
+            || !['未缴款', '部分缴款'].includes(subscription.pay)) {
+            throw new AppError(409, 'EXCEPTION_SUBSCRIPTION_INVALID', '认购单状态已变化，不可转入')
+          }
+          const deadline = Date.parse(subscription.paymentDeadlineAt.replace(' ', 'T'))
+          if (!Number.isFinite(deadline) || Date.now() > deadline || Date.parse(current.bookedAt) > deadline) {
+            throw new AppError(409, 'EXCEPTION_SUBSCRIPTION_EXPIRED', '该认购单已过缴款截止时间，不可转入')
+          }
+          if (await procurementPayments.findOne({ projectId: current.projectId }, { session })) {
+            throw new AppError(409, 'EXCEPTION_SUBSCRIPTION_LOCKED', '采购付款后不可再转入认购单')
+          }
+          const contributions = await fundLedger.listProjectContributions(current.projectId, session)
+          const fundedCents = contributions.filter(entry => entry.subscriptionId === subscription.id)
+            .reduce((sum, entry) => sum + entry.amountCents, 0)
+          const paidCents = fundedCents + allocation.amountCents
+          const expectedCents = Math.round(subscription.amount * 100)
+          if (paidCents > expectedCents) throw new AppError(409, 'EXCEPTION_TRANSFER_EXCESS', '转入后将超过认购应缴金额')
+          updatedSubscription = { ...subscription, pay: paidCents === expectedCents ? '已缴款' : '部分缴款',
+            actualPaidAmount: paidCents / 100, reviewedBy: actor.userId, reviewedAt: new Date().toISOString(),
+            action: '查看支付' }
+          await repositories.subscriptions.replace(updatedSubscription, session)
+          await fundLedger.append({ id: `LED-${randomUUID()}`, sourceKey: `exception-transfer:${allocationId}`,
+            type: 'employee_contribution', projectId: current.projectId,
+            subscriptionId: subscription.id, participantId: subscription.userId,
+            shares: paidCents === expectedCents ? subscription.shares ?? 0 : 0,
+            amountCents: allocation.amountCents, transactionNo: current.transactionNo,
+            transactionKey: `exception-transfer:${allocationId}`, proofAssetIds: current.proofAssetIds,
+            reviewedBy: actor.userId, createdAt: new Date().toISOString() }, session)
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: current.projectId }, { $inc: { fundingRevision: 1 } }, { session })
+        }
+        const updated = reviewExceptionTransfer(current, allocationId, decision, actor.userId, new Date())
+        const changed = await exceptionFunds.replaceOne({ id: fundId, revision: current.revision }, updated, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'EXCEPTION_FUND_CHANGED', '异常款项已变化，请刷新后重试')
+        const audit = auditRecord({ actor: actor.label, role: actor.role,
+          action: decision === '通过' ? '公司复核异常款项转入通过' : '公司驳回异常款项转入',
+          target: fundId, before: { remainingCents: current.remainingCents },
+          after: { allocationId, remainingCents: updated.remainingCents, subscriptionId: allocation.subscriptionId } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updated, updatedSubscription, audit }
+      })
+      if (result.updatedSubscription) {
+        const index = subscriptions.findIndex(item => item.id === result.updatedSubscription!.id)
+        if (index >= 0) subscriptions.splice(index, 1, result.updatedSubscription)
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updated, message: decision === '通过' ? '转入认购单复核通过' : '转入申请已驳回' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'EXCEPTION_TRANSFER_DUPLICATE', message: '该转入已处理' })
+      throw error
+    }
+  }
   const payoutMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/lines\/([^/]+)\/payout$/)
   if (payoutMatch) {
     const actor = financeOperator(req)

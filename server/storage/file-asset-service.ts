@@ -36,7 +36,7 @@ function safeObjectKeyPart(value: string) {
 }
 
 export function objectKey(prefix: string, purpose: FileAsset['purpose'], assetId: string, extension: string) {
-  const validPurpose = ['receiving-code', 'payment-proof', 'settlement-invoice', 'procurement-payment-proof', 'customer-receipt-proof', 'confirmed-cost-proof', 'distribution-payout-proof'].includes(purpose)
+  const validPurpose = ['receiving-code', 'payment-proof', 'settlement-invoice', 'procurement-payment-proof', 'customer-receipt-proof', 'distribution-payout-proof', 'exception-fund-proof', 'exception-refund-proof'].includes(purpose)
   const validPrefix = safeObjectKeyPart(prefix) && prefix.split('/').every(part => /^[A-Za-z0-9_-]+$/.test(part))
   if (!validPrefix || !validPurpose || !safeObjectKeyPart(assetId) || !/^[A-Za-z0-9_-]+$/.test(assetId) || !/^[a-z0-9]+$/.test(extension)) {
     throw new Error('对象键参数不安全')
