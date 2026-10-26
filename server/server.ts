@@ -34,7 +34,7 @@ import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from 
 import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
-import { paymentReminderDue, recipientNotification, subscriptionNotification, type Notification } from './notifications.ts'
+import { paymentReminderDue, proxyConfirmationReminderDue, recipientNotification, roleNotification, subscriptionNotification, type Notification } from './notifications.ts'
 import { planEscalationNotifications } from './notification-escalations.ts'
 import { validateOverdueResolution, type ReceiptOverdueCase } from './finance/receipt-overdue.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
@@ -626,6 +626,56 @@ async function runDueEscalations() {
       })
     }
   } finally { escalationSweepRunning = false }
+}
+let proxyReminderSweepRunning = false
+async function runDueProxyConfirmReminders() {
+  if (proxyReminderSweepRunning) return
+  proxyReminderSweepRunning = true
+  try {
+    const [refunds, orders, refundRequests, payoutRequests] = await Promise.all([
+      projectRefunds.find({ status: '待员工确认' }).toArray(),
+      distributionOrders.find({ status: { $in: ['待员工确认', '打款登记中'] } }).toArray(),
+      projectRefundProxyRequests.find({ status: '待公司复核' }).toArray(),
+      distributionPayoutProxyRequests.find({ status: '待公司复核' }).toArray()
+    ])
+    const projectIds = [...new Set([...refunds, ...orders].map(item => item.projectId))]
+    const projectRecords = await repositories.projects.list({ id: { $in: projectIds } } as never)
+    const projectById = new Map(projectRecords.map(item => [item.id, item]))
+    const pendingRefunds = new Set(refundRequests.map(item => item.refundId))
+    const pendingPayouts = new Set(payoutRequests.map(item => `${item.orderId}:${item.participantId}`))
+    const at = new Date()
+    for (const refund of refunds) {
+      try {
+        const project = projectById.get(refund.projectId)
+        if (!project || !['关闭中', '采购失败终止中'].includes(project.status)
+          || pendingRefunds.has(refund.id)
+          || !proxyConfirmationReminderDue(refund.paidAt,
+            project.ruleParametersSnapshot?.proxyConfirmDays ?? project.proxyConfirmDays ?? 7, at)) continue
+        const notice = roleNotification({ type: '代确认超期提醒', sourceId: `refund:${refund.id}`,
+          role: 'finance', projectId: refund.projectId,
+          content: `众筹单【${refund.projectId}】的退款【${refund.id}】超期未确认，可申请代确认`,
+          targetPage: 'projectRefunds', createdAt: at.toISOString() })
+        await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+      } catch (error) { logFailure('notification.proxy-refund-reminder', error) }
+    }
+    for (const order of orders) {
+      const project = projectById.get(order.projectId)
+      if (!project || project.status !== '分配中') continue
+      for (const line of order.lines) {
+        try {
+          if (line.kind !== 'employee' || line.status !== '待员工确认'
+            || pendingPayouts.has(`${order.id}:${line.participantId}`)
+            || !proxyConfirmationReminderDue(line.payout?.paidAt,
+              project.ruleParametersSnapshot?.proxyConfirmDays ?? project.proxyConfirmDays ?? 7, at)) continue
+          const notice = roleNotification({ type: '代确认超期提醒',
+            sourceId: `payout:${order.id}:${line.participantId}`, role: 'finance', projectId: order.projectId,
+            content: `众筹单【${order.projectId}】的员工打款超期未确认，可申请代确认`,
+            targetPage: 'distributionOrders', createdAt: at.toISOString() })
+          await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+        } catch (error) { logFailure('notification.proxy-payout-reminder', error) }
+      }
+    }
+  } finally { proxyReminderSweepRunning = false }
 }
 async function runDueBackstops() {
   if (backstopRunning) return
@@ -1755,6 +1805,13 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_REFUND_CHANGED', '退款事项已变化，请刷新后重试')
         const updatedSubscription: Subscription = { ...subscription, pay: '待确认退款', action: '确认退款到账' }
         await repositories.subscriptions.replace(updatedSubscription, session)
+        const refundNotice = recipientNotification({ type: '打款待确认', sourceId: refund.id,
+          recipientId: refund.participantId, projectId: refund.projectId,
+          subscriptionId: refund.subscriptionId,
+          content: `财务已登记向您的退款【${(refund.amountCents / 100).toFixed(2)}】元，请确认收款`,
+          targetPage: 'myPayouts', createdAt: new Date().toISOString() })
+        await notifications.updateOne({ id: refundNotice.id }, { $setOnInsert: refundNotice },
+          { upsert: true, session })
         await bankTransactions.insertOne({ transactionNo: payment.transactionNo,
           sourceKey: `project-refund:${refund.id}`, projectId: refund.projectId,
           createdAt: new Date().toISOString() }, { session })
@@ -2739,6 +2796,20 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         if (changed.modifiedCount !== 1) throw new AppError(409, 'DISTRIBUTION_CHANGED', '分配单状态已变化，请刷新后重试')
         await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`).updateOne({ id: project.id },
           { $set: { status: '已完结', statusType: 'success', closedAt, closedBy: actor.userId } }, { session })
+        const closeContent = `众筹单【${project.id}】已结单`
+        const closeNotices = [
+          ...order.lines.filter(line => line.kind === 'employee').map(line =>
+            recipientNotification({ type: '已结单', sourceId: project.id,
+              recipientId: line.participantId, projectId: project.id,
+              content: closeContent, targetPage: 'myPayouts', createdAt: closedAt })),
+          roleNotification({ type: '已结单', sourceId: project.id, role: 'finance',
+            projectId: project.id, content: closeContent, targetPage: 'distributionOrders', createdAt: closedAt }),
+          ...(project.ownerUserId ? [recipientNotification({ type: '已结单', sourceId: project.id,
+            recipientId: project.ownerUserId, projectId: project.id,
+            content: closeContent, targetPage: 'projects', createdAt: closedAt })] : [])
+        ]
+        for (const notice of closeNotices) await notifications.updateOne({ id: notice.id },
+          { $setOnInsert: notice }, { upsert: true, session })
         const audit = auditRecord({ actor: actor.label, role: 'finance', action: '结单', target: project.id,
           before: { projectStatus: project.status, distributionStatus: order.status },
           after: { projectStatus: '已完结', distributionStatus: '已完成', checkedAt: snapshot.data.checkedAt,
@@ -3185,6 +3256,15 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             projectId: order.projectId, createdAt: new Date().toISOString() }, { session })
         }
         await distributionOrders.replaceOne({ id: order.id, status: order.status }, updated, { session })
+        if (line.kind === 'employee') {
+          const payoutNotice = recipientNotification({ type: '打款待确认',
+            sourceId: `${order.id}:${participantId}`, recipientId: participantId,
+            projectId: order.projectId,
+            content: `财务已登记向您的分配打款【${(line.payoutCents / 100).toFixed(2)}】元，请确认收款`,
+            targetPage: 'myPayouts', createdAt: new Date().toISOString() })
+          await notifications.updateOne({ id: payoutNotice.id }, { $setOnInsert: payoutNotice },
+            { upsert: true, session })
+        }
         await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
           id: `LED-${randomUUID()}`, sourceKey: `distribution-payout:${order.id}:${participantId}`,
           type: line.kind === 'company' ? 'company_internal_transfer' : 'employee_distribution_payout',
@@ -3276,6 +3356,13 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
         .updateOne({ id: order.projectId }, { $inc: { distributionRevision: 1 } }, { session })
       await distributionOrders.replaceOne({ id: order.id, status: '有异议' }, updated, { session })
+      const replyNotice = recipientNotification({ type: '异议处理结果',
+        sourceId: `${order.id}:${participantId}:${line.issueAt}`, recipientId: participantId,
+        projectId: order.projectId,
+        content: `您对众筹单【${order.projectId}】的异议已处理，处理结果：【${reply}】`,
+        targetPage: 'myPayouts', createdAt: new Date().toISOString() })
+      await notifications.updateOne({ id: replyNotice.id }, { $setOnInsert: replyNotice },
+        { upsert: true, session })
       const audit = auditRecord({ actor: actor.label, role: 'finance', action: '回复分配收款异议',
         target: `${order.id}:${participantId}`, before: { status: line.status, reason: line.issueReason },
         after: { status: '待员工确认', reply } }) as AuditLog
@@ -3524,6 +3611,12 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             if (summary.gapCents === 0 && project.status !== '待分配') {
               await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`).updateOne({ id: project.id },
                 { $set: { status: '待分配', statusType: 'success' } }, { session })
+              const notice = roleNotification({ type: '可生成分配单', sourceId: project.id,
+                role: 'finance', projectId: project.id,
+                content: `众筹单【${project.id}】回款已足额，可生成分配单`,
+                targetPage: 'distributionOrders', createdAt: new Date().toISOString() })
+              await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice },
+                { upsert: true, session })
               project.status = '待分配'
             }
           }
@@ -3684,6 +3777,16 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
           next = { ...order, status: '已作废', voidedBy: actor.userId, voidedAt: new Date().toISOString() }
         }
         await distributionOrders.replaceOne({ id: order.id, status: order.status }, next, { session })
+        if (action === 'approve') {
+          for (const role of ['finance', 'super_admin'] as const) {
+            const notice = roleNotification({ type: '分配单生成', sourceId: order.id,
+              role, projectId: order.projectId,
+              content: `众筹单【${order.projectId}】的分配单已审批通过，请登记打款`,
+              targetPage: 'distributionOrders', createdAt: next.approvedAt! })
+            await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice },
+              { upsert: true, session })
+          }
+        }
         if (action !== 'approve' && !rejectedVoid) {
           await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
             .updateOne({ id: order.projectId }, { $set: { status: '待分配', statusType: 'success' },
@@ -4192,6 +4295,14 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             actor: reviewedBy, role: 'finance', action: '按份认购缴款复核通过', target: latest.id,
             before: { pay: latest.pay }, after: { pay: record.pay, amountCents: verified.amountCents, transactionNo: verified.transactionNo }
           }) as never, session)
+          if (latest.userId) {
+            const notice = recipientNotification({ type: '缴款复核结果', sourceId: latest.id,
+              recipientId: latest.userId, projectId: latest.projectId, subscriptionId: latest.id,
+              content: `您的认购单【${latest.id}】缴款已通过复核`,
+              targetPage: 'mine', createdAt: reviewedAt })
+            await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice },
+              { upsert: true, session })
+          }
           return record
         })
         const index = subscriptions.findIndex(item => item.id === updated.id)
@@ -4800,6 +4911,7 @@ server.listen(port, '127.0.0.1', () => {
   void runDueBackstops().catch(error => logFailure('company.backstop', error))
   void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
   void runDueEscalations().catch(error => logFailure('notification.escalation', error))
+  void runDueProxyConfirmReminders().catch(error => logFailure('notification.proxy-confirm', error))
 })
 const backstopTimer = setInterval(() => {
   void runDueBackstops().catch(error => logFailure('company.backstop', error))
@@ -4808,6 +4920,7 @@ const backstopTimer = setInterval(() => {
 backstopTimer.unref()
 const escalationTimer = setInterval(() => {
   void runDueEscalations().catch(error => logFailure('notification.escalation', error))
+  void runDueProxyConfirmReminders().catch(error => logFailure('notification.proxy-confirm', error))
 }, 300_000)
 escalationTimer.unref()
 

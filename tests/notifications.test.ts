@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { paymentReminderDue, subscriptionNotification } from '../server/notifications.ts'
+import { paymentReminderDue, proxyConfirmationReminderDue, subscriptionNotification } from '../server/notifications.ts'
 
 test('payment reminder uses the published lead time and only pending subscriptions', () => {
   const at = new Date('2026-10-26T08:00:00.000Z')
@@ -16,4 +16,11 @@ test('subscription notification has a stable per-recipient id for retry deduplic
   assert.equal(subscriptionNotification(subscription, '缴款即将截止', '2026-10-26T08:00:00Z')?.id,
     subscriptionNotification(subscription, '缴款即将截止', '2026-10-26T09:00:00Z')?.id)
   assert.equal(subscriptionNotification({ ...subscription, userId: undefined }, '认购成功', '2026-10-26T08:00:00Z'), null)
+})
+
+test('proxy confirmation reminder uses the published day limit', () => {
+  const at = new Date('2026-10-26T08:00:00.000Z')
+  assert.equal(proxyConfirmationReminderDue('2026-10-19T08:00:00.000Z', 7, at), true)
+  assert.equal(proxyConfirmationReminderDue('2026-10-19T08:00:01.000Z', 7, at), false)
+  assert.equal(proxyConfirmationReminderDue('invalid', 7, at), false)
 })

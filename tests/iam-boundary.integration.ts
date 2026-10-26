@@ -446,6 +446,8 @@ try {
   assert.deepEqual((customerReviewed.body.data as { returns: unknown }).returns,
     [{ projectId: 'PRJ-IAM-PAY-READY', amountCents: 16000 }])
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PAY-READY' }))?.status, '待分配')
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '可生成分配单', recipientId: 'role:finance', projectId: 'PRJ-IAM-PAY-READY' }), 1)
   const receiptSummary = await request('/api/projects/PRJ-IAM-PAY-READY/receipt-summary',
     { Authorization: 'Bearer smoke-finance-token' })
   assert.equal((receiptSummary.body.data as { distributableCents: number }).distributableCents, 36000)
@@ -513,6 +515,9 @@ try {
     'smoke-second-finance-token', {})
   assert.equal(distributionApproved.status, 200, JSON.stringify(distributionApproved.body))
   assert.equal((distributionApproved.body.data as { status: string }).status, '已审批')
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '分配单生成', projectId: 'PRJ-IAM-PAY-READY',
+    recipientId: { $in: ['role:finance', 'role:super_admin'] } }), 2)
   assert.equal((await postAs(`/api/distribution-orders/${order.id}/void`, 'smoke-second-finance-token', {})).status, 409,
     '审批后不允许作废')
   await db.collection(`${prefix}file_assets`).insertOne({
@@ -531,6 +536,8 @@ try {
     ...employeePayout, amountCents: 23932 })).status, 400)
   const employeePaid = await postAs(employeePayoutPath, 'smoke-second-finance-token', employeePayout)
   assert.equal(employeePaid.status, 200, JSON.stringify(employeePaid.body))
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '打款待确认', recipientId: '1001', projectId: order.projectId }), 1)
   assert.equal((await postAs(`/api/distribution-orders/${order.id}/lines/company/payout`,
     'smoke-finance-token', { amountCents: 11967, paidAt: employeePayout.paidAt,
       companyTransferConfirmed: true })).status, 200)
@@ -544,6 +551,8 @@ try {
   assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: order.id }))?.status, '有异议')
   assert.equal((await postAs(`/api/distribution-orders/${order.id}/lines/1001/issue-reply`,
     'smoke-finance-token', { reply: '已重新核对银行流水，登记金额与实际到账一致' })).status, 200)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '异议处理结果', recipientId: '1001', projectId: order.projectId }), 1)
   assert.equal((await postAs(`/api/distribution-orders/${order.id}/lines/1001/confirm`,
     'smoke-finance-token', { decision: '确认', agreementVersion: 1, agreementsConfirmed: true })).status, 403)
   const employeeConfirmed = await postAs(`/api/distribution-orders/${order.id}/lines/1001/confirm`,
@@ -647,6 +656,10 @@ try {
   assert.equal(closedOrder.status, 200, JSON.stringify(closedOrder.body))
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PAY-READY' }))?.status, '已完结')
   assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: order.id }))?.status, '已完成')
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '已结单', recipientId: '1001', projectId: 'PRJ-IAM-PAY-READY' }), 1)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '已结单', recipientId: 'role:finance', projectId: 'PRJ-IAM-PAY-READY' }), 1)
   assert.equal((await postAs(`/api/distribution-orders/${order.id}/close`,
     'smoke-finance-token', {})).status, 409)
   await db.collection(`${prefix}projects`).insertOne({
@@ -783,6 +796,9 @@ try {
     ...projectRefundInput, amountCents: 9999 })).status, 400)
   assert.equal((await postAs(projectRefundPaymentPath, 'smoke-finance-token', projectRefundInput)).status, 200)
   assert.equal((await postAs(projectRefundPaymentPath, 'smoke-finance-token', projectRefundInput)).status, 409)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '打款待确认', recipientId: '1001', projectId: 'PRJ-IAM-CLOSE',
+    subscriptionId: 'SUB-IAM-CLOSE' }), 1)
   const myProjectRefunds = await request('/api/my-project-refunds', employee)
   assert.equal(myProjectRefunds.status, 200)
   assert.equal((myProjectRefunds.body.data as Array<{ id: string }>).length, 1)

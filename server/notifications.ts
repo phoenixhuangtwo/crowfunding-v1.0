@@ -38,6 +38,12 @@ export function paymentReminderDue(input: {
     && remaining <= input.paymentReminderHours * 60 * 60 * 1000
 }
 
+export function proxyConfirmationReminderDue(paidAt: string | undefined, confirmDays: number, at: Date): boolean {
+  if (!paidAt || !Number.isInteger(confirmDays) || confirmDays < 1 || confirmDays > 90) return false
+  const paidTime = Date.parse(paidAt)
+  return Number.isFinite(paidTime) && paidTime + confirmDays * 24 * 60 * 60 * 1000 <= at.getTime()
+}
+
 export function subscriptionNotification(input: {
   id: string; projectId?: string; userId?: string; paymentDeadlineAt: string
 }, type: '认购成功' | '缴款即将截止' | '缴款已逾期', createdAt: string): Notification | null {
