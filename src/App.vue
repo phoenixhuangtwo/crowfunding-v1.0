@@ -946,7 +946,7 @@ function replaceRows<T>(target: T[], rows: T[]) {
 
 async function loadData() {
   try {
-    const optionalList = <T>(code: string, path: string) => (!limitedAdmin.value || path === '/api/projects')
+    const optionalList = <T>(code: string, path: string) => (!limitedAdmin.value || path !== '/api/audit-logs')
       && canApi(authSession.permissionInfo.value, code)
       ? api<{ data: T[] }>(path) : Promise.resolve({ data: [] as T[] })
     const [projectPayload, subscriptionPayload, auditPayload, rulePayload, receivingCodePayload] = await Promise.all([

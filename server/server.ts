@@ -133,6 +133,9 @@ type SubscriptionRule = {
   id: string
   projectId: string
   projectName: string
+  tenantId?: string
+  ownerUserId?: string
+  ownerDeptId?: string
   ruleName: string
   totalAmount: number
   sharePrice?: number
@@ -212,6 +215,23 @@ function isCompanySubscription(subscription: Subscription) {
 
 function hasRealUserSubscriptions(projectId: string) {
   return subscriptions.some(item => item.projectId === projectId && !isCompanySubscription(item))
+}
+
+function isOwnedByAdmin(req: IncomingMessage, item: { tenantId?: string; ownerUserId?: string }) {
+  const identity = iamContextFor(req)
+  return item.tenantId === identity.tenantId && item.ownerUserId === identity.userId
+}
+
+function requireAdminOwned(req: IncomingMessage, item: { tenantId?: string; ownerUserId?: string }) {
+  if (requestContext(req).role === 'admin' && !isOwnedByAdmin(req, item)) {
+    throw new AppError(404, 'SCOPE_DENIED', '资源不存在或无权访问')
+  }
+}
+
+function requireAdminDraftProject(req: IncomingMessage, projectId: unknown) {
+  if (requestContext(req).role !== 'admin') return
+  const project = projects.find(item => item.id === projectId)
+  if (!project || project.status !== '未开放') throw new AppError(404, 'SCOPE_DENIED', '资源不存在或无权访问')
 }
 
 function getRuleProjectIds(ruleId: string) {
@@ -545,7 +565,7 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
   }
   if (pathname === '/api/state') {
     const context = requestContext(req)
-    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能访问全量业务状态')
+    if (context.role === 'employee' || context.role === 'admin') throw new AppError(403, 'FORBIDDEN', '当前角色不能访问全量业务状态')
     return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
   }
   if (pathname === '/api/projects') {
@@ -570,6 +590,7 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const projectId = decodeURIComponent(procurementDetailMatch[1])
     const project = projects.find(item => item.id === projectId)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    if (requestContext(req).role === 'admin' && project.status !== '未开放') requireAdminOwned(req, project)
 
     const externalId = project.id.match(/^PRJ-FSY-OFFLINE-(.+)$/)?.[1]
     if (!externalId) return send(res, 400, { error: 'PROCUREMENT_PROJECT_REQUIRED', message: '该项目不是采购系统同步项目，无法查询采购订单详情' })
@@ -589,6 +610,7 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const status = searchParams.get('status')?.trim()
     const projectId = searchParams.get('projectId')?.trim()
     const filtered = rules.filter(rule => {
+      if (requestContext(req).role === 'admin' && !isOwnedByAdmin(req, rule)) return false
       const keywordMatched = !keyword || [rule.ruleName, rule.projectName, rule.id].some(value => value.includes(keyword))
       const statusMatched = !status || status === '全部' || rule.status === status
       const projectMatched = !projectId || projectId === '全部' || rule.projectId === projectId
@@ -596,15 +618,24 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     })
     return send(res, 200, { data: filtered })
   }
-  if (pathname === '/api/subscriptions') return send(res, 200, { data: await queryService.listSubscriptions(requestContext(req)) })
+  if (pathname === '/api/subscriptions') {
+    if (requestContext(req).role !== 'admin') return send(res, 200, { data: await queryService.listSubscriptions(requestContext(req)) })
+    const ownedIds = projects.filter(project => isOwnedByAdmin(req, project)).map(project => project.id)
+    const records = await repositories.subscriptions.list({ projectId: { $in: ownedIds } }, { sort: { createdAt: -1, id: -1 } })
+    return send(res, 200, { data: records.map(record => ({
+      id: record.id, projectId: record.projectId, userId: record.userId, amount: record.amount,
+      shares: record.shares, companyKind: record.companyKind, pay: record.pay,
+      createdAt: record.createdAt, paymentDeadlineAt: record.paymentDeadlineAt
+    })) })
+  }
   if (pathname === '/api/audit-logs') {
     const context = requestContext(req)
-    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能查看全量审计日志')
+    if (context.role === 'employee' || context.role === 'admin') throw new AppError(403, 'FORBIDDEN', '当前角色不能查看全量审计日志')
     return send(res, 200, { data: await repositories.auditLogs.list({}, { sort: { time: -1 } }) })
   }
   if (pathname === '/api/risk-events') {
     const context = requestContext(req)
-    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能查看全量风险事件')
+    if (context.role === 'employee' || context.role === 'admin') throw new AppError(403, 'FORBIDDEN', '当前角色不能查看全量风险事件')
     return send(res, 200, { data: await repositories.riskEvents.list({}, { sort: { time: -1 } }) })
   }
   if (pathname === '/api/rbac') {
@@ -689,7 +720,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     ? financeOperator(req) : undefined
   if (pathname === '/api/settlements/calc') {
     const context = requestContext(req)
-    if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能访问结算试算')
+    if (context.role !== 'finance' && context.role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色不能访问结算试算')
   }
   let manager: ReturnType<typeof managementActor> | undefined
   if (pathname === '/api/mcp/sync' || pathname === '/api/rules'
@@ -1353,6 +1384,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/rules') {
+    requireAdminDraftProject(req, body.projectId)
     const validated = validateRulePayload(body, res)
     if (!validated) return
     const { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId, shareRule } = validated
@@ -1373,6 +1405,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       id: `RULE-${Date.now()}`,
       projectId: project.id,
       projectName: project.title,
+      ...ownershipFrom(iamContextFor(req)),
       ruleName: String(body.ruleName).trim(),
       totalAmount,
       ...shareRule,
@@ -1397,6 +1430,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const ruleId = pathname.split('/')[3]
     const rule = rules.find(item => item.id === ruleId)
     if (!rule) return send(res, 404, { error: 'RULE_NOT_FOUND', message: '认购规则不存在' })
+    requireAdminOwned(req, rule)
+    requireAdminDraftProject(req, body.projectId)
     if (isRuleLocked(rule.id)) {
       return send(res, 409, {
         error: 'RULE_LOCKED_BY_SUBSCRIPTION',
@@ -1406,6 +1441,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const validated = validateRulePayload(body, res)
     if (!validated) return
     const { project, totalAmount, companyFixedAmount, minAmount, minParticipants, receivingCodeId, shareRule } = validated
+    if (rules.some(item => item.projectId === project.id && item.id !== rule.id)) {
+      return send(res, 409, { error: 'PROJECT_RULE_EXISTS', message: '该项目已有认购规则' })
+    }
     const nextStatus = normalizeRuleStatus(body.status ?? rule.status)
     const hasRealSubscriptions = hasRealUserSubscriptions(project.id)
     if (nextStatus === '已启用' && hasRealSubscriptions) {
@@ -1442,6 +1480,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const ruleId = pathname.split('/')[3]
     const rule = rules.find(item => item.id === ruleId)
     if (!rule) return send(res, 404, { error: 'RULE_NOT_FOUND', message: '认购规则不存在' })
+    requireAdminOwned(req, rule)
+    requireAdminDraftProject(req, rule.projectId)
     const nextStatus = normalizeRuleStatus(body.status)
     if (nextStatus === '未启用') {
       return send(res, 400, { error: 'RULE_STATUS_INVALID', message: '规则状态仅支持启用或停用' })
@@ -1471,6 +1511,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const index = rules.findIndex(item => item.id === ruleId)
     if (index < 0) return send(res, 404, { error: 'RULE_NOT_FOUND', message: '认购规则不存在' })
     const rule = rules[index]
+    requireAdminOwned(req, rule)
+    requireAdminDraftProject(req, rule.projectId)
     if (isRuleLocked(rule.id)) {
       return send(res, 409, {
         error: 'RULE_LOCKED_BY_SUBSCRIPTION',
@@ -1504,6 +1546,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!selectedRule) {
       return send(res, 404, { error: 'RULE_NOT_FOUND', message: '认购规则不存在' })
     }
+    requireAdminOwned(req, selectedRule)
     if (selectedRule.projectId !== project.id) {
       return send(res, 409, { error: 'RULE_PROJECT_MISMATCH', message: '开放认购前必须选择当前项目归属的认购规则' })
     }
@@ -1551,6 +1594,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const projectId = pathname.split('/')[3]
     const project = projects.find(item => item.id === projectId)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    requireAdminOwned(req, project)
     if (project.status !== '未开放' && project.status !== '未满额') {
       return send(res, 409, { error: 'PROJECT_STATUS_INVALID', message: '只有未开放或未满额项目可以终止' })
     }
@@ -1581,6 +1625,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const project = projects.find(item => item.id === projectId)
     const reason = String(body.reason ?? '').trim()
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    requireAdminOwned(req, project)
     if (!reason) return send(res, 400, { error: 'INTERRUPT_REASON_REQUIRED', message: '中断认购必须填写中断原因' })
     if (project.status !== '未满额') {
       return send(res, 409, { error: 'PROJECT_NOT_OPEN', message: '只有未满额项目可以中断认购' })
@@ -1850,9 +1895,12 @@ const server = createServer(observeRequests(async (req, res) => {
     if (role === 'employee' && !context.dataScope?.self && !context.dataScope?.all) {
       throw new AppError(403, 'DATA_SCOPE_DENIED', '无本人数据访问范围')
     }
-    const adminProjectList = role === 'admin' && req.method === 'GET' && url.pathname === '/api/projects'
+    const adminScopedRead = role === 'admin' && req.method === 'GET'
       && (context.dataScope?.self || context.dataScope?.deptIds.includes(context.user?.deptId ?? ''))
-    if (role !== 'employee' && !context.dataScope?.all && !adminProjectList) {
+      && (['/api/projects', '/api/rules', '/api/subscriptions', '/api/receiving-codes'].includes(url.pathname)
+        || /^\/api\/procurement\/orders\/[^/]+$/.test(url.pathname)
+        || /^\/api\/files\/[^/]+\/content$/.test(url.pathname))
+    if (role !== 'employee' && !context.dataScope?.all && !adminScopedRead) {
       throw new AppError(403, 'DATA_SCOPE_MIGRATION_REQUIRED', '存量业务记录尚无部门归属，暂不能使用部门数据范围')
     }
     if (req.method === 'GET') return await routeGet(url, req, res)

@@ -96,6 +96,9 @@ export type SubscriptionRule = {
   id: string
   projectId: string
   projectName: string
+  tenantId?: string
+  ownerUserId?: string
+  ownerDeptId?: string
   ruleName: string
   totalAmount: number
   sharePrice?: number
