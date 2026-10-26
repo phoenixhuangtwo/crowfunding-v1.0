@@ -660,7 +660,8 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
   let shareRule: ReturnType<typeof prepareShareRule> | undefined
   if (body.sharePrice !== undefined && body.sharePrice !== null && body.sharePrice !== '') {
     try {
-      shareRule = prepareShareRule(project.costAmount, Number(body.sharePrice), Number(body.companyFrontShares), Number(body.maxSharesPerEmployee))
+      shareRule = prepareShareRule(project.costAmount, Number(body.sharePrice), Number(body.companyFrontShares),
+        body.maxSharesPerEmployee === undefined || body.maxSharesPerEmployee === '' ? undefined : Number(body.maxSharesPerEmployee))
     } catch (error) {
       send(res, 400, { error: 'SHARE_RULE_INVALID', message: error instanceof Error ? error.message : '份额规则无效' })
       return null
@@ -1553,41 +1554,65 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (selectedRule.status !== '已启用') {
       return send(res, 409, { error: 'RULE_NOT_ENABLED', message: '开放认购前必须先启用当前项目归属的认购规则' })
     }
-    if (selectedRule.totalAmount < 0 || selectedRule.totalAmount > project.costAmount) {
-      return send(res, 409, { error: 'OPEN_AMOUNT_EXCEEDS_COST', message: '开放认购金额必须满足 0≦开放认购金额≦项目成本金额' })
+    if (project.salesAmount <= project.costAmount) {
+      return send(res, 409, { error: 'PROJECT_MARGIN_INVALID', message: '销售金额不高于采购金额，无法发布众筹' })
     }
-    const before = { status: project.status, total: project.total, deadline: project.deadline, ruleId: project.ruleId }
+    let shareRule: ReturnType<typeof prepareShareRule>
+    try {
+      shareRule = prepareShareRule(project.costAmount, selectedRule.sharePrice ?? NaN,
+        selectedRule.companyFrontShares ?? NaN, selectedRule.maxSharesPerEmployee)
+    } catch {
+      return send(res, 409, { error: 'SHARE_RULE_INVALID', message: '发布前须配置有效的按份认购规则' })
+    }
+    if (selectedRule.totalAmount !== shareRule.totalAmount || selectedRule.companyFixedAmount !== shareRule.companyFixedAmount
+      || selectedRule.totalShares !== shareRule.totalShares
+      || selectedRule.maxSharesPerEmployee !== shareRule.maxSharesPerEmployee) {
+      return send(res, 409, { error: 'SHARE_RULE_CHANGED', message: '份额规则与采购金额不一致，请重新配置' })
+    }
+    const deadline = new Date(selectedRule.endAt.replace(' ', 'T')).getTime()
+    if (!Number.isFinite(deadline) || deadline <= Date.now()) {
+      return send(res, 409, { error: 'SUBSCRIPTION_DEADLINE_INVALID', message: '认购截止时间须晚于当前时间' })
+    }
     const publisher = ownershipFrom(iamContextFor(req))
-    project.ruleId = selectedRule.id
-    project.tenantId = publisher.tenantId
-    project.ownerUserId = publisher.ownerUserId
-    project.ownerDeptId = publisher.ownerDeptId
-    project.total = selectedRule.totalAmount
-    project.companyFixedAmount = selectedRule.companyFixedAmount
-    project.deadline = selectedRule.endAt || project.deadline
-    normalizeProjectAmounts(project)
-    project.status = '未满额'
-    project.statusType = 'primary'
-    project.interruptReason = undefined
-    project.interruptedAt = undefined
-    project.refundNotice = undefined
-    await pushAudit({
-      actor: manager!.label,
-      role: manager!.role,
-      action: '开放项目认购',
-      target: project.id,
-      before,
-      after: {
-        status: project.status,
-        total: project.total,
-        deadline: project.deadline,
-        ruleId: selectedRule.id,
-        ruleName: selectedRule.ruleName,
-        publisher
+    const result = await mongo.withTransaction(async session => {
+      const latest = await repositories.projects.getById(project.id, session)
+      const latestRule = await repositories.rules.getById(selectedRule.id, session)
+      if (!latest || latest.status !== '未开放' || !latestRule || latestRule.updatedAt !== selectedRule.updatedAt
+        || latestRule.status !== '已启用' || latestRule.projectId !== latest.id
+        || latest.costAmount !== project.costAmount || latest.salesAmount !== project.salesAmount
+        || (['sharePrice', 'totalShares', 'companyFrontShares', 'maxSharesPerEmployee', 'companyFixedAmount',
+          'totalAmount', 'endAt', 'receivingCodeId'] as const).some(field => latestRule[field] !== selectedRule[field])) {
+        throw new AppError(409, 'PROJECT_CHANGED', '采购项目或规则已变化，请刷新后重试')
       }
+      const updated = { ...latest, ruleId: latestRule.id, ...publisher,
+        total: shareRule.totalAmount, companyFixedAmount: shareRule.companyFixedAmount,
+        deadline: latestRule.endAt, status: '未满额' as const, statusType: 'primary' as const,
+        interruptReason: undefined, interruptedAt: undefined, refundNotice: undefined }
+      normalizeProjectAmounts(updated as Project)
+      const companyRecord: Subscription | undefined = shareRule.companyFrontShares > 0 ? {
+        id: `SUB-COMPANY-FRONT-${updated.id}`, projectId: updated.id, project: updated.title,
+        userId: 'company', companyKind: 'front', amount: shareRule.companyFixedAmount,
+        shares: shareRule.companyFrontShares, pay: '公司待出资', profit: updated.profitAmount,
+        action: '财务确认公司出资', idempotencyKey: `system:company-front:${updated.id}`,
+        createdAt: now(), paymentDeadlineAt: now()
+      } : undefined
+      const audit = auditRecord({ actor: manager!.label, role: manager!.role, action: '开放项目认购',
+        target: updated.id, before: { status: latest.status, total: latest.total, deadline: latest.deadline, ruleId: latest.ruleId },
+        after: { status: updated.status, total: updated.total, deadline: updated.deadline,
+          ruleId: latestRule.id, ruleName: latestRule.ruleName, publisher, companyFrontShares: shareRule.companyFrontShares } })
+      await repositories.projects.replace(updated, session)
+      if (companyRecord) await repositories.subscriptions.insert(companyRecord, session)
+      await repositories.auditLogs.insert(audit as never, session)
+      return { updated, companyRecord, audit }
+    }).catch(error => {
+      if (isDuplicateKey(error)) throw new AppError(409, 'PROJECT_PUBLISH_CONFLICT', '项目发布记录已存在，请刷新后重试')
+      throw error
     })
-    await persistState()
-    return send(res, 200, { data: project, message: `项目已按「${selectedRule.ruleName}」开放，状态为未满额` })
+    const index = projects.findIndex(item => item.id === result.updated.id)
+    if (index >= 0) projects.splice(index, 1, result.updated as Project)
+    if (result.companyRecord) subscriptions.unshift(result.companyRecord)
+    auditLogs.unshift(result.audit as AuditLog)
+    return send(res, 200, { data: result.updated, message: `项目已按「${selectedRule.ruleName}」开放，状态为未满额` })
   }
 
   if (pathname.startsWith('/api/projects/') && pathname.endsWith('/terminate')) {

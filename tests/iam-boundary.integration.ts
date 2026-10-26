@@ -58,6 +58,13 @@ try {
     companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
     employeeSubscribedAmount: 0, subscribed: 0, people: 0
   })
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-CONFLICT', title: '事务冲突测试项目', source: 'integration-test',
+    status: '未开放', statusType: 'info', progress: 0, remain: 300, deadline: '2099-12-31 23:59',
+    total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 0, subscribed: 0, people: 0
+  })
   for (const [id, ownerUserId] of [['PRJ-IAM-ADMIN-OWN', '1002'], ['PRJ-IAM-ADMIN-OTHER', '1999']]) {
     await db.collection(`${prefix}projects`).insertOne({
       id, title: id, source: 'integration-test', tenantId: '0', ownerUserId, ownerDeptId: '200',
@@ -69,12 +76,14 @@ try {
   }
   await db.collection(`${prefix}subscription_rules`).insertOne({
     id: 'RULE-IAM-PUBLISH', projectId: 'PRJ-IAM-PUBLISH', projectName: '待发布归属测试项目', ruleName: '隔离发布规则',
-    totalAmount: 300, companyFixedAmount: 0, minAmount: 100, minParticipants: 1,
+    totalAmount: 300, companyFixedAmount: 0, sharePrice: 100, totalShares: 3, companyFrontShares: 0,
+    maxSharesPerEmployee: 1, minAmount: 100, minParticipants: 1,
     allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59', updatedAt: new Date().toISOString()
   })
   for (const [id, projectId, ownerUserId] of [
     ['RULE-IAM-ADMIN-OWN', 'PRJ-IAM-ADMIN-OWN', '1002'],
-    ['RULE-IAM-ADMIN-OTHER', 'PRJ-IAM-ADMIN-OTHER', '1999']
+    ['RULE-IAM-ADMIN-OTHER', 'PRJ-IAM-ADMIN-OTHER', '1999'],
+    ['RULE-IAM-CONFLICT', 'PRJ-IAM-CONFLICT', '1002']
   ]) {
     await db.collection(`${prefix}subscription_rules`).insertOne({
       id, projectId, projectName: projectId, tenantId: '0', ownerUserId, ownerDeptId: '200',
@@ -82,6 +91,14 @@ try {
       allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59', updatedAt: new Date().toISOString()
     })
   }
+  await db.collection(`${prefix}subscription_rules`).updateOne({ id: 'RULE-IAM-CONFLICT' }, { $set: {
+    totalAmount: 200, companyFixedAmount: 100, sharePrice: 100, totalShares: 3,
+    companyFrontShares: 1, maxSharesPerEmployee: 1
+  } })
+  await db.collection(`${prefix}subscriptions`).insertOne({
+    id: 'SUB-COMPANY-FRONT-PRJ-IAM-CONFLICT', projectId: 'PRJ-IAM-CONFLICT', userId: 'company',
+    pay: '公司待出资', amount: 100
+  })
   await db.collection(`${prefix}receiving_codes`).insertOne({
     id: 'RCV-IAM-ADMIN', subject: '测试收款主体', accountNote: '隔离测试', codeName: '测试收款码',
     status: '启用', updatedBy: 'integration-test', updatedAt: new Date().toISOString()
@@ -125,11 +142,12 @@ try {
   const departmentAdmin = await request('/api/projects', { Authorization: 'Bearer smoke-admin-token' })
   assert.equal(departmentAdmin.status, 200)
   assert.deepEqual((departmentAdmin.body.data as Array<{ id: string }>).map(project => project.id).sort(),
-    ['PRJ-IAM-ADMIN-DRAFT', 'PRJ-IAM-ADMIN-OWN', 'PRJ-IAM-PUBLISH'])
+    ['PRJ-IAM-ADMIN-DRAFT', 'PRJ-IAM-ADMIN-OWN', 'PRJ-IAM-CONFLICT', 'PRJ-IAM-PUBLISH'])
   const admin = { Authorization: 'Bearer smoke-admin-token' }
   const adminRules = await request('/api/rules', admin)
   assert.equal(adminRules.status, 200)
-  assert.deepEqual((adminRules.body.data as Array<{ id: string }>).map(rule => rule.id), ['RULE-IAM-ADMIN-OWN'])
+  assert.deepEqual((adminRules.body.data as Array<{ id: string }>).map(rule => rule.id).sort(),
+    ['RULE-IAM-ADMIN-OWN', 'RULE-IAM-CONFLICT'])
   const adminSubscriptions = await request('/api/subscriptions', admin)
   assert.equal(adminSubscriptions.status, 200)
   assert.deepEqual((adminSubscriptions.body.data as Array<{ id: string }>).map(record => record.id), ['SUB-IAM-ADMIN-OWN'])
@@ -147,7 +165,8 @@ try {
     return { status: response.status, body: await response.json() as Record<string, unknown> }
   }
   const draftRule = { projectId: 'PRJ-IAM-ADMIN-DRAFT', ruleName: '管理员隔离测试规则', receivingCodeId: 'RCV-IAM-ADMIN',
-    companyFixedAmount: 0, minParticipants: 1, status: '未启用', endAt: '2099-12-31 23:59' }
+    sharePrice: 100, companyFrontShares: 1, maxSharesPerEmployee: 1,
+    minParticipants: 1, status: '未启用', endAt: '2099-12-31 23:59' }
   assert.equal((await postAs('/api/settlements/calc', 'smoke-admin-full-token', {})).status, 403)
   assert.equal((await postAs('/api/rules', 'smoke-admin-token', draftRule)).status, 403)
   const createdRule = await postAs('/api/rules', 'smoke-admin-full-token', draftRule)
@@ -159,6 +178,19 @@ try {
   assert.equal((await postAs(`/api/rules/${newRuleId}/status`, 'smoke-admin-full-token', { status: '已启用' })).status, 200)
   assert.equal((await postAs('/api/projects/PRJ-IAM-ADMIN-DRAFT/open', 'smoke-admin-full-token', { ruleId: newRuleId })).status, 200)
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-ADMIN-DRAFT' }))?.ownerUserId, '1002')
+  const front = await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-COMPANY-FRONT-PRJ-IAM-ADMIN-DRAFT' })
+  assert.equal(front?.amount, 100)
+  assert.equal(front?.shares, 1)
+  assert.equal(front?.companyKind, 'front')
+  assert.equal(front?.pay, '公司待出资')
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments(), 0)
+  assert.equal((await postAs('/api/projects/PRJ-IAM-ADMIN-DRAFT/open', 'smoke-admin-full-token', { ruleId: newRuleId })).status, 409)
+  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments({ companyKind: 'front' }), 1)
+  const conflict = await postAs('/api/projects/PRJ-IAM-CONFLICT/open', 'smoke-admin-full-token', { ruleId: 'RULE-IAM-CONFLICT' })
+  assert.equal(conflict.status, 409)
+  assert.equal(conflict.body.error, 'PROJECT_PUBLISH_CONFLICT')
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-CONFLICT' }))?.status, '未开放')
+  assert.equal(await db.collection(`${prefix}audit_logs`).countDocuments({ target: 'PRJ-IAM-CONFLICT' }), 0)
   assert.equal((await postAs('/api/projects/PRJ-IAM-ADMIN-OTHER/interrupt', 'smoke-admin-full-token', { reason: '越权测试' })).status, 404)
   const outsideScope = await request('/api/projects', { Authorization: 'Bearer smoke-admin-outside-scope-token' })
   assert.equal(outsideScope.status, 403)
@@ -190,7 +222,7 @@ try {
   }
   assert.equal((await subscribe(1, 'employee01')).status, 403)
   assert.equal((await subscribe(2)).status, 409)
-  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 2)
+  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 4)
   const subscribed = await subscribe(1)
   assert.equal(subscribed.status, 201)
   assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-sub-1-self' }))?.userId, '1001')

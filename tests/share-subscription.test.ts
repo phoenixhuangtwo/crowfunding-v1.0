@@ -12,6 +12,7 @@ test('share rule derives company and employee amounts from procurement cost', ()
     totalAmount: 200
   })
   assert.equal(calculateShareSubscription(100, 1, 200, 1, 2), 100)
+  assert.equal(prepareShareRule(300, 100, 1).maxSharesPerEmployee, 2)
 })
 
 test('share rule rejects fractional shares and incompatible cost', () => {

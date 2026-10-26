@@ -5,7 +5,7 @@ function cents(value: number, name: string) {
   return Math.round(value * 100)
 }
 
-export function prepareShareRule(costAmount: number, sharePrice: number, companyFrontShares: number, maxSharesPerEmployee: number) {
+export function prepareShareRule(costAmount: number, sharePrice: number, companyFrontShares: number, maxSharesPerEmployee?: number) {
   const costCents = cents(costAmount, '采购成本')
   const shareCents = cents(sharePrice, '每份金额')
   if (costCents % shareCents !== 0) throw new RangeError('采购成本必须能被每份金额整除')
@@ -14,14 +14,15 @@ export function prepareShareRule(costAmount: number, sharePrice: number, company
     throw new RangeError('公司前置份数必须是小于总份数的非负整数')
   }
   const employeeShares = totalShares - companyFrontShares
-  if (!Number.isSafeInteger(maxSharesPerEmployee) || maxSharesPerEmployee < 1 || maxSharesPerEmployee > employeeShares) {
+  const limit = maxSharesPerEmployee ?? employeeShares
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > employeeShares) {
     throw new RangeError('员工个人上限必须在 1 份到员工可认购份数之间')
   }
   return {
     sharePrice: shareCents / 100,
     totalShares,
     companyFrontShares,
-    maxSharesPerEmployee,
+    maxSharesPerEmployee: limit,
     companyFixedAmount: companyFrontShares * shareCents / 100,
     totalAmount: employeeShares * shareCents / 100
   }

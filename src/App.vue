@@ -1548,7 +1548,7 @@ async function submitRule() {
     try {
       if (!selectedRuleProject.value) throw new RangeError('请选择采购项目')
       shareRule = prepareShareRule(projectCostAmount(selectedRuleProject.value), Number(ruleForm.sharePrice),
-        Number(ruleForm.companyFrontShares), Number(ruleForm.maxSharesPerEmployee))
+        Number(ruleForm.companyFrontShares), ruleForm.maxSharesPerEmployee)
     } catch (error) {
       ElMessage.warning(error instanceof Error ? error.message : '份额规则无效')
       return
@@ -3761,8 +3761,9 @@ watch(() => authSession.permissionInfo.value, info => {
         <el-form-item v-if="isShareRuleForm" label="公司前置认购份数" required>
           <el-input-number v-model="ruleForm.companyFrontShares" :min="0" :precision="0" controls-position="right" />
         </el-form-item>
-        <el-form-item v-if="isShareRuleForm" label="员工个人认购上限" required>
+        <el-form-item v-if="isShareRuleForm" label="员工个人认购上限">
           <el-input-number v-model="ruleForm.maxSharesPerEmployee" :min="1" :precision="0" controls-position="right" />
+          <span class="form-unit">不填则不单独限制</span>
         </el-form-item>
         <el-form-item v-if="!isShareRuleForm" label="公司固定认购金额" required>
           <el-input-number v-model="ruleForm.companyFixedAmount" :min="0" :step="1000" controls-position="right" />
