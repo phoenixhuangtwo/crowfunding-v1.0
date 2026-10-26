@@ -42,22 +42,22 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-employee-token', userId: 1001, username: 'employee01', nickname: '员工甲', deptId: 100,
-    roles: ['employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create', 'crowdfunding:payment-proof:ocr'],
+    roles: ['crowdfunding_employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create', 'crowdfunding:payment-proof:ocr'],
     dataScope: { all: false, self: true, deptIds: [] }
   },
   {
     token: 'smoke-admin-token', userId: 1002, username: 'admin01', nickname: '部门管理员', deptId: 200,
-    roles: ['admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:takeover:query'],
+    roles: ['crowdfunding_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:takeover:query'],
     dataScope: { all: false, self: false, deptIds: [200] }
   },
   {
     token: 'smoke-finance-token', userId: 1003, username: 'finance01', nickname: '财务', deptId: 200,
-    roles: ['finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice'],
+    roles: ['crowdfunding_finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {
     token: 'smoke-super-admin-token', userId: 1004, username: 'superadmin01', nickname: '超级管理员', deptId: 900,
-    roles: ['super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query'],
+    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {

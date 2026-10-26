@@ -20,10 +20,10 @@ export function requestContext(req: IncomingMessage): RequestContext {
   const context = iamContextFor(req)
   const roles = context.roleCodes ?? []
   const selected = [
-    (roles.includes('super_admin') || roles.includes('super-admin')) && 'super_admin',
-    roles.includes('finance') && 'finance',
-    roles.includes('admin') && 'admin',
-    roles.includes('employee') && 'employee'
+    (roles.includes('crowdfunding_super_admin') || roles.includes('super_admin') || roles.includes('super-admin')) && 'super_admin',
+    (roles.includes('crowdfunding_finance') || roles.includes('finance')) && 'finance',
+    (roles.includes('crowdfunding_admin') || roles.includes('admin')) && 'admin',
+    (roles.includes('crowdfunding_employee') || roles.includes('employee')) && 'employee'
   ].filter(Boolean) as RequestContext['role'][]
   if (selected.length !== 1) throw appError(403, 'IAM_ROLE_INVALID', 'IAM 角色缺失或存在职责冲突')
   const role = selected[0]!

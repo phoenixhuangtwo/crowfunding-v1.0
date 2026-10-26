@@ -2275,9 +2275,9 @@ async function forceTakeover(project: Project) {
 watch(() => authSession.status.value, status => {
   if (status !== 'authenticated') return
   const roleCodes = authSession.permissionInfo.value?.roleCodes ?? authSession.permissionInfo.value?.roles ?? []
-  currentRole.value = roleCodes.includes('super_admin') ? 'super_admin'
-    : roleCodes.includes('finance') ? 'finance'
-    : roleCodes.includes('admin') ? 'admin' : 'employee'
+  currentRole.value = roleCodes.includes('crowdfunding_super_admin') || roleCodes.includes('super_admin') ? 'super_admin'
+    : roleCodes.includes('crowdfunding_finance') || roleCodes.includes('finance') ? 'finance'
+    : roleCodes.includes('crowdfunding_admin') || roleCodes.includes('admin') ? 'admin' : 'employee'
   const firstPage = visibleNavGroups.value[0]?.pages[0]?.key
   currentPage.value = firstPage ?? ''
   if (firstPage) void loadData()
