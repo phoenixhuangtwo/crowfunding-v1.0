@@ -44,6 +44,11 @@ try {
   await db.collection(`${prefix}subscriptions`).insertOne({ id: 'SUB-FREEZE-TEST', projectId,
     project: '采购差异隔离测试', userId: '1001', amount: 100, pay: '待复核', action: '查看支付',
     createdAt: new Date().toISOString(), paymentDeadlineAt: '2099-12-31 23:59' })
+  await db.collection(`${prefix}distribution_orders`).insertMany([
+    { id: 'DIST-FREEZE-CONFIRM', projectId, status: '待员工确认',
+      lines: [{ participantId: '1001', kind: 'employee', status: '待员工确认' }] },
+    { id: 'DIST-FREEZE-APPROVE', projectId, status: '待审批', lines: [] }
+  ])
   const port = await freePort()
   const base = `http://127.0.0.1:${port}`
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], { cwd: process.cwd(),
@@ -73,6 +78,10 @@ try {
   assert.deepEqual(stored?.procurementDifference?.fields, ['采购金额'])
   assert.equal((await post('/api/subscriptions/SUB-FREEZE-TEST/review', 'smoke-second-finance-token',
     { result: 'reject', rejectReason: '测试冻结' })).body.error, 'PROJECT_FROZEN')
+  assert.equal((await post('/api/distribution-orders/DIST-FREEZE-CONFIRM/lines/1001/confirm',
+    'smoke-employee-token', { decision: '确认' })).body.error, 'PROJECT_FROZEN')
+  assert.equal((await post('/api/distribution-orders/DIST-FREEZE-APPROVE/approve',
+    'smoke-finance-token')).status, 409)
   const denied = await post(`/api/projects/${projectId}/procurement-difference/resolve`,
     'smoke-admin-full-token', { action: 'continue', differenceDetails: '采购成本增加一元', reason: '继续按原发布金额执行' })
   assert.equal(denied.status, 403, JSON.stringify(denied.body))

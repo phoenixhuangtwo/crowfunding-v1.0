@@ -1411,6 +1411,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       || !['已审批', '打款登记中'].includes(order.status)) {
       return send(res, 409, { error: 'PAYOUT_LINE_INVALID', message: '该员工明细当前不可上传打款凭证' })
     }
+    if ((await repositories.projects.getById(order.projectId))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
     const subscription = await repositories.subscriptions.findOne({ projectId: order.projectId,
       userId: participantId, pay: '已缴款' })
     if (!subscription) return send(res, 409, { error: 'PAYOUT_SUBSCRIPTION_INVALID', message: '员工认购单不存在' })
@@ -3413,6 +3414,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         || !['待员工确认', '打款登记中'].includes(order.status)) {
         throw new AppError(409, 'PAYOUT_CONFIRM_INVALID', '收益尚未登记打款或已处理')
       }
+      if ((await repositories.projects.getById(order.projectId, session))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
       const line = order.lines[index]
       const timestamp = new Date().toISOString()
       if (decision === '确认') {
@@ -3857,7 +3859,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         }
         const project = await repositories.projects.getById(order.projectId, session)
         const rejectedVoid = action === 'void' && order.status === '已驳回'
-        if (!project || (!rejectedVoid && project.status !== '分配中')) {
+        if (!project || project.status === '已冻结' || (!rejectedVoid && project.status !== '分配中')) {
           throw new AppError(409, 'PROJECT_DISTRIBUTION_LOCKED', '众筹单状态已变化')
         }
         let next: DistributionOrder
