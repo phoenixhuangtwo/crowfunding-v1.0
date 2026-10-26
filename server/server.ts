@@ -2276,7 +2276,17 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             status: { $in: ['待审批', '已驳回'] } }, { $set: { status: '已作废',
               voidedBy: actor.userId, voidedAt: reviewedAt } }, { session })
           for (const record of updatedRecords) await repositories.subscriptions.replace(record, session)
-          if (refundOrders.length) await projectRefunds.insertMany(refundOrders, { session })
+          if (refundOrders.length) {
+            await projectRefunds.insertMany(refundOrders, { session })
+            for (const refund of refundOrders) {
+              const notice = recipientNotification({ type: '众筹关闭退款', sourceId: refund.id,
+                recipientId: refund.participantId, projectId: refund.projectId,
+                subscriptionId: refund.subscriptionId,
+                content: `众筹单【${refund.projectId}】已终止，您的认购款将退还，请留意退款并确认`,
+                targetPage: 'myPayouts', createdAt: reviewedAt })
+              await notifications.insertOne(notice, { session })
+            }
+          }
         }
         const audit = auditRecord({ actor: actor.label, role: actor.role, action: '复核采购失败终止',
           target: id, before: { status: request.status }, after: { status: reviewed.status,
@@ -2352,7 +2362,17 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
           ...(status === '已关闭' ? { closedAt: new Date().toISOString(), closedBy: actor.userId } : {}) } as Project
         await repositories.projects.replace(updatedProject, session)
         for (const record of updatedRecords) await repositories.subscriptions.replace(record, session)
-        if (refundOrders.length) await projectRefunds.insertMany(refundOrders, { session })
+        if (refundOrders.length) {
+          await projectRefunds.insertMany(refundOrders, { session })
+          for (const refund of refundOrders) {
+            const notice = recipientNotification({ type: '众筹关闭退款', sourceId: refund.id,
+              recipientId: refund.participantId, projectId: refund.projectId,
+              subscriptionId: refund.subscriptionId,
+              content: `众筹单【${refund.projectId}】已关闭，您的认购款将退还，请留意退款并确认`,
+              targetPage: 'myPayouts', createdAt: refund.createdAt })
+            await notifications.insertOne(notice, { session })
+          }
+        }
         const audit = auditRecord({ actor: actor.label, role: actor.role, action: '发起众筹关闭',
           target: projectId, before: { status: project.status },
           after: { status, reason, refundCount: refundOrders.length,

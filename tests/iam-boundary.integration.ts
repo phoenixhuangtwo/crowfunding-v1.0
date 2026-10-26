@@ -775,6 +775,8 @@ try {
   const closingProject = await postAs(closeProjectPath, 'smoke-admin-full-token', { reason: '供应商取消订单需要关闭项目' })
   assert.equal(closingProject.status, 200, JSON.stringify(closingProject.body))
   assert.equal((closingProject.body.data as { status: string }).status, '关闭中')
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '众筹关闭退款', recipientId: '1001', projectId: 'PRJ-IAM-CLOSE' }), 1)
   assert.equal((await postAs(closeProjectPath, 'smoke-admin-full-token', { reason: '重复发起关闭请求' })).status, 409)
   const refundList = await request('/api/project-refunds?projectId=PRJ-IAM-CLOSE',
     { Authorization: 'Bearer smoke-finance-token' })
@@ -887,6 +889,8 @@ try {
   const failApproved = await postAs(reviewFailPath, 'smoke-super-admin-token', { action: 'approve' })
   assert.equal(failApproved.status, 200, JSON.stringify(failApproved.body))
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-FAIL' }))?.status, '采购失败终止中')
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '众筹关闭退款', recipientId: '1001', projectId: 'PRJ-IAM-FAIL' }), 1)
   assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: 'DIST-IAM-FAIL-PENDING' }))?.status, '已作废')
   const failRefund = await db.collection(`${prefix}project_refunds`).findOne({ projectId: 'PRJ-IAM-FAIL' })
   assert.equal(failRefund?.amountCents, 7000)
