@@ -30,6 +30,7 @@ import { validateCostRegistration, type ConfirmedCost } from './finance/confirme
 import { reconcileProjectFinancials } from './finance/financial-reconciliation.ts'
 import { validateProjectRefundPayment, type ProjectRefund } from './finance/project-refunds.ts'
 import { validateSupplierRefund, type ProcurementFailureRequest, type SupplierRefund } from './finance/procurement-failure.ts'
+import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from './finance/receipt-termination-refunds.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -309,6 +310,7 @@ const exceptionFunds = mongo.db.collection<ExceptionFund>(`${appConfig.mongodb.c
 const projectRefunds = mongo.db.collection<ProjectRefund>(`${appConfig.mongodb.collectionPrefix}project_refunds`)
 const procurementFailureRequests = mongo.db.collection<ProcurementFailureRequest>(`${appConfig.mongodb.collectionPrefix}procurement_failure_requests`)
 const supplierRefunds = mongo.db.collection<SupplierRefund>(`${appConfig.mongodb.collectionPrefix}supplier_refunds`)
+const receiptTerminationRefunds = mongo.db.collection<ReceiptTerminationRefund>(`${appConfig.mongodb.collectionPrefix}receipt_termination_refunds`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -899,6 +901,13 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, { data: await supplierRefunds.find(projectId ? { projectId } : {})
       .sort({ createdAt: -1 }).limit(200).toArray() })
   }
+  if (pathname === '/api/receipt-termination-refunds') {
+    const context = requestContext(req)
+    if (!['finance', 'super_admin'].includes(context.role)) throw new AppError(403, 'FORBIDDEN', '无权查看原回款退回')
+    const projectId = searchParams.get('projectId')?.trim()
+    return send(res, 200, { data: await receiptTerminationRefunds.find(projectId ? { projectId } : {})
+      .sort({ createdAt: -1 }).limit(200).toArray() })
+  }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()
@@ -1111,6 +1120,25 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'supplier-refund-proof',
       ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
     return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '供应商退款凭证已保存' })
+  }
+  const receiptTerminationRefundProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-termination-refund-proofs$/)
+  if (receiptTerminationRefundProofMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(receiptTerminationRefundProofMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project || project.status !== '采购失败终止中') {
+      return send(res, 409, { error: 'PROJECT_NOT_TERMINATING', message: '众筹单当前不可上传原回款退回凭证' })
+    }
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId: projectId,
+      purpose: 'receipt-termination-refund-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'RECEIPT_TERMINATION_REFUND_PROOF_LIMIT', message: '暂存退回凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'receipt-termination-refund-proof',
+      ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '原回款退回凭证已保存' })
   }
   const receiptProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-proofs$/)
   if (receiptProofMatch) {
@@ -1657,6 +1685,10 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         let updatedProject: Project | undefined
         const updatedRecords: Subscription[] = []
         if (action === 'approve') {
+          if (await receiptBatches.countDocuments({ 'lines.projectId': project.id,
+            status: '待复核' }, { session })) {
+            throw new AppError(409, 'PROCUREMENT_FAILURE_PENDING_RECEIPT', '仍有待复核回款，请先核对到账或驳回')
+          }
           const records = await repositories.subscriptions.list({ projectId: project.id }, {}, session)
           if (records.some(record => record.pay === '待复核' || record.pay === '待确认收款')) {
             throw new AppError(409, 'PROCUREMENT_FAILURE_PENDING_REVIEW', '仍有待复核款项，请先核对到账并处理异常款项')
@@ -1955,6 +1987,124 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       throw error
     }
   }
+  const receiptTerminationRefundMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-termination-refunds$/)
+  if (receiptTerminationRefundMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(receiptTerminationRefundMatch[1])
+    const receiptBatchId = typeof body.receiptBatchId === 'string' ? body.receiptBatchId.trim() : ''
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'RECEIPT_TERMINATION_REFUND_PROOFS_INVALID', message: '请提供原回款退回凭证编号' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        const batch = await receiptBatches.findOne({ id: receiptBatchId }, { session })
+        if (!project || project.status !== '采购失败终止中' || !batch || batch.status !== '已通过') {
+          throw new AppError(409, 'RECEIPT_TERMINATION_REFUND_STATE_INVALID', '众筹单或原回款当前不可退回')
+        }
+        if (await receiptDifferences.countDocuments({ projectId }, { session })) {
+          throw new AppError(409, 'RECEIPT_DIFFERENCES_PENDING', '该项目已有超额回款差异，请先核对避免重复退回')
+        }
+        const originalCents = batch.lines.filter(line => line.projectId === projectId)
+          .reduce((sum, line) => sum + line.amountCents, 0)
+        const alreadyReturnedCents = (batch.returns ?? []).filter(line => line.projectId === projectId)
+          .reduce((sum, line) => sum + line.amountCents, 0)
+        if (originalCents <= alreadyReturnedCents) {
+          throw new AppError(409, 'RECEIPT_TERMINATION_REFUND_EMPTY', '该原回款没有可退余额')
+        }
+        const existing = await receiptTerminationRefunds.find({ projectId, receiptBatchId,
+          status: { $ne: '已驳回' } }, { session }).toArray()
+        const reservedCents = existing.reduce((sum, item) => sum + item.amountCents, 0)
+        const record = validateReceiptTerminationRefund({ id: `RTR-${randomUUID()}`, projectId,
+          receiptBatchId, kind: batch.kind, amountCents: body.amountCents as number,
+          transactionNo: typeof body.transactionNo === 'string' ? body.transactionNo : '',
+          paidAt: body.paidAt as string, proofAssetIds: body.proofAssetIds as string[],
+          manualVerificationNote: typeof body.manualVerificationNote === 'string' ? body.manualVerificationNote : '',
+          registeredBy: actor.userId }, originalCents - alreadyReturnedCents - reservedCents, new Date())
+        const occupied = await bankTransactions.findOne({ transactionNo: record.transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .findOne({ transactionNo: record.transactionNo }, { session })
+        if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '退回流水号已被使用')
+        for (const assetId of record.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'receipt-termination-refund-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== projectId || asset.createdBy !== actor.userId
+            || await receiptTerminationRefunds.findOne({ proofAssetIds: assetId }, { session })) {
+            throw new AppError(409, 'RECEIPT_TERMINATION_REFUND_PROOF_INVALID', '退回凭证不存在、未留存或已被使用')
+          }
+        }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId, status: '采购失败终止中' }, { $inc: { refundRevision: 1 } }, { session })
+        await receiptTerminationRefunds.insertOne(record, { session })
+        await bankTransactions.insertOne({ transactionNo: record.transactionNo,
+          sourceKey: `receipt-termination-refund:${record.id}`, projectId,
+          createdAt: record.createdAt }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记采购失败原回款退回',
+          target: record.id, before: {}, after: { projectId, receiptBatchId,
+            amountCents: record.amountCents, transactionNo: record.transactionNo } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { record, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.record, message: '退回已登记，请等待公司核实' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'RECEIPT_TERMINATION_REFUND_DUPLICATE', message: '退回流水号或单据已登记' })
+      if (error instanceof Error && /退回|退款|流水号|凭证|时间|金额/.test(error.message)) {
+        return send(res, 400, { error: 'RECEIPT_TERMINATION_REFUND_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const receiptTerminationReviewMatch = pathname.match(/^\/api\/receipt-termination-refunds\/([^/]+)\/review$/)
+  if (receiptTerminationReviewMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const id = decodeURIComponent(receiptTerminationReviewMatch[1])
+    const action = body.action === 'approve' ? 'approve' : body.action === 'reject' ? 'reject' : ''
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (!action || (action === 'reject' && (reason.length < 5 || reason.length > 200))) {
+      return send(res, 400, { error: 'RECEIPT_TERMINATION_REVIEW_INVALID', message: '复核操作无效，驳回原因须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const record = await receiptTerminationRefunds.findOne({ id }, { session })
+        if (!record || record.status !== '待公司确认') throw new AppError(409, 'RECEIPT_TERMINATION_REFUND_CHANGED', '退回单不存在或已复核')
+        const project = await repositories.projects.getById(record.projectId, session)
+        if (!project || project.status !== '采购失败终止中') throw new AppError(409, 'PROJECT_NOT_TERMINATING', '众筹单状态已变化')
+        if (record.registeredBy === actor.userId) throw new AppError(403, 'SELF_REVIEW_FORBIDDEN', '退回登记人不能复核本人单据')
+        const reviewedAt = new Date().toISOString()
+        const next: ReceiptTerminationRefund = { ...record,
+          status: action === 'approve' ? '已完成' : '已驳回', reviewedBy: actor.userId,
+          reviewedAt, ...(action === 'reject' ? { reviewReason: reason } : {}) }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: '采购失败终止中' }, { $inc: { refundRevision: 1 } }, { session })
+        const changed = await receiptTerminationRefunds.replaceOne({ id, status: '待公司确认' }, next, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'RECEIPT_TERMINATION_REFUND_CHANGED', '退回单已变化')
+        if (action === 'approve') {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+            id: `LED-${randomUUID()}`, sourceKey: `receipt-termination-refund:${id}`,
+            type: 'receipt_termination_refund', projectId: record.projectId,
+            amountCents: record.amountCents, transactionNo: record.transactionNo,
+            transactionKey: `receipt-termination-refund:${id}`, proofAssetIds: record.proofAssetIds,
+            reviewedBy: actor.userId, createdAt: reviewedAt
+          }, { session })
+        } else {
+          await bankTransactions.deleteOne({ transactionNo: record.transactionNo,
+            sourceKey: `receipt-termination-refund:${id}` }, { session })
+        }
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '复核采购失败原回款退回',
+          target: id, before: { status: record.status }, after: { status: next.status,
+            reviewReason: next.reviewReason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { next, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.next, message: action === 'approve' ? '退回已核实' : '已驳回' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      throw error
+    }
+  }
   const finishProcurementFailureMatch = pathname.match(/^\/api\/projects\/([^/]+)\/finish-procurement-failure$/)
   if (finishProcurementFailureMatch) {
     const actor = financeOperator(req)
@@ -1971,9 +2121,39 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         }
         const pending = await projectRefunds.countDocuments({ projectId, status: { $ne: '已退款' } }, { session })
         if (pending) throw new AppError(409, 'PROJECT_REFUNDS_PENDING', `仍有 ${pending} 笔员工退款待确认`)
-        const receipts = await receiptBatches.countDocuments({ 'lines.projectId': projectId,
-          status: { $ne: '已驳回' } }, { session })
-        if (receipts) throw new AppError(409, 'CUSTOMER_RECEIPTS_PENDING_REFUND', '已有客户回款，请先核对并通过异常款项完成退回')
+        const receiptRecords = await receiptBatches.find({ 'lines.projectId': projectId,
+          status: { $ne: '已驳回' } }, { session }).toArray()
+        if (receiptRecords.some(item => item.status !== '已通过')) {
+          throw new AppError(409, 'CUSTOMER_RECEIPTS_PENDING_REVIEW', '仍有待复核回款，请先完成复核或驳回')
+        }
+        const differences = await receiptDifferences.countDocuments({ projectId }, { session })
+        if (differences) throw new AppError(409, 'RECEIPT_DIFFERENCES_PENDING', '该项目有超额回款差异，请先核对其退回归属')
+        const expectedReceiptRefundCents = receiptRecords.reduce((sum, batch) => sum
+          + batch.lines.filter(line => line.projectId === projectId).reduce((part, line) => part + line.amountCents, 0)
+          - (batch.returns ?? []).filter(line => line.projectId === projectId)
+            .reduce((part, line) => part + line.amountCents, 0), 0)
+        const pendingReceiptRefunds = await receiptTerminationRefunds.countDocuments({ projectId,
+          status: '待公司确认' }, { session })
+        const confirmedReceiptRefunds = await receiptTerminationRefunds.find({ projectId,
+          status: '已完成' }, { session }).toArray()
+        const confirmedReceiptRefundCents = confirmedReceiptRefunds.reduce((sum, item) => sum + item.amountCents, 0)
+        const receiptLedgerRows = await mongo.db.collection<{ type: string; amountCents: number }>(
+          `${appConfig.mongodb.collectionPrefix}fund_ledger`)
+          .find({ projectId, type: { $in: ['customer_receipt', 'company_topup',
+            'company_topup_return', 'receipt_termination_refund'] } }, { session }).toArray()
+        const bookedReceiptCents = receiptLedgerRows.filter(item => item.type === 'customer_receipt'
+          || item.type === 'company_topup').reduce((sum, item) => sum + item.amountCents, 0)
+          - receiptLedgerRows.filter(item => item.type === 'company_topup_return')
+            .reduce((sum, item) => sum + item.amountCents, 0)
+        const bookedRefundCents = receiptLedgerRows.filter(item => item.type === 'receipt_termination_refund')
+          .reduce((sum, item) => sum + item.amountCents, 0)
+        if (bookedReceiptCents !== expectedReceiptRefundCents || bookedRefundCents !== confirmedReceiptRefundCents) {
+          throw new AppError(409, 'RECEIPT_REFUND_LEDGER_INCONSISTENT', '原回款及退回资金台账不相符')
+        }
+        if (pendingReceiptRefunds || confirmedReceiptRefundCents !== expectedReceiptRefundCents) {
+          throw new AppError(409, 'CUSTOMER_RECEIPTS_PENDING_REFUND',
+            `原回款尚未足额退回并经公司核实，差额 ${((expectedReceiptRefundCents - confirmedReceiptRefundCents) / 100).toFixed(2)} 元`)
+        }
         const exceptions = await exceptionFunds.countDocuments({ projectId, remainingCents: { $gt: 0 } }, { session })
         if (exceptions) throw new AppError(409, 'EXCEPTION_FUNDS_PENDING', `仍有 ${exceptions} 笔异常款项未处理`)
         const contributions = await fundLedger.listProjectContributions(projectId, session)
@@ -1994,7 +2174,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const companyReturnCents = Math.max(0, supplierCents - employeeCents)
         const companyLossCents = payment.amountCents - supplierCents
         const netCents = employeeCents + companyCents + companyBackstopCents + supplierCents
-          - payment.amountCents - employeeRefundCents - companyReturnCents
+          + expectedReceiptRefundCents - payment.amountCents - employeeRefundCents
+          - companyReturnCents - confirmedReceiptRefundCents
         if (netCents !== 0) throw new AppError(409, 'PROCUREMENT_FAILURE_NET_NONZERO', `台账净额不为零：${(netCents / 100).toFixed(2)} 元`)
         const finishedAt = new Date().toISOString()
         for (const [type, amountCents] of [
@@ -2015,10 +2196,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const audit = auditRecord({ actor: actor.label, role: 'finance', action: '完成采购失败终止',
           target: projectId, before: { status: project.status }, after: { status: '已终止',
             supplierCents, employeeRefundCents, companyBackstopCents, companyReturnCents, companyLossCents,
+            expectedReceiptRefundCents, confirmedReceiptRefundCents,
             netCents, supplierRefundFinalConfirmed: true } }) as AuditLog
         await repositories.auditLogs.insert(audit as never, session)
         return { audit, finishedAt, supplierCents, employeeRefundCents, companyBackstopCents,
-          companyReturnCents, companyLossCents, netCents }
+          companyReturnCents, companyLossCents, expectedReceiptRefundCents, confirmedReceiptRefundCents, netCents }
       })
       const index = projects.findIndex(item => item.id === projectId)
       if (index >= 0) projects.splice(index, 1, { ...projects[index], status: '已终止',

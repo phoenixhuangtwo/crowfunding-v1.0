@@ -7,12 +7,26 @@ import { readAccessToken } from '../auth/session'
 type Project = { id: string; title: string; status: string }
 type FailureRequest = { id: string; projectId: string; reason: string; status: string; requestedAt: string; reviewReason?: string }
 type SupplierRefund = { id: string; projectId: string; amountCents: number; transactionNo: string; refundedAt: string; proofAssetIds: string[] }
+type ReceiptBatch = { id: string; kind: string; status: string; lines: Array<{ projectId: string; amountCents: number }>;
+  returns?: Array<{ projectId: string; amountCents: number }> }
+type ReceiptTerminationRefund = { id: string; projectId: string; receiptBatchId: string; kind: string;
+  amountCents: number; transactionNo: string; paidAt: string; proofAssetIds: string[]; status: string; reviewReason?: string }
 const props = defineProps<{ projects: Project[]; role: 'admin' | 'finance' | 'super_admin'; canQueryRequests: boolean;
-  canReview: boolean; canQueryRefunds: boolean; canRegisterRefund: boolean; canUploadProof: boolean; canFinish: boolean }>()
+  canReview: boolean; canQueryRefunds: boolean; canRegisterRefund: boolean; canUploadProof: boolean; canFinish: boolean;
+  canQueryReceiptRefunds: boolean; canRegisterReceiptRefund: boolean; canUploadReceiptRefundProof: boolean;
+  canReviewReceiptRefund: boolean; canQueryReceipts: boolean }>()
 const emit = defineEmits<{ updated: [] }>()
 const projectId = ref('')
 const requests = ref<FailureRequest[]>([])
 const refunds = ref<SupplierRefund[]>([])
+const receiptBatches = ref<ReceiptBatch[]>([])
+const receiptRefunds = ref<ReceiptTerminationRefund[]>([])
+const receiptBatchId = ref('')
+const receiptRefundAmount = ref<number>()
+const receiptRefundTransactionNo = ref('')
+const receiptRefundPaidAt = ref('')
+const receiptRefundNote = ref('')
+const receiptRefundProofs = ref<Array<{ id: string; fileName: string }>>([])
 const amount = ref<number>()
 const transactionNo = ref('')
 const refundedAt = ref('')
@@ -36,7 +50,88 @@ async function refresh() {
       const result = await apiRequest<{ data: SupplierRefund[] }>(`/api/supplier-refunds${query}`)
       refunds.value = result.data
     }
+    if (props.canQueryReceiptRefunds) {
+      const query = projectId.value ? `?projectId=${encodeURIComponent(projectId.value)}` : ''
+      const result = await apiRequest<{ data: ReceiptTerminationRefund[] }>(`/api/receipt-termination-refunds${query}`)
+      receiptRefunds.value = result.data
+    }
+    if (props.canQueryReceipts && projectId.value) {
+      const all: ReceiptBatch[] = []
+      let page = 1; let total = 0
+      do {
+        const result = await apiRequest<{ data: { items: ReceiptBatch[]; total: number } }>(
+          `/api/receipt-batches?projectId=${encodeURIComponent(projectId.value)}&page=${page}&pageSize=100`)
+        all.push(...result.data.items); total = result.data.total; page++
+      } while (all.length < total && page <= 100)
+      receiptBatches.value = all.filter(batch => batch.status === '已通过')
+    } else receiptBatches.value = []
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '读取采购失败事项失败') }
+}
+function receiptAvailable(batch: ReceiptBatch) {
+  const gross = batch.lines.filter(line => line.projectId === projectId.value)
+    .reduce((sum, line) => sum + line.amountCents, 0)
+  const returned = (batch.returns ?? []).filter(line => line.projectId === projectId.value)
+    .reduce((sum, line) => sum + line.amountCents, 0)
+  const reserved = receiptRefunds.value.filter(item => item.receiptBatchId === batch.id
+    && item.projectId === projectId.value && item.status !== '已驳回')
+    .reduce((sum, item) => sum + item.amountCents, 0)
+  return gross - returned - reserved
+}
+async function uploadReceiptRefundProofs(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!projectId.value || receiptRefundProofs.value.length + files.length > 5) {
+    ElMessage.warning('请先选择众筹单，且最多上传 5 张凭证'); return
+  }
+  busy.value = true
+  try {
+    for (const file of files) {
+      const form = new FormData(); form.set('image', file)
+      const result = await apiRequest<{ data: { id: string; fileName: string } }>(
+        `/api/projects/${encodeURIComponent(projectId.value)}/receipt-termination-refund-proofs`,
+        { method: 'POST', body: form })
+      receiptRefundProofs.value.push(result.data)
+    }
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '上传原回款退回凭证失败') }
+  finally { busy.value = false }
+}
+async function registerReceiptRefund() {
+  if (!projectId.value || !receiptBatchId.value || !receiptRefundAmount.value || !receiptRefundPaidAt.value
+    || !receiptRefundProofs.value.length || receiptRefundNote.value.trim().length < 5) {
+    ElMessage.warning('请选择原回款并填写金额、时间、核验说明及凭证'); return
+  }
+  busy.value = true
+  try {
+    const result = await apiRequest<{ message: string }>(
+      `/api/projects/${encodeURIComponent(projectId.value)}/receipt-termination-refunds`, {
+        method: 'POST', body: JSON.stringify({ receiptBatchId: receiptBatchId.value,
+          amountCents: Math.round(receiptRefundAmount.value * 100),
+          transactionNo: receiptRefundTransactionNo.value.trim(),
+          paidAt: new Date(receiptRefundPaidAt.value).toISOString(),
+          proofAssetIds: receiptRefundProofs.value.map(item => item.id),
+          manualVerificationNote: receiptRefundNote.value.trim() }) })
+    ElMessage.success(result.message)
+    receiptBatchId.value = ''; receiptRefundAmount.value = undefined; receiptRefundTransactionNo.value = ''
+    receiptRefundPaidAt.value = ''; receiptRefundProofs.value = []; receiptRefundNote.value = ''
+    await refresh(); emit('updated')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '登记原回款退回失败') }
+  finally { busy.value = false }
+}
+async function reviewReceiptRefund(item: ReceiptTerminationRefund, action: 'approve' | 'reject') {
+  let reason = ''
+  try {
+    if (action === 'approve') await ElMessageBox.confirm('请核实原回款确已线下退回对应付款方。确认通过？', '复核原回款退回', { type: 'warning' })
+    else reason = (await ElMessageBox.prompt('请输入 5 至 200 字驳回原因', '驳回退回登记', { inputType: 'textarea' })).value.trim()
+  } catch { return }
+  if (action === 'reject' && (reason.length < 5 || reason.length > 200)) { ElMessage.warning('驳回原因须为 5 至 200 字'); return }
+  busy.value = true
+  try {
+    const result = await apiRequest<{ message: string }>(`/api/receipt-termination-refunds/${encodeURIComponent(item.id)}/review`, {
+      method: 'POST', body: JSON.stringify({ action, reason }) })
+    ElMessage.success(result.message); await refresh(); emit('updated')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '复核退回失败') }
+  finally { busy.value = false }
 }
 async function review(item: FailureRequest, action: 'approve' | 'reject') {
   let reason = ''
@@ -119,6 +214,8 @@ async function openProof(assetId: string) {
       </el-table>
     </section>
     <section v-if="canQueryRefunds" class="panel"><h2>供应商退款记录</h2><el-table :data="refunds" empty-text="暂无供应商退款" style="width:100%"><el-table-column prop="projectId" label="众筹单" min-width="170" /><el-table-column label="退款金额" width="135"><template #default="scope">{{ money(scope.row.amountCents) }}</template></el-table-column><el-table-column prop="transactionNo" label="银行流水号" min-width="160" /><el-table-column prop="refundedAt" label="退回时间" min-width="160" /><el-table-column label="凭证" width="100"><template #default="scope"><el-button v-for="id in scope.row.proofAssetIds" :key="id" link type="primary" @click="openProof(id)">查看</el-button></template></el-table-column></el-table></section>
+    <section v-if="canQueryReceiptRefunds" class="panel"><h2>原回款退回记录</h2><el-table :data="receiptRefunds" empty-text="暂无原回款退回" style="width:100%"><el-table-column prop="projectId" label="众筹单" min-width="150" /><el-table-column prop="receiptBatchId" label="原回款单" min-width="150" /><el-table-column prop="kind" label="类型" width="100" /><el-table-column label="退回金额" width="125"><template #default="scope">{{ money(scope.row.amountCents) }}</template></el-table-column><el-table-column prop="transactionNo" label="退回流水" min-width="150" /><el-table-column prop="status" label="状态" width="110" /><el-table-column label="凭证" width="90"><template #default="scope"><el-button v-for="id in scope.row.proofAssetIds" :key="id" link type="primary" @click="openProof(id)">查看</el-button></template></el-table-column><el-table-column v-if="canReviewReceiptRefund" label="操作" width="130"><template #default="scope"><template v-if="scope.row.status === '待公司确认'"><el-button link type="primary" :disabled="busy" @click="reviewReceiptRefund(scope.row, 'approve')">通过</el-button><el-button link type="danger" :disabled="busy" @click="reviewReceiptRefund(scope.row, 'reject')">驳回</el-button></template></template></el-table-column></el-table></section>
+    <section v-if="role === 'finance' && canRegisterReceiptRefund && terminating" class="panel"><h2>登记原回款退回</h2><el-alert type="warning" :closable="false" title="请先将原客户回款或公司补款实际退回对应付款方，并核对银行流水。系统不发起转账。" /><el-form label-width="130px" class="form"><el-form-item label="原回款单" required><el-select v-model="receiptBatchId" filterable placeholder="选择已复核原回款"><el-option v-for="batch in receiptBatches.filter(item => receiptAvailable(item) > 0)" :key="batch.id" :value="batch.id" :label="`${batch.id} · ${batch.kind} · 可退 ${money(receiptAvailable(batch))}`" /></el-select></el-form-item><el-form-item label="退回金额（元）" required><el-input-number v-model="receiptRefundAmount" :min="0.01" :precision="2" :step="0.01" /></el-form-item><el-form-item label="退回流水号" required><el-input v-model="receiptRefundTransactionNo" maxlength="64" /></el-form-item><el-form-item label="实际退回时间" required><input v-model="receiptRefundPaidAt" type="datetime-local" /></el-form-item><el-form-item label="退回凭证" required><div><input v-if="canUploadReceiptRefundProof" type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="busy" @change="uploadReceiptRefundProofs" /><div v-for="asset in receiptRefundProofs" :key="asset.id">{{ asset.fileName }}</div></div></el-form-item><el-form-item label="人工核验说明" required><el-input v-model="receiptRefundNote" type="textarea" maxlength="200" /></el-form-item><el-form-item><el-button type="primary" :loading="busy" :disabled="!canUploadReceiptRefundProof" @click="registerReceiptRefund">登记退回并提交公司核实</el-button></el-form-item></el-form></section>
     <section v-if="role === 'finance' && canRegisterRefund && terminating" class="panel"><h2>登记供应商退款</h2><el-alert type="warning" :closable="false" title="系统仅记录已发生的线下退款，请先核对银行到账与凭证。可分多次登记。" /><el-form label-width="125px" class="form"><el-form-item label="退款金额（元）" required><el-input-number v-model="amount" :min="0.01" :precision="2" :step="0.01" /></el-form-item><el-form-item label="银行流水号" required><el-input v-model="transactionNo" maxlength="64" /></el-form-item><el-form-item label="实际退回时间" required><input v-model="refundedAt" type="datetime-local" /></el-form-item><el-form-item label="退款凭证" required><div><input v-if="canUploadProof" type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="busy" @change="uploadProofs" /><div v-for="asset in proofs" :key="asset.id">{{ asset.fileName }}</div></div></el-form-item><el-form-item label="人工核验说明" required><el-input v-model="manualVerificationNote" type="textarea" maxlength="200" /></el-form-item><el-form-item><el-button type="primary" :loading="busy" :disabled="!canUploadProof" @click="registerRefund">登记退款</el-button></el-form-item></el-form></section>
   </div>
 </template>

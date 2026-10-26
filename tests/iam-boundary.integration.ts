@@ -774,6 +774,16 @@ try {
       transactionKey: 'bank:BANK-IAM-FAIL-PROCUREMENT', proofAssetIds: [],
       reviewedBy: '1003', createdAt: new Date().toISOString() }
   ])
+  await db.collection(`${prefix}receipt_batches`).insertOne({ id: 'RB-IAM-FAIL', kind: '客户回款',
+    transactionNo: 'BANK-IAM-FAIL-RECEIPT', bookedAt: new Date().toISOString(),
+    totalCents: 2000, lines: [{ projectId: 'PRJ-IAM-FAIL', amountCents: 2000 }],
+    proofAssetIds: [], registeredBy: '1003', status: '已通过', reviewedBy: '1008',
+    reviewedAt: new Date().toISOString() })
+  await db.collection(`${prefix}fund_ledger`).insertOne({ id: 'LED-IAM-FAIL-RECEIPT',
+    sourceKey: 'receipt:RB-IAM-FAIL:PRJ-IAM-FAIL', type: 'customer_receipt',
+    projectId: 'PRJ-IAM-FAIL', amountCents: 2000, transactionNo: 'BANK-IAM-FAIL-RECEIPT',
+    transactionKey: 'receipt:RB-IAM-FAIL:PRJ-IAM-FAIL', proofAssetIds: [],
+    reviewedBy: '1008', createdAt: new Date().toISOString() })
   const failPath = '/api/projects/PRJ-IAM-FAIL/procurement-failure'
   assert.equal((await postAs(failPath, 'smoke-finance-token', { reason: '供应商未能完成采购交付' })).status, 403)
   const failRequested = await postAs(failPath, 'smoke-admin-full-token', { reason: '供应商未能完成采购交付' })
@@ -789,6 +799,11 @@ try {
     pay: '待复核', idempotencyKey: 'SUB-IAM-FAIL-PENDING' })
   assert.equal((await postAs(reviewFailPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
   await db.collection(`${prefix}subscriptions`).deleteOne({ id: 'SUB-IAM-FAIL-PENDING' })
+  await db.collection(`${prefix}receipt_batches`).insertOne({ id: 'RB-IAM-FAIL-PENDING', kind: '客户回款',
+    status: '待复核', lines: [{ projectId: 'PRJ-IAM-FAIL', amountCents: 100 }],
+    totalCents: 100, bookedAt: new Date().toISOString() })
+  assert.equal((await postAs(reviewFailPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
+  await db.collection(`${prefix}receipt_batches`).deleteOne({ id: 'RB-IAM-FAIL-PENDING' })
   const failApproved = await postAs(reviewFailPath, 'smoke-super-admin-token', { action: 'approve' })
   assert.equal(failApproved.status, 200, JSON.stringify(failApproved.body))
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-FAIL' }))?.status, '采购失败终止中')
@@ -806,7 +821,13 @@ try {
       objectKey: 'test/subscription-refund-proof/ASSET-IAM-FAIL-EMPLOYEE.png', originalName: 'employee.png',
       extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'b'.repeat(64),
       purpose: 'subscription-refund-proof', ownerType: 'subscription', ownerId: 'SUB-IAM-FAIL',
-      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' }
+      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' },
+    { id: 'ASSET-IAM-FAIL-RECEIPT-REFUND', provider: 'tencent-cos', bucket: 'test', region: 'test',
+      objectKey: 'test/receipt-termination-refund-proof/ASSET-IAM-FAIL-RECEIPT-REFUND.png',
+      originalName: 'receipt-refund.png', extension: 'png', mimeType: 'image/png', sizeBytes: 8,
+      sha256: 'c'.repeat(64), purpose: 'receipt-termination-refund-proof', ownerType: 'project',
+      ownerId: 'PRJ-IAM-FAIL', status: 'ready', createdBy: '1003',
+      createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' }
   ])
   const supplierPath = '/api/projects/PRJ-IAM-FAIL/supplier-refunds'
   const supplierInput = { amountCents: 6000, transactionNo: 'BANK-IAM-FAIL-SUPPLIER',
@@ -824,6 +845,22 @@ try {
     manualVerificationNote: '已人工核对员工全额退款流水' })
   assert.equal(failRefundPayment.status, 200, JSON.stringify(failRefundPayment.body))
   assert.equal((await postAs(`/api/project-refunds/${failRefund?.id}/confirm`, 'smoke-employee-token', {})).status, 200)
+  assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
+  const receiptRefundPath = '/api/projects/PRJ-IAM-FAIL/receipt-termination-refunds'
+  const receiptRefundInput = { receiptBatchId: 'RB-IAM-FAIL', amountCents: 2000,
+    transactionNo: 'BANK-IAM-FAIL-RECEIPT-REFUND', paidAt: new Date(Date.now() - 60_000).toISOString(),
+    proofAssetIds: ['ASSET-IAM-FAIL-RECEIPT-REFUND'], manualVerificationNote: '已核对原客户回款退回银行流水' }
+  assert.equal((await postAs(receiptRefundPath, 'smoke-employee-token', receiptRefundInput)).status, 403)
+  assert.equal((await postAs(receiptRefundPath, 'smoke-finance-token', {
+    ...receiptRefundInput, amountCents: 2001 })).status, 400)
+  const receiptRefundCreated = await postAs(receiptRefundPath, 'smoke-finance-token', receiptRefundInput)
+  assert.equal(receiptRefundCreated.status, 201, JSON.stringify(receiptRefundCreated.body))
+  const receiptRefundId = (receiptRefundCreated.body.data as { id: string }).id
+  assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
+  const receiptReviewPath = `/api/receipt-termination-refunds/${receiptRefundId}/review`
+  assert.equal((await postAs(receiptReviewPath, 'smoke-finance-token', { action: 'approve' })).status, 403)
+  assert.equal((await postAs(receiptReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 200)
+  assert.equal((await postAs(receiptReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
   const failFinished = await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })
   assert.equal(failFinished.status, 200, JSON.stringify(failFinished.body))
   assert.equal((failFinished.body.data as { companyBackstopCents: number; companyLossCents: number }).companyBackstopCents, 1000)

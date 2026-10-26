@@ -3360,6 +3360,11 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-register-refund="canApi(authSession.permissionInfo.value, 'crowdfunding:supplier-refund:register')"
           :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:supplier-refund:proof-upload')"
           :can-finish="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:finish')"
+          :can-query-receipts="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt:query')"
+          :can-query-receipt-refunds="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt-termination-refund:query')"
+          :can-register-receipt-refund="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt-termination-refund:register')"
+          :can-upload-receipt-refund-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt-termination-refund:proof-upload')"
+          :can-review-receipt-refund="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt-termination-refund:review')"
           @updated="loadData"
         />
 

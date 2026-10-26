@@ -439,3 +439,34 @@ WHERE role.code IN ('crowdfunding_admin', 'crowdfunding_finance', 'crowdfunding_
   AND role.tenant_id = 0 AND role.deleted = b'0'
   AND NOT EXISTS (SELECT 1 FROM system_role_menu grant_row WHERE grant_row.role_id = role.id
     AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+-- V1.1 采购失败时已复核回款的原单退回
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', codes.code, codes.name, codes.method, codes.path, 0, 'v11-local', 'v11-local'
+FROM (
+  SELECT 'crowdfunding:receipt-termination-refund:query' AS code, '采购失败原回款退回查询' AS name, 'GET' AS method, '/api/receipt-termination-refunds' AS path
+  UNION ALL SELECT 'crowdfunding:receipt-termination-refund:proof-upload', '采购失败原回款退回凭证', 'POST', '/api/projects/*/receipt-termination-refund-proofs'
+  UNION ALL SELECT 'crowdfunding:receipt-termination-refund:register', '登记采购失败原回款退回', 'POST', '/api/projects/*/receipt-termination-refunds'
+  UNION ALL SELECT 'crowdfunding:receipt-termination-refund:review', '复核采购失败原回款退回', 'POST', '/api/receipt-termination-refunds/*/review'
+) codes
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
+  AND resource.code = codes.code AND resource.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:receipt-termination-refund:query',
+    'crowdfunding:receipt-termination-refund:proof-upload', 'crowdfunding:receipt-termination-refund:register')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:receipt-termination-refund:query',
+    'crowdfunding:receipt-termination-refund:review') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');

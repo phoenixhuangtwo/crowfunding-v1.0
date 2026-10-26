@@ -17,6 +17,7 @@ export const businessCollections = [
   'project_refunds',
   'procurement_failure_requests',
   'supplier_refunds',
+  'receipt_termination_refunds',
   'risk_events',
   'file_assets'
 ] as const
@@ -47,6 +48,7 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   project_refunds: [],
   procurement_failure_requests: [],
   supplier_refunds: [],
+  receipt_termination_refunds: [],
   risk_events: [],
   file_assets: []
 }
@@ -144,6 +146,11 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'uniq_supplier_refund_id', key: { id: 1 }, unique: true },
     { name: 'idx_supplier_refund_project', key: { projectId: 1, createdAt: -1 } },
     { name: 'uniq_supplier_refund_transaction', key: { transactionNo: 1 }, unique: true }
+  ],
+  receipt_termination_refunds: [
+    { name: 'uniq_receipt_termination_refund_id', key: { id: 1 }, unique: true },
+    { name: 'idx_receipt_termination_refund_project', key: { projectId: 1, status: 1 } },
+    { name: 'uniq_receipt_termination_refund_transaction', key: { transactionNo: 1 }, unique: true }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

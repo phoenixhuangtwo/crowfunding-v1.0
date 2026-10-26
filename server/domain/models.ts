@@ -149,7 +149,7 @@ export type FileAsset = {
   mimeType: string
   sizeBytes: number
   sha256: string
-  purpose: 'receiving-code' | 'payment-proof' | 'settlement-invoice' | 'procurement-payment-proof' | 'customer-receipt-proof' | 'confirmed-cost-proof' | 'distribution-payout-proof' | 'exception-fund-proof' | 'exception-refund-proof' | 'subscription-refund-proof' | 'supplier-refund-proof'
+  purpose: 'receiving-code' | 'payment-proof' | 'settlement-invoice' | 'procurement-payment-proof' | 'customer-receipt-proof' | 'confirmed-cost-proof' | 'distribution-payout-proof' | 'exception-fund-proof' | 'exception-refund-proof' | 'subscription-refund-proof' | 'supplier-refund-proof' | 'receipt-termination-refund-proof'
   ownerType: 'receiving-code' | 'subscription' | 'project'
   ownerId: string
   status: 'pending' | 'ready' | 'failed' | 'pending_delete'

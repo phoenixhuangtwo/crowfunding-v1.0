@@ -21,7 +21,7 @@ async function main() {
       assets: repos.fileAssets,
       storage,
       async referenceCount(assetId) {
-        const [projects, subscriptions, receivingCodes, purchasePayments, receiptBatches, confirmedCosts, distributionOrders, exceptionFunds, projectRefunds, supplierRefunds] = await Promise.all([
+        const [projects, subscriptions, receivingCodes, purchasePayments, receiptBatches, confirmedCosts, distributionOrders, exceptionFunds, projectRefunds, supplierRefunds, receiptTerminationRefunds] = await Promise.all([
           repos.projects.count({ 'settlementInvoices.assetId': assetId } as never),
           repos.subscriptions.count({ 'paymentImages.assetId': assetId } as never),
           repos.receivingCodes.count({ imageAssetId: assetId }),
@@ -32,9 +32,10 @@ async function main() {
           mongo.db.collection(`${config.mongodb.collectionPrefix}exception_funds`).countDocuments({
             $or: [{ proofAssetIds: assetId }, { 'allocations.proofAssetIds': assetId }] }),
           mongo.db.collection(`${config.mongodb.collectionPrefix}project_refunds`).countDocuments({ proofAssetIds: assetId }),
-          mongo.db.collection(`${config.mongodb.collectionPrefix}supplier_refunds`).countDocuments({ proofAssetIds: assetId })
+          mongo.db.collection(`${config.mongodb.collectionPrefix}supplier_refunds`).countDocuments({ proofAssetIds: assetId }),
+          mongo.db.collection(`${config.mongodb.collectionPrefix}receipt_termination_refunds`).countDocuments({ proofAssetIds: assetId })
         ])
-        return projects + subscriptions + receivingCodes + purchasePayments + receiptBatches + confirmedCosts + distributionOrders + exceptionFunds + projectRefunds + supplierRefunds
+        return projects + subscriptions + receivingCodes + purchasePayments + receiptBatches + confirmedCosts + distributionOrders + exceptionFunds + projectRefunds + supplierRefunds + receiptTerminationRefunds
       }
     })
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
