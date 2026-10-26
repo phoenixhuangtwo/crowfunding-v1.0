@@ -78,7 +78,8 @@ try {
     id: 'RULE-IAM-PUBLISH', projectId: 'PRJ-IAM-PUBLISH', projectName: '待发布归属测试项目', ruleName: '隔离发布规则',
     totalAmount: 300, companyFixedAmount: 0, sharePrice: 100, totalShares: 3, companyFrontShares: 0,
     maxSharesPerEmployee: 1, minAmount: 100, minParticipants: 1,
-    allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59', updatedAt: new Date().toISOString()
+    allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59',
+    paymentCutoffAt: '2100-01-01 12:00', plannedPaymentDate: '2100-01-02', updatedAt: new Date().toISOString()
   })
   for (const [id, projectId, ownerUserId] of [
     ['RULE-IAM-ADMIN-OWN', 'PRJ-IAM-ADMIN-OWN', '1002'],
@@ -88,7 +89,8 @@ try {
     await db.collection(`${prefix}subscription_rules`).insertOne({
       id, projectId, projectName: projectId, tenantId: '0', ownerUserId, ownerDeptId: '200',
       ruleName: id, totalAmount: 300, companyFixedAmount: 0, minAmount: 100, minParticipants: 1,
-      allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59', updatedAt: new Date().toISOString()
+      allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59',
+      paymentCutoffAt: '2100-01-01 12:00', plannedPaymentDate: '2100-01-02', updatedAt: new Date().toISOString()
     })
   }
   await db.collection(`${prefix}subscription_rules`).updateOne({ id: 'RULE-IAM-CONFLICT' }, { $set: {
@@ -166,7 +168,8 @@ try {
   }
   const draftRule = { projectId: 'PRJ-IAM-ADMIN-DRAFT', ruleName: '管理员隔离测试规则', receivingCodeId: 'RCV-IAM-ADMIN',
     sharePrice: 100, companyFrontShares: 1, maxSharesPerEmployee: 1,
-    minParticipants: 1, status: '未启用', endAt: '2099-12-31 23:59' }
+    minParticipants: 1, status: '未启用', endAt: '2099-12-31 23:59',
+    paymentCutoffAt: '2100-01-01 12:00', plannedPaymentDate: '2100-01-02' }
   assert.equal((await postAs('/api/settlements/calc', 'smoke-admin-full-token', {})).status, 403)
   assert.equal((await postAs('/api/rules', 'smoke-admin-token', draftRule)).status, 403)
   const createdRule = await postAs('/api/rules', 'smoke-admin-full-token', draftRule)
@@ -183,6 +186,7 @@ try {
   assert.equal(front?.shares, 1)
   assert.equal(front?.companyKind, 'front')
   assert.equal(front?.pay, '公司待出资')
+  assert.equal(front?.paymentDeadlineAt, draftRule.paymentCutoffAt)
   assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments(), 0)
   assert.equal((await postAs('/api/projects/PRJ-IAM-ADMIN-DRAFT/open', 'smoke-admin-full-token', { ruleId: newRuleId })).status, 409)
   assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments({ companyKind: 'front' }), 1)
@@ -229,6 +233,16 @@ try {
   assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-sub-1-self' }))?.userName, '员工甲')
   assert.equal((await db.collection(`${prefix}agreement_confirmations`).findOne({ userId: '1001', node: '提交认购' }))?.version, 1)
   assert.equal((await db.collection(`${prefix}agreement_confirmations`).findOne({ userId: '1001', node: '提交认购' }))?.userName, '员工甲')
+  const publishedSubscription = await postAs('/api/subscriptions', 'smoke-employee-token', {
+    projectId: 'PRJ-IAM-PUBLISH', shares: 1, idempotencyKey: 'iam-published-share',
+    agreementVersion: 1, agreementsConfirmed: true
+  })
+  assert.equal(publishedSubscription.status, 201)
+  const publishedRecord = await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-published-share' })
+  assert.equal(publishedRecord?.shares, 1)
+  assert.equal(Date.parse(`${String(publishedRecord?.paymentDeadlineAt).replace(' ', 'T')}+08:00`)
+    - Date.parse(`${String(publishedRecord?.createdAt).replace(' ', 'T')}+08:00`), 12 * 60 * 60 * 1000)
+  assert.ok(String(publishedRecord?.paymentDeadlineAt) <= '2100-01-01 12:00')
   assert.equal((await request('/api/state', employee)).status, 403)
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-no-access-token' })).status, 403)
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-iam-outage-token' })).status, 503)

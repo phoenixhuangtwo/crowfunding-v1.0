@@ -114,6 +114,8 @@ export type SubscriptionRule = {
   status: '未启用' | '已启用' | '已停用'
   startAt: string
   endAt: string
+  paymentCutoffAt?: string
+  plannedPaymentDate?: string
   updatedAt: string
 }
 

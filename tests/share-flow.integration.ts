@@ -200,7 +200,8 @@ try {
   const created = await post('/api/rules', {
     projectId: 'PRJ-SHARE-TEST', ruleName: '测试按份规则', receivingCodeId: 'RCV-SHARE-TEST',
     sharePrice: 100, companyFrontShares: 1, maxSharesPerEmployee: 1,
-    allowMultiple: true, companyTakeover: true, status: '已启用', endAt: '2099-12-31 23:59', operator: 'spoofed-operator'
+    allowMultiple: true, companyTakeover: true, status: '已启用', endAt: '2099-12-31 23:59',
+    paymentCutoffAt: '2100-01-01 12:00', plannedPaymentDate: '2100-01-02', operator: 'spoofed-operator'
   })
   assert.equal(created.status, 201, JSON.stringify(created.payload))
   assert.equal((await db.collection(`${prefix}audit_logs`).findOne({ target: created.payload.data?.id }))?.actor, 'admin01 · 管理员')

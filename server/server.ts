@@ -32,6 +32,7 @@ import { handleAuthRoute } from './auth/routes.ts'
 import { authenticateRequest, authErrorResponse, permissionInfoForClient, requireApiPermission, validateReviewAction } from './auth/middleware.ts'
 import { handleCorsPreflight, sendJson } from './http-response.ts'
 import { ownershipFrom } from './iam/data-scope.ts'
+import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -151,6 +152,8 @@ type SubscriptionRule = {
   status: '未启用' | '已启用' | '已停用'
   startAt: string
   endAt: string
+  paymentCutoffAt?: string
+  plannedPaymentDate?: string
   updatedAt: string
 }
 
@@ -662,6 +665,8 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
     try {
       shareRule = prepareShareRule(project.costAmount, Number(body.sharePrice), Number(body.companyFrontShares),
         body.maxSharesPerEmployee === undefined || body.maxSharesPerEmployee === '' ? undefined : Number(body.maxSharesPerEmployee))
+      validatePublishSchedule({ subscriptionCutoffAt: body.endAt, paymentCutoffAt: body.paymentCutoffAt,
+        plannedPaymentDate: body.plannedPaymentDate })
     } catch (error) {
       send(res, 400, { error: 'SHARE_RULE_INVALID', message: error instanceof Error ? error.message : '份额规则无效' })
       return null
@@ -1232,7 +1237,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       idempotencyKey: String(body.idempotencyKey),
       agreementVersion: Number(body.agreementVersion),
       createdAt,
-      paymentDeadlineAt: addHours(createdAt, 12)
+      paymentDeadlineAt: rule?.sharePrice && rule.paymentCutoffAt
+        ? employeePaymentDeadline(createdAt, rule.paymentCutoffAt)
+        : addHours(createdAt, 12)
     }
     const audit = auditRecord({ actor: `${record.userId} · 员工`, role: 'employee', action: '创建认购', target: record.id, before, after: { subscribed: nextProject.subscribed, remain: nextProject.remain, subscription: record.id, agreementVersion: record.agreementVersion } }) as AuditLog
     await mongo.withTransaction(async session => {
@@ -1419,6 +1426,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       status: normalizeRuleStatus(body.status),
       startAt: typeof body.startAt === 'string' ? body.startAt : '',
       endAt: typeof body.endAt === 'string' ? body.endAt : '',
+      paymentCutoffAt: shareRule ? String(body.paymentCutoffAt) : undefined,
+      plannedPaymentDate: shareRule ? String(body.plannedPaymentDate) : undefined,
       updatedAt: now()
     }
     rules.unshift(record)
@@ -1471,6 +1480,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     rule.status = nextStatus
     rule.startAt = String(body.startAt ?? '')
     rule.endAt = String(body.endAt ?? '')
+    rule.paymentCutoffAt = shareRule ? String(body.paymentCutoffAt) : undefined
+    rule.plannedPaymentDate = shareRule ? String(body.plannedPaymentDate) : undefined
     rule.updatedAt = now()
     await pushAudit({ actor: manager!.label, role: manager!.role, action: '修改认购规则', target: rule.id, before, after: rule })
     await persistState()
@@ -1569,9 +1580,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       || selectedRule.maxSharesPerEmployee !== shareRule.maxSharesPerEmployee) {
       return send(res, 409, { error: 'SHARE_RULE_CHANGED', message: '份额规则与采购金额不一致，请重新配置' })
     }
-    const deadline = new Date(selectedRule.endAt.replace(' ', 'T')).getTime()
-    if (!Number.isFinite(deadline) || deadline <= Date.now()) {
-      return send(res, 409, { error: 'SUBSCRIPTION_DEADLINE_INVALID', message: '认购截止时间须晚于当前时间' })
+    try {
+      validatePublishSchedule({ subscriptionCutoffAt: selectedRule.endAt,
+        paymentCutoffAt: selectedRule.paymentCutoffAt, plannedPaymentDate: selectedRule.plannedPaymentDate })
+    } catch (error) {
+      return send(res, 409, { error: 'PUBLISH_SCHEDULE_INVALID', message: error instanceof Error ? error.message : '发布时间安排无效' })
     }
     const publisher = ownershipFrom(iamContextFor(req))
     const result = await mongo.withTransaction(async session => {
@@ -1581,7 +1594,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         || latestRule.status !== '已启用' || latestRule.projectId !== latest.id
         || latest.costAmount !== project.costAmount || latest.salesAmount !== project.salesAmount
         || (['sharePrice', 'totalShares', 'companyFrontShares', 'maxSharesPerEmployee', 'companyFixedAmount',
-          'totalAmount', 'endAt', 'receivingCodeId'] as const).some(field => latestRule[field] !== selectedRule[field])) {
+          'totalAmount', 'endAt', 'paymentCutoffAt', 'plannedPaymentDate', 'receivingCodeId'] as const).some(field => latestRule[field] !== selectedRule[field])) {
         throw new AppError(409, 'PROJECT_CHANGED', '采购项目或规则已变化，请刷新后重试')
       }
       const updated = { ...latest, ruleId: latestRule.id, ...publisher,
@@ -1594,7 +1607,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         userId: 'company', companyKind: 'front', amount: shareRule.companyFixedAmount,
         shares: shareRule.companyFrontShares, pay: '公司待出资', profit: updated.profitAmount,
         action: '财务确认公司出资', idempotencyKey: `system:company-front:${updated.id}`,
-        createdAt: now(), paymentDeadlineAt: now()
+        createdAt: now(), paymentDeadlineAt: latestRule.paymentCutoffAt!
       } : undefined
       const audit = auditRecord({ actor: manager!.label, role: manager!.role, action: '开放项目认购',
         target: updated.id, before: { status: latest.status, total: latest.total, deadline: latest.deadline, ruleId: latest.ruleId },

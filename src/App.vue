@@ -26,6 +26,7 @@ import { settlementPaymentTime, settlementSubscriberLabel } from './settlement-d
 import { beginSettlement } from './settlement-flow'
 import { estimateShareProfit } from './estimated-share-profit'
 import { prepareShareRule } from '../server/share-subscription'
+import { validatePublishSchedule } from '../server/publish-schedule'
 import { apiRequest } from './auth/api-client'
 import { readAccessToken } from './auth/session'
 import { useAuthSession } from './auth/use-auth-session'
@@ -167,6 +168,8 @@ type SubscriptionRule = {
   status: '未启用' | '已启用' | '已停用'
   startAt: string
   endAt: string
+  paymentCutoffAt?: string
+  plannedPaymentDate?: string
   updatedAt: string
 }
 type RuleForm = {
@@ -185,6 +188,8 @@ type RuleForm = {
   status: '未启用' | '已启用' | '已停用'
   startAt: string
   endAt: string
+  paymentCutoffAt?: string
+  plannedPaymentDate?: string
 }
 type ReceivingCode = {
   id: string
@@ -387,7 +392,9 @@ const createEmptyRuleForm = (): RuleForm => ({
   companyTakeover: false,
   status: '未启用',
   startAt: '',
-  endAt: ''
+  endAt: '',
+  paymentCutoffAt: '',
+  plannedPaymentDate: ''
 })
 const ruleForm = reactive<RuleForm>(createEmptyRuleForm())
 
@@ -1363,6 +1370,8 @@ function fillRuleForm(rule: SubscriptionRule) {
   ruleForm.status = rule.status
   ruleForm.startAt = rule.startAt
   ruleForm.endAt = rule.endAt
+  ruleForm.paymentCutoffAt = rule.paymentCutoffAt ?? ''
+  ruleForm.plannedPaymentDate = rule.plannedPaymentDate ?? ''
 }
 
 function resetRuleForm(project?: Project) {
@@ -1549,6 +1558,8 @@ async function submitRule() {
       if (!selectedRuleProject.value) throw new RangeError('请选择采购项目')
       shareRule = prepareShareRule(projectCostAmount(selectedRuleProject.value), Number(ruleForm.sharePrice),
         Number(ruleForm.companyFrontShares), ruleForm.maxSharesPerEmployee)
+      validatePublishSchedule({ subscriptionCutoffAt: ruleForm.endAt, paymentCutoffAt: ruleForm.paymentCutoffAt,
+        plannedPaymentDate: ruleForm.plannedPaymentDate })
     } catch (error) {
       ElMessage.warning(error instanceof Error ? error.message : '份额规则无效')
       return
@@ -2486,8 +2497,10 @@ watch(() => authSession.permissionInfo.value, info => {
                   <dt>总开放认购金额</dt><dd>{{ formatMoney(selectedProject.total) }}</dd>
                   <template v-if="selectedProjectShareRule">
                     <dt>份额规则</dt><dd>每份 {{ formatMoney(selectedProjectShareRule.sharePrice!) }} · 总 {{ selectedProjectShareRule.totalShares }} 份 · 公司前置 {{ selectedProjectShareRule.companyFrontShares }} 份 · 每人最多 {{ selectedProjectShareRule.maxSharesPerEmployee }} 份</dd>
+                    <dt>缴款截止时间</dt><dd>{{ selectedProjectShareRule.paymentCutoffAt || '-' }}</dd>
+                    <dt>计划付款日</dt><dd>{{ selectedProjectShareRule.plannedPaymentDate || '-' }}</dd>
                   </template>
-                  <dt>认购时间</dt><dd>2026-07-02 10:00 至 {{ selectedProject.deadline }}</dd>
+                  <dt>认购时间</dt><dd>{{ selectedProjectShareRule?.startAt || '-' }} 至 {{ selectedProject.deadline }}</dd>
                   <dt>收益规则</dt><dd>{{ selectedProjectShareRule ? '回款确认后按认购份数分配本金与利润，分配到分以下的尾差归公司。' : '项目结算后按实缴金额占比分配利润，公司固定认购、公司兜底认购和公司强制接管认购部分收益归公司。' }}</dd>
                 </dl>
               </section>
@@ -2997,7 +3010,9 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-table-column label="状态" width="100">
                 <template #default="{ row }"><el-tag :type="row.status === '已启用' ? 'success' : row.status === '未启用' ? 'warning' : 'info'">{{ row.status }}</el-tag></template>
               </el-table-column>
-              <el-table-column prop="endAt" label="截止时间" width="170" />
+              <el-table-column prop="endAt" label="认购截止时间" width="170" />
+              <el-table-column prop="paymentCutoffAt" label="缴款截止时间" width="170" />
+              <el-table-column prop="plannedPaymentDate" label="计划付款日" width="130" />
               <el-table-column prop="updatedAt" label="更新时间" width="170" />
               <el-table-column label="操作" fixed="right" width="260">
                 <template #default="{ row }">
@@ -3753,6 +3768,12 @@ watch(() => authSession.permissionInfo.value, info => {
             value-format="YYYY-MM-DD HH:mm"
             class="rule-time-range"
           />
+        </el-form-item>
+        <el-form-item v-if="isShareRuleForm" label="缴款截止时间" required>
+          <el-date-picker v-model="ruleForm.paymentCutoffAt" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DD HH:mm" placeholder="选择缴款截止时间" />
+        </el-form-item>
+        <el-form-item v-if="isShareRuleForm" label="计划付款日" required>
+          <el-date-picker v-model="ruleForm.plannedPaymentDate" type="date" format="YYYY-MM-DD" value-format="YYYY-MM-DD" placeholder="选择计划付款日" />
         </el-form-item>
         <el-form-item v-if="isShareRuleForm" label="每份金额" required>
           <el-input-number v-model="ruleForm.sharePrice" :min="0.01" :precision="2" :step="100" controls-position="right" />
