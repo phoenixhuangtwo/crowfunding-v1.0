@@ -10,8 +10,10 @@ const base: DistributionInput = {
     { participantId: 'employee-b', kind: 'employee', shares: 1 },
     { participantId: 'company', kind: 'company', shares: 1 }
   ],
+  receivableCents: 30301,
   customerReceiptsCents: 30301,
   companyTopUpsCents: 0,
+  companyReturnsCents: 0,
   procurementPaymentsCents: 30000,
   confirmedCostsCents: 0
 }
@@ -27,7 +29,7 @@ test('allocates principal and profit by shares, with fractional-cent residual to
 })
 
 test('includes confirmed top-ups and costs in the agreed profit formula', () => {
-  const result = calculateDistribution({ ...base, customerReceiptsCents: 30000, companyTopUpsCents: 600, confirmedCostsCents: 150 })
+  const result = calculateDistribution({ ...base, receivableCents: 30600, customerReceiptsCents: 30000, companyTopUpsCents: 600, confirmedCostsCents: 150 })
   assert.equal(result.profitCents, 450)
   assert.deepEqual(result.lines.map(line => line.profitCents), [150, 150, 150])
 })
@@ -49,8 +51,18 @@ test('assigns the fractional-cent remainder to company even when its subscribed 
       { participantId: 'employee-b', kind: 'employee', shares: 2 },
       { participantId: 'company', kind: 'company', shares: 0 }
     ],
-    customerReceiptsCents: 30001
+    customerReceiptsCents: 30001,
+    receivableCents: 30001
   })
   assert.deepEqual(result.lines.map(line => line.profitCents), [0, 0, 1])
   assert.equal(result.companyRoundingResidualCents, 1)
+})
+
+test('excludes excess receipts and company top-up returns from distributable profit', () => {
+  const excess = calculateDistribution({ ...base, customerReceiptsCents: 31000 })
+  assert.equal(excess.undistributedDifferenceCents, 699)
+  assert.equal(excess.profitCents, 301)
+  const returned = calculateDistribution({ ...base, customerReceiptsCents: 30301, companyTopUpsCents: 600, companyReturnsCents: 600 })
+  assert.equal(returned.profitCents, 301)
+  assert.equal(returned.distributableCents, 30301)
 })

@@ -1,4 +1,6 @@
 /** All monetary inputs and outputs are integer cents. No floating-point yuan arithmetic is used. */
+import { calculateSettlementProfit } from './settlement-profit.ts'
+
 export type FundingPosition = {
   participantId: string
   kind: 'employee' | 'company'
@@ -9,8 +11,10 @@ export type DistributionInput = {
   sharePriceCents: number
   totalShares: number
   positions: FundingPosition[]
+  receivableCents: number
   customerReceiptsCents: number
   companyTopUpsCents: number
+  companyReturnsCents: number
   procurementPaymentsCents: number
   confirmedCostsCents: number
 }
@@ -23,6 +27,8 @@ export type DistributionLine = FundingPosition & {
 
 export type Distribution = {
   profitCents: number
+  distributableCents: number
+  undistributedDifferenceCents: number
   companyRoundingResidualCents: number
   lines: DistributionLine[]
 }
@@ -55,7 +61,7 @@ function proportionalCents(amount: number, shares: number, totalShares: number) 
 export function calculateDistribution(input: DistributionInput): Distribution {
   positiveInteger(input.sharePriceCents, 'sharePriceCents')
   positiveInteger(input.totalShares, 'totalShares')
-  for (const key of ['customerReceiptsCents', 'companyTopUpsCents', 'procurementPaymentsCents', 'confirmedCostsCents'] as const) {
+  for (const key of ['receivableCents', 'customerReceiptsCents', 'companyTopUpsCents', 'companyReturnsCents', 'procurementPaymentsCents', 'confirmedCostsCents'] as const) {
     nonNegativeCents(input[key], key)
   }
   if (!Array.isArray(input.positions) || input.positions.length === 0) throw new RangeError('positions are required')
@@ -78,9 +84,8 @@ export function calculateDistribution(input: DistributionInput): Distribution {
   if (input.procurementPaymentsCents !== principalCents) {
     throw new RangeError('procurement payments must equal subscribed principal')
   }
-  const inflowCents = safeSum([input.customerReceiptsCents, input.companyTopUpsCents], 'inflow')
-  const outflowCents = safeSum([input.procurementPaymentsCents, input.confirmedCostsCents], 'outflow')
-  const profitCents = inflowCents - outflowCents
+  const preview = calculateSettlementProfit(input)
+  const profitCents = preview.profitCents
   if (profitCents < 0) throw new RangeError('receipts are insufficient for a non-negative distribution')
 
   let employeeProfitCents = 0
@@ -99,6 +104,8 @@ export function calculateDistribution(input: DistributionInput): Distribution {
   if (!lines.every(line => Number.isSafeInteger(line.payoutCents))) throw new RangeError('payout exceeds safe integer range')
   return {
     profitCents,
+    distributableCents: preview.distributableCents,
+    undistributedDifferenceCents: preview.undistributedDifferenceCents,
     companyRoundingResidualCents: company.profitCents - companyBaseProfitCents,
     lines
   }

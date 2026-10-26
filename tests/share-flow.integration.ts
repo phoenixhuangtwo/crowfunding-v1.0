@@ -150,7 +150,7 @@ try {
   assert.equal((await post('/api/settlements/calc', {}, employeeIdentity)).status, 403)
   assert.equal((await post('/api/settlements/calc', {}, { userId: 'finance01', role: 'finance' })).status, 400)
   const profitPreview = await post('/api/settlements/calc', {
-    customerReceiptsCents: 30301, companyTopUpsCents: 0,
+    receivableCents: 30301, customerReceiptsCents: 30301, companyTopUpsCents: 0, companyReturnsCents: 0,
     procurementPaymentsCents: 30000, confirmedCostsCents: 0
   }, { userId: 'finance01', role: 'finance' })
   assert.equal(profitPreview.status, 200)

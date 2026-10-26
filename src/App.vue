@@ -3118,7 +3118,7 @@ onMounted(loadData)
                 <dd>待实收、补款及成本核实后计算</dd>
               </dl>
             </section>
-            <el-alert title="本页仅核对发票凭证，不代表客户款项实收或完成分润。实际利润须按客户实收＋公司补款－采购实付－其他已确认成本计算；分配尾差归公司。" type="info" :closable="false" show-icon />
+            <el-alert title="本页仅核对发票凭证，不代表客户款项实收或完成分润。分配利润以已复核客户回款和公司补款为基础，扣除补款返还、超出应收的差异、采购实付及其他已确认成本；尾差归公司。" type="info" :closable="false" show-icon />
             <el-alert v-if="selectedProject.status === '已完结' || selectedProject.status === '部分已结算'" title="历史项目可能因旧版发票凭证累计而改变结算状态；在核实回款、分配、打款和对账前，不应视为已结单。" type="warning" :closable="false" show-icon />
             <div class="settlement-balance-summary">
               <div><span>预计项目销售额</span><strong>{{ formatMoney(projectSalesAmount(selectedProject)) }}</strong></div>

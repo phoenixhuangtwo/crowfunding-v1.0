@@ -2203,8 +2203,10 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   if (pathname === '/api/settlements/calc') {
     try {
       return send(res, 200, { data: calculateSettlementProfit({
+        receivableCents: body.receivableCents,
         customerReceiptsCents: body.customerReceiptsCents,
         companyTopUpsCents: body.companyTopUpsCents,
+        companyReturnsCents: body.companyReturnsCents,
         procurementPaymentsCents: body.procurementPaymentsCents,
         confirmedCostsCents: body.confirmedCostsCents
       }) })
