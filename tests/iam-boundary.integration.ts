@@ -25,6 +25,18 @@ let child: ReturnType<typeof spawn> | undefined
 try {
   await client.connect()
   const db = client.db('crowfunding')
+  await db.collection(`${prefix}agreement_versions`).insertOne({
+    id: 'AGREEMENT-IAM-TEST', version: 1, title: 'IAM 隔离测试协议',
+    body: '员工独立承担税费，分配金额为税前金额；客户退货与坏账由公司承担，采购失败缺口由公司承担；预估收益不构成承诺。',
+    effectiveAt: new Date().toISOString(), createdBy: 'integration-test'
+  })
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-TEST', title: 'IAM 隔离测试项目', source: 'integration-test',
+    status: '未满额', statusType: 'primary', progress: 0, remain: 300, deadline: '2099-12-31 23:59',
+    total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 0, subscribed: 0, people: 0
+  })
   const port = await freePort()
   const base = `http://127.0.0.1:${port}`
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
@@ -55,6 +67,27 @@ try {
   assert.equal(departmentAdmin.status, 403)
   assert.equal(departmentAdmin.body.error, 'DATA_SCOPE_MIGRATION_REQUIRED')
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-finance-token' })).status, 200)
+  const legacyPost = async (path: string, token: string) => fetch(`${base}${path}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ imageDataUrl: 'data:image/png;base64,aGVsbG8=' })
+  })
+  assert.equal((await legacyPost('/api/payments/ocr', 'smoke-employee-token')).status, 415)
+  assert.equal((await legacyPost('/api/invoices/ocr', 'smoke-finance-token')).status, 415)
+  const subscribe = async (version: number, userId?: string) => {
+    const response = await fetch(`${base}/api/subscriptions`, {
+      method: 'POST', headers: { ...employee, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: 'PRJ-IAM-TEST', amount: 100, idempotencyKey: `iam-sub-${version}-${userId ?? 'self'}`,
+        agreementVersion: version, agreementsConfirmed: true, ...(userId ? { userId } : {}) })
+    })
+    return { status: response.status, body: await response.json() as Record<string, unknown> }
+  }
+  assert.equal((await subscribe(1, 'employee01')).status, 403)
+  assert.equal((await subscribe(2)).status, 409)
+  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 0)
+  const subscribed = await subscribe(1)
+  assert.equal(subscribed.status, 201)
+  assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-sub-1-self' }))?.userId, '1001')
+  assert.equal((await db.collection(`${prefix}agreement_confirmations`).findOne({ userId: '1001', node: '提交认购' }))?.version, 1)
   assert.equal((await request('/api/state', employee)).status, 403)
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-no-access-token' })).status, 403)
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-iam-outage-token' })).status, 503)

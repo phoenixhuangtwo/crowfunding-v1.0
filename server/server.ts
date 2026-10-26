@@ -39,6 +39,7 @@ type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | 
 type PaymentImage = {
   id: string
   assetId: string
+  paymentImageUrl?: string
   paymentImageName: string
   recognizedAmount: number
   uploadedAt: string
@@ -168,411 +169,6 @@ type AppState = {
   receivingCodes: ReceivingCode[]
 }
 
-const mockProjects: Project[] = [
-  {
-    id: 'PRJ-MOCK-WKF-001',
-    title: '未开放样例项目 A · 智能会议屏采购',
-    source: 'Mock 数据',
-    status: '未开放',
-    statusType: 'info',
-    progress: 0,
-    remain: 80000,
-    deadline: '2026-07-20 18:00',
-    total: 80000,
-    subscribed: 0,
-    people: 0
-  },
-  {
-    id: 'PRJ-MOCK-WKF-002',
-    title: '未开放样例项目 B · 员工储物柜更新',
-    source: 'Mock 数据',
-    status: '未开放',
-    statusType: 'info',
-    progress: 0,
-    remain: 56000,
-    deadline: '2026-07-22 18:00',
-    total: 56000,
-    subscribed: 0,
-    people: 0
-  },
-  {
-    id: 'PRJ-MOCK-WME-001',
-    title: '未满额样例项目 A · 茶水间设备补充',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 42.5,
-    remain: 34500,
-    deadline: '2026-07-18 18:00',
-    total: 60000,
-    subscribed: 25500,
-    people: 9
-  },
-  {
-    id: 'PRJ-MOCK-WME-002',
-    title: '未满额样例项目 B · 研发区显示器增购',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 68,
-    remain: 38400,
-    deadline: '2026-07-19 18:00',
-    total: 120000,
-    subscribed: 81600,
-    people: 18
-  },
-  {
-    id: 'PRJ-MOCK-WME-003',
-    title: '未满额测试数据 1 · 员工休息区咖啡机采购',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 35,
-    remain: 39000,
-    deadline: '2026-07-05 12:00',
-    total: 60000,
-    subscribed: 21000,
-    people: 7
-  },
-  {
-    id: 'PRJ-MOCK-WME-004',
-    title: '未满额测试数据 2 · 会议室白板屏增配',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 48,
-    remain: 41600,
-    deadline: '2026-07-05 18:00',
-    total: 80000,
-    subscribed: 38400,
-    people: 12
-  },
-  {
-    id: 'PRJ-MOCK-WME-005',
-    title: '未满额测试数据 3 · 工区人体工学椅补采',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 57,
-    remain: 34400,
-    deadline: '2026-07-07 18:00',
-    total: 80000,
-    subscribed: 45600,
-    people: 15
-  },
-  {
-    id: 'PRJ-MOCK-WME-006',
-    title: '未满额测试数据 4 · 茶水间冰箱更新',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 64,
-    remain: 28800,
-    deadline: '2026-07-08 18:00',
-    total: 80000,
-    subscribed: 51200,
-    people: 17
-  },
-  {
-    id: 'PRJ-MOCK-WME-007',
-    title: '未满额测试数据 5 · 培训摄像头套装采购',
-    source: 'Mock 数据',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 71,
-    remain: 34800,
-    deadline: '2026-07-09 18:00',
-    total: 120000,
-    subscribed: 85200,
-    people: 24
-  },
-  {
-    id: 'PRJ-MOCK-YME-001',
-    title: '已满额样例项目 A · 移动硬盘集中采购',
-    source: 'Mock 数据',
-    status: '已满额',
-    statusType: 'success',
-    progress: 100,
-    remain: 0,
-    deadline: '2026-07-10 18:00',
-    total: 45000,
-    subscribed: 45000,
-    people: 20
-  },
-  {
-    id: 'PRJ-MOCK-YME-002',
-    title: '已满额样例项目 B · 工位照明升级',
-    source: 'Mock 数据',
-    status: '已满额',
-    statusType: 'success',
-    progress: 100,
-    remain: 0,
-    deadline: '2026-07-11 18:00',
-    total: 72000,
-    subscribed: 72000,
-    people: 26
-  },
-  {
-    id: 'PRJ-MOCK-YJZ-001',
-    title: '已截止样例项目 A · 园区门禁维护',
-    source: 'Mock 数据',
-    status: '已截止',
-    statusType: 'success',
-    progress: 74,
-    remain: 15600,
-    deadline: '2026-07-03 18:00',
-    total: 60000,
-    subscribed: 44400,
-    people: 16
-  },
-  {
-    id: 'PRJ-MOCK-YJZ-002',
-    title: '已截止样例项目 B · 备用网络设备',
-    source: 'Mock 数据',
-    status: '已截止',
-    statusType: 'success',
-    progress: 86,
-    remain: 9800,
-    deadline: '2026-07-04 18:00',
-    total: 70000,
-    subscribed: 60200,
-    people: 21
-  },
-  {
-    id: 'PRJ-MOCK-YZD-001',
-    title: '已中断样例项目 A · 前台访客系统',
-    source: 'Mock 数据',
-    status: '已中断',
-    statusType: 'danger',
-    progress: 51,
-    remain: 24500,
-    deadline: '2026-07-16 18:00',
-    total: 50000,
-    subscribed: 25500,
-    people: 11,
-    interruptReason: 'Mock：供应计划调整，暂停本次认购。',
-    interruptedAt: '2026-07-07 10:00:00',
-    refundNotice: '已缴款金额将在 48h 内原路返款到账'
-  },
-  {
-    id: 'PRJ-MOCK-YZD-002',
-    title: '已中断样例项目 B · 健身区器材采购',
-    source: 'Mock 数据',
-    status: '已中断',
-    statusType: 'danger',
-    progress: 63,
-    remain: 22200,
-    deadline: '2026-07-17 18:00',
-    total: 60000,
-    subscribed: 37800,
-    people: 14,
-    interruptReason: 'Mock：采购口径变化，需重新评估认购规则。',
-    interruptedAt: '2026-07-07 10:15:00',
-    refundNotice: '已缴款金额将在 48h 内原路返款到账'
-  },
-  {
-    id: 'PRJ-MOCK-YWJ-001',
-    title: '已完结样例项目 A · 办公耳机采购',
-    source: 'Mock 数据',
-    status: '已完结',
-    statusType: 'info',
-    progress: 100,
-    remain: 0,
-    deadline: '2026-06-25 18:00',
-    total: 52000,
-    subscribed: 52000,
-    people: 24
-  },
-  {
-    id: 'PRJ-MOCK-YWJ-002',
-    title: '已完结样例项目 B · 培训教室投影升级',
-    source: 'Mock 数据',
-    status: '已完结',
-    statusType: 'info',
-    progress: 100,
-    remain: 0,
-    deadline: '2026-06-26 18:00',
-    total: 88000,
-    subscribed: 88000,
-    people: 32
-  }
-]
-
-function buildMockReviewSubscriptions(): Subscription[] {
-  return Array.from({ length: 20 }, (_, index) => {
-    const amount = 4800 + index * 350
-    const day = String(5 + Math.floor(index / 8)).padStart(2, '0')
-    const hour = String(9 + (index % 8)).padStart(2, '0')
-    const minute = String((index * 7) % 60).padStart(2, '0')
-    const projectId = index % 2 === 0 ? 'PRJ-20260701-003' : 'PRJ-20260628-002'
-    const project = projectId === 'PRJ-20260701-003' ? '2026-Q3 办公设备集采认购' : '员工餐厅冷链设备升级'
-    const userId = index % 3 === 0 ? 'employee02' : 'employee01'
-    return {
-      id: `SUB-MOCK-REVIEW-${String(index + 1).padStart(3, '0')}`,
-      projectId,
-      project,
-      userId,
-      amount,
-      pay: '待复核',
-      profit: Math.round(amount * 0.082),
-      action: '查看支付',
-      idempotencyKey: `mock-review-${String(index + 1).padStart(3, '0')}`,
-      createdAt: `2026-07-${day} ${hour}:${minute}:00`,
-      paymentDeadlineAt: `2026-07-${day} ${String(Math.min(23, Number(hour) + 8)).padStart(2, '0')}:${minute}:00`,
-      paymentUploadedAt: `2026-07-${day} ${hour}:${minute}:00`,
-      paymentSuccessAt: `2026-07-${day} ${hour}:${String(Math.max(0, Number(minute) - 2)).padStart(2, '0')}:18`
-    }
-  })
-}
-
-const seedState: AppState = {
-  projects: [
-  {
-    id: 'PRJ-20260701-003',
-    title: '2026-Q3 办公设备集采认购',
-    source: 'MCP 同步',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 73.4,
-    remain: 79800,
-    deadline: '2026-07-12 18:00',
-    total: 300000,
-    subscribed: 220200,
-    people: 46
-  },
-  {
-    id: 'PRJ-20260628-002',
-    title: '员工餐厅冷链设备升级',
-    source: '手工创建',
-    status: '未满额',
-    statusType: 'primary',
-    progress: 91.2,
-    remain: 10560,
-    deadline: '2026-07-06 12:00',
-    total: 120000,
-    subscribed: 109440,
-    people: 31
-  },
-  {
-    id: 'PRJ-20260615-001',
-    title: '园区安防摄像头替换',
-    source: 'MCP 同步',
-    status: '已满额',
-    statusType: 'success',
-    progress: 100,
-    remain: 0,
-    deadline: '2026-06-30 18:00',
-    total: 180000,
-    subscribed: 180000,
-    people: 52
-  },
-  ...mockProjects
-  ],
-  subscriptions: [
-    { id: 'SUB-20260705-0031', projectId: 'PRJ-20260701-003', project: '2026-Q3 办公设备集采认购', userId: 'employee01', amount: 12000, pay: '待复核', profit: 984, action: '查看支付', idempotencyKey: 'seed-001' },
-    { id: 'SUB-20260704-0027', projectId: 'PRJ-20260628-002', project: '员工餐厅冷链设备升级', userId: 'employee01', amount: 6000, pay: '未缴款', profit: 492, action: '去支付', idempotencyKey: 'seed-002' },
-    { id: 'SUB-20260412-0006', projectId: 'PRJ-20260410-006', project: '2026-Q2 IT 外设集采', userId: 'employee01', amount: 18000, pay: '待确认收款', profit: 3640, action: '确认收款', idempotencyKey: 'seed-003' },
-    { id: 'SUB-MOCK-WJK-001', projectId: 'PRJ-MOCK-WME-001', project: '样例认购 · 未缴款 01', userId: 'employee01', amount: 3200, pay: '未缴款', profit: 260, action: '去支付', idempotencyKey: 'mock-pay-unpaid-001', createdAt: '2026-08-27 09:00:00', paymentDeadlineAt: '2026-08-28 09:00:00' },
-    { id: 'SUB-MOCK-WJK-002', projectId: 'PRJ-MOCK-WME-002', project: '样例认购 · 未缴款 02', userId: 'employee01', amount: 8800, pay: '未缴款', profit: 720, action: '去支付', idempotencyKey: 'mock-pay-unpaid-002', createdAt: '2026-08-27 09:15:00', paymentDeadlineAt: '2026-08-28 09:15:00' },
-    { id: 'SUB-MOCK-WJK-003', projectId: 'PRJ-MOCK-WKF-002', project: '样例认购 · 未缴款 03', userId: 'employee01', amount: 5200, pay: '未缴款', profit: 426, action: '去支付', idempotencyKey: 'mock-pay-unpaid-003', createdAt: '2026-08-27 09:30:00', paymentDeadlineAt: '2026-08-28 09:30:00' },
-    { id: 'SUB-MOCK-WJK-004', projectId: 'PRJ-MOCK-YWJ-002', project: '样例认购 · 未缴款 04', userId: 'employee01', amount: 7600, pay: '未缴款', profit: 623, action: '去支付', idempotencyKey: 'mock-pay-unpaid-004', createdAt: '2026-08-27 09:45:00', paymentDeadlineAt: '2026-08-28 09:45:00' },
-    { id: 'SUB-MOCK-WJK-005', projectId: 'PRJ-MOCK-WME-007', project: '样例认购 · 未缴款 05', userId: 'employee01', amount: 4100, pay: '未缴款', profit: 336, action: '去支付', idempotencyKey: 'mock-pay-unpaid-005', createdAt: '2026-08-27 10:00:00', paymentDeadlineAt: '2026-08-28 10:00:00' },
-    { id: 'SUB-MOCK-WJK-006', projectId: 'PRJ-MOCK-WME-001', project: '样例认购 · 未缴款 06', userId: 'employee01', amount: 4600, pay: '未缴款', profit: 377, action: '去支付', idempotencyKey: 'mock-pay-unpaid-006', createdAt: '2026-08-27 10:15:00', paymentDeadlineAt: '2026-08-28 10:15:00' },
-    { id: 'SUB-MOCK-WJK-007', projectId: 'PRJ-MOCK-WME-002', project: '样例认购 · 未缴款 07', userId: 'employee01', amount: 5900, pay: '未缴款', profit: 484, action: '去支付', idempotencyKey: 'mock-pay-unpaid-007', createdAt: '2026-08-27 10:30:00', paymentDeadlineAt: '2026-08-28 10:30:00' },
-    { id: 'SUB-MOCK-WJK-008', projectId: 'PRJ-MOCK-WKF-002', project: '样例认购 · 未缴款 08', userId: 'employee01', amount: 6800, pay: '未缴款', profit: 558, action: '去支付', idempotencyKey: 'mock-pay-unpaid-008', createdAt: '2026-08-27 10:45:00', paymentDeadlineAt: '2026-08-28 10:45:00' },
-    { id: 'SUB-MOCK-WJK-009', projectId: 'PRJ-MOCK-YWJ-002', project: '样例认购 · 未缴款 09', userId: 'employee01', amount: 7900, pay: '未缴款', profit: 648, action: '去支付', idempotencyKey: 'mock-pay-unpaid-009', createdAt: '2026-08-27 11:00:00', paymentDeadlineAt: '2026-08-28 11:00:00' },
-    { id: 'SUB-MOCK-WJK-010', projectId: 'PRJ-MOCK-WME-007', project: '样例认购 · 未缴款 10', userId: 'employee01', amount: 9500, pay: '未缴款', profit: 779, action: '去支付', idempotencyKey: 'mock-pay-unpaid-010', createdAt: '2026-08-27 11:15:00', paymentDeadlineAt: '2026-08-28 11:15:00' },
-    { id: 'SUB-MOCK-DFH-001', projectId: 'PRJ-MOCK-WME-001', project: '样例认购 · 待复核 A', userId: 'employee01', amount: 5600, pay: '待复核', profit: 458, action: '查看支付', idempotencyKey: 'mock-pay-review-001' },
-    { id: 'SUB-MOCK-DFH-002', projectId: 'PRJ-MOCK-WME-002', project: '样例认购 · 待复核 B', userId: 'employee01', amount: 9300, pay: '待复核', profit: 762, action: '查看支付', idempotencyKey: 'mock-pay-review-002' },
-    { id: 'SUB-MOCK-BH-001', projectId: 'PRJ-MOCK-WZD-001', project: '样例认购 · 复核驳回 A', userId: 'employee01', amount: 4200, pay: '复核驳回', profit: 344, action: '重新上传截图', idempotencyKey: 'mock-pay-rejected-001', rejectReason: '支付截图缺少交易单号，无法与认购记录完成匹配，请重新上传包含支付成功页、金额、交易流水和收款方信息的截图。' },
-    { id: 'SUB-MOCK-BH-002', projectId: 'PRJ-MOCK-WZD-002', project: '样例认购 · 复核驳回 B', userId: 'employee01', amount: 7600, pay: '复核驳回', profit: 623, action: '重新上传截图', idempotencyKey: 'mock-pay-rejected-002', rejectReason: 'OCR 识别金额与申请认购金额不一致，截图疑似为其他付款记录，请重新支付或上传正确的支付成功截图。' },
-    { id: 'SUB-MOCK-SK-001', projectId: 'PRJ-MOCK-YZD-001', project: '样例认购 · 待确认收款 A', userId: 'employee01', amount: 10400, pay: '待确认收款', profit: 853, action: '确认收款', idempotencyKey: 'mock-pay-receipt-001' },
-    { id: 'SUB-MOCK-SK-002', projectId: 'PRJ-MOCK-YZD-002', project: '样例认购 · 待确认收款 B', userId: 'employee01', amount: 15800, pay: '待确认收款', profit: 1295, action: '确认收款', idempotencyKey: 'mock-pay-receipt-002' },
-    ...buildMockReviewSubscriptions()
-  ],
-  auditLogs: [
-    { time: '2026-07-05 10:32:01', actor: '张明 · 员工', role: 'employee', action: '上传支付截图', target: 'PAY-20260705-0092', before: null, after: { ocr_status: '待复核' }, result: '成功' },
-    { time: '2026-07-04 16:08:45', actor: '周敏 · 财务', role: 'finance', action: '支付复核 · 驳回', target: 'PAY-20260703-0087', before: { status: '待复核' }, after: { status: '复核驳回' }, result: '成功' },
-    { time: '2026-07-02 10:00:12', actor: '周敏 · 财务', role: 'finance', action: '替换收款码', target: 'PRJ-20260701-003', before: { qr: 'QR-20260701-00.png' }, after: { qr: 'QR-20260702-01.png' }, result: '成功' },
-    { time: '2026-06-30 18:00:03', actor: '系统', role: 'system', action: '自动兜底接管', target: 'TKV-20260430-01', before: { gap: 54160 }, after: { company_takeover_amount: 54160 }, result: '成功' }
-  ],
-  riskEvents: [
-    { time: '2026-07-05 10:35', level: '高', desc: 'OCR 金额与应付金额不一致（¥1,200 ≠ ¥5,500）', status: '待处理' },
-    { time: '2026-07-05 09:00', level: '中', desc: '项目「冷链设备升级」24 小时内截止，预估缺口 ¥10,560', status: '已通知公司超管' }
-  ],
-  rules: [
-    {
-      id: 'RULE-20260701-001',
-      projectId: 'PRJ-20260701-003',
-      projectName: '2026-Q3 办公设备集采认购',
-      ruleName: '办公设备集采默认认购规则',
-      totalAmount: 300000,
-      companyFixedAmount: 60000,
-      minAmount: 100,
-      minParticipants: 20,
-      receivingCodeId: 'RCV-20260701-001',
-      allowMultiple: true,
-      companyTakeover: true,
-      status: '已启用',
-      startAt: '2026-07-02 10:00',
-      endAt: '2026-07-12 18:00',
-      updatedAt: '2026-07-05 10:00'
-    },
-    {
-      id: 'RULE-20260628-001',
-      projectId: 'PRJ-20260628-002',
-      projectName: '员工餐厅冷链设备升级',
-      ruleName: '冷链设备升级限时认购规则',
-      totalAmount: 120000,
-      companyFixedAmount: 24000,
-      minAmount: 100,
-      minParticipants: 12,
-      receivingCodeId: 'RCV-20260701-001',
-      allowMultiple: true,
-      companyTakeover: true,
-      status: '已启用',
-      startAt: '2026-06-29 09:00',
-      endAt: '2026-07-06 12:00',
-      updatedAt: '2026-07-04 16:30'
-    }
-  ],
-  receivingCodes: [
-    {
-      id: 'RCV-20260701-001',
-      subject: 'XX 科技有限公司',
-      accountNote: '支付宝收款码 · 财务专用',
-      codeName: '支付宝收款码',
-      status: '启用',
-      updatedBy: 'finance01 · 财务',
-      updatedAt: '2026-07-07 20:30:00'
-    },
-    {
-      id: 'RCV-20260628-002',
-      subject: 'XX 科技有限公司',
-      accountNote: '银行转账收款码 · 项目专用',
-      codeName: '银行转账码',
-      status: '已禁用',
-      updatedBy: 'finance01 · 财务',
-      updatedAt: '2026-07-06 18:40:00',
-      disabledReason: '收款账户维护，暂停使用'
-    }
-  ]
-}
-
-function normalizeProjectFinance(project: Project) {
-  const costAmount = Number(project.costAmount)
-  const normalizedCost = Number.isFinite(costAmount) && costAmount >= project.total
-    ? costAmount
-    : Math.ceil(project.total * 1.2)
-  const salesAmount = Number(project.salesAmount)
-  const normalizedSales = Number.isFinite(salesAmount) && salesAmount >= normalizedCost
-    ? salesAmount
-    : Math.ceil(normalizedCost * 1.18)
-  project.costAmount = normalizedCost
-  project.salesAmount = normalizedSales
-  project.profitAmount = normalizedSales - normalizedCost
-}
-
 function normalizeProjectAmounts(project: Project) {
   const employeeSubscribedAmount = Number(project.employeeSubscribedAmount)
   const normalizedEmployee = Number.isFinite(employeeSubscribedAmount)
@@ -598,127 +194,11 @@ function normalizeProjectAmounts(project: Project) {
   project.progress = project.costAmount > 0 ? Number(((recognizedAmount / project.costAmount) * 100).toFixed(1)) : 0
 }
 
-function normalizeProjectStatus(project: (Omit<Project, 'status' | 'costAmount' | 'salesAmount' | 'profitAmount'> & Partial<Pick<Project, 'costAmount' | 'salesAmount' | 'profitAmount'>> & { status: string })): Project {
-  const normalized = { ...project } as Project
-  normalizeProjectFinance(normalized)
-  normalizeProjectAmounts(normalized)
-  normalized.settlementInvoices = Array.isArray(project.settlementInvoices) ? project.settlementInvoices : []
-  normalized.settledAmount = Number((Number(project.settledAmount) || normalized.settlementInvoices.reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0)).toFixed(2))
-  if (project.status === '已中断') {
-    normalized.status = '已中断'
-    normalized.statusType = 'danger'
-    return normalized
-  }
-  if (['草稿', '未开放'].includes(project.status)) {
-    normalized.status = '未开放'
-    normalized.statusType = 'info'
-    return normalized
-  }
-  if (['认购中', '即将截止', '开放中', '未满额'].includes(project.status)) {
-    normalized.status = normalized.remain <= 0 || normalized.progress >= 100 ? '已满额' : '未满额'
-    normalized.statusType = normalized.status === '已满额' ? 'success' : 'primary'
-    return normalized
-  }
-  if (project.status === '已满额') {
-    normalized.status = '已满额'
-    normalized.statusType = 'success'
-    return normalized
-  }
-  if (project.status === '部分已结算') {
-    normalized.status = '部分已结算'
-    normalized.statusType = 'warning'
-    return normalized
-  }
-  if (['已结束未结算', '已结算', '已冻结', '已完结'].includes(project.status)) {
-    normalized.status = '已完结'
-    normalized.statusType = 'info'
-    return normalized
-  }
-  normalized.status = '已截止'
-  normalized.statusType = 'success'
-  return normalized
-}
-
-function normalizeSubscription(subscription: Omit<Subscription, 'createdAt' | 'paymentDeadlineAt'> & Partial<Pick<Subscription, 'createdAt' | 'paymentDeadlineAt' | 'paymentUploadedAt' | 'paymentSuccessAt' | 'paymentImageUrl' | 'paymentImageName' | 'reviewedBy' | 'reviewedAt' | 'rejectReason'>>): Subscription {
-  const createdAt = formatDateTime(parseDateTime(subscription.createdAt))
-  const paymentDeadlineAt = subscription.paymentDeadlineAt && subscription.paymentDeadlineAt !== 'Invalid Date'
-    ? formatDateTime(parseDateTime(subscription.paymentDeadlineAt))
-    : addHours(createdAt, 12)
-  const pay = subscription.projectId === 'PRJ-FSY-OFFLINE-368' && subscription.pay === '已缴款' && !subscription.reviewedAt
-    ? '待复核'
-    : subscription.pay
-  const action = pay === '未缴款' ? '去支付' : subscription.action
-  const rejectReason = pay === '复核驳回'
-    ? subscription.rejectReason || '支付截图信息不完整，请重新上传包含金额、收款方与交易流水的支付成功截图。'
-    : undefined
-  const legacyRecognizedAmount = subscription.pay === '已缴款' || subscription.pay === '已收款'
-    ? Number(subscription.amount) || 0
-    : 0
-  const paymentImages = subscription.paymentImages?.length
-    ? subscription.paymentImages
-    : subscription.paymentImageUrl && subscription.paymentImageName
-      ? [{
-          id: `PAYIMG-LEGACY-${subscription.id}`,
-          paymentImageUrl: subscription.paymentImageUrl,
-          paymentImageName: subscription.paymentImageName,
-          recognizedAmount: Number(subscription.recognizedPaidAmount ?? legacyRecognizedAmount),
-          uploadedAt: subscription.paymentUploadedAt || createdAt,
-          status: '已识别' as const
-        }]
-      : []
-  const recognizedPaidAmount = Number(paymentImages
-    .filter(image => image.status === '已识别')
-    .reduce((sum, image) => sum + Number(image.recognizedAmount || 0), 0).toFixed(2))
-  return {
-    ...subscription,
-    pay,
-    action,
-    rejectReason,
-    createdAt,
-    paymentDeadlineAt,
-    paymentImages,
-    recognizedPaidAmount
-  }
-}
-
 function normalizeRuleStatus(status: unknown): SubscriptionRule['status'] {
   if (status === '已发布') return '已启用'
   if (status === '草稿') return '未启用'
   if (status === '已启用' || status === '未启用' || status === '已停用') return status
   return '未启用'
-}
-
-function normalizeRule(rule: SubscriptionRule): SubscriptionRule {
-  const companyFixedAmount = Number(rule.companyFixedAmount)
-  return {
-    ...rule,
-    companyFixedAmount: Number.isFinite(companyFixedAmount) ? Math.max(0, companyFixedAmount) : 0,
-    receivingCodeId: rule.receivingCodeId || 'RCV-20260701-001',
-    status: normalizeRuleStatus(rule.status)
-  }
-}
-
-function normalizeState(input: Partial<AppState>): AppState {
-  const normalizedProjects = (input.projects ?? structuredClone(seedState.projects)).map(normalizeProjectStatus)
-  const findProject = (subscription: Subscription) => normalizedProjects.find(project => project.id === subscription.projectId || project.title === subscription.project)
-  const reviewMocks = buildMockReviewSubscriptions()
-  const sourceSubscriptions = input.subscriptions ?? structuredClone(seedState.subscriptions)
-  const subscriptionIds = new Set(sourceSubscriptions.map(item => item.id))
-  const mergedSubscriptions = [
-    ...sourceSubscriptions,
-    ...reviewMocks.filter(item => !subscriptionIds.has(item.id))
-  ]
-  return {
-    projects: normalizedProjects,
-    subscriptions: mergedSubscriptions.map(normalizeSubscription).map(subscription => {
-      const project = findProject(subscription)
-      return project ? { ...subscription, profit: project.profitAmount } : subscription
-    }),
-    auditLogs: input.auditLogs ?? structuredClone(seedState.auditLogs),
-    riskEvents: input.riskEvents ?? structuredClone(seedState.riskEvents),
-    rules: (input.rules ?? structuredClone(seedState.rules)).map(normalizeRule),
-    receivingCodes: input.receivingCodes ?? structuredClone(seedState.receivingCodes)
-  }
 }
 
 function isCompanySubscription(subscription: Subscription) {
@@ -963,8 +443,9 @@ function uploadActor(fields: Record<string, string>, fallback: string) {
 
 function receivingCodeManager(req: IncomingMessage) {
   const context = requestContext(req)
-  if (context.role !== 'admin' && context.role !== 'finance') throw new AppError(403, 'FORBIDDEN', '只有管理员或财务可以维护收款码')
-  return { ...context, label: `${context.userId} · ${context.role === 'admin' ? '管理员' : '财务'}` }
+  const role = context.role
+  if (role !== 'admin' && role !== 'finance') throw new AppError(403, 'FORBIDDEN', '只有管理员或财务可以维护收款码')
+  return { userId: context.userId, role, label: `${context.userId} · ${role === 'admin' ? '管理员' : '财务'}` }
 }
 
 function managementActor(req: IncomingMessage, allowedRoles: Role[]) {
@@ -1140,7 +621,7 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
   const companyFixedAmount = shareRule?.companyFixedAmount ?? Number(body.companyFixedAmount ?? 0)
   const minParticipants = shareRule ? 1 : Number(body.minParticipants)
   const receivingCodeId = String(body.receivingCodeId ?? '').trim()
-  if (!body.ruleName) {
+  if (typeof body.ruleName !== 'string' || !body.ruleName.trim()) {
     send(res, 400, { error: 'RULE_NAME_REQUIRED', message: '请输入规则名称' })
     return null
   }
@@ -1284,6 +765,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/payments/ocr') {
+    if (!String(req.headers['content-type'] ?? '').toLowerCase().startsWith('multipart/form-data;')) {
+      return send(res, 415, { error: 'MULTIPART_REQUIRED', message: '请通过文件上传接口提交缴款凭证' })
+    }
     const context = requestContext(req)
     const { fields, image } = await readValidatedUpload(
       req,
@@ -1341,7 +825,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const paymentImages = [...(latest.paymentImages ?? []), imageRecord]
         const recognizedTotal = Number(paymentImages.reduce((sum, item) => sum + (item.status === '已识别' ? item.recognizedAmount : 0), 0).toFixed(2))
         const expectedAmount = Number(latest.amount)
-        const pay = latest.shares !== undefined
+        const pay: PaymentStatus = latest.shares !== undefined
           ? '待复核'
           : recognitionFailure ? '待复核' : recognizedTotal === expectedAmount ? '已缴款' : recognizedTotal < expectedAmount ? '部分缴款' : '待复核'
         const record = {
@@ -1386,6 +870,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/invoices/ocr') {
+    if (!String(req.headers['content-type'] ?? '').toLowerCase().startsWith('multipart/form-data;')) {
+      return send(res, 415, { error: 'MULTIPART_REQUIRED', message: '请通过文件上传接口提交发票凭证' })
+    }
     const { fields, image } = await readValidatedUpload(req, ['projectId', 'fileName', 'operator'], ['image/png', 'image/jpeg', 'image/bmp'])
     const projectId = fields.projectId?.trim()
     const project = projectId ? await repositories.projects.getById(projectId) : null
@@ -1443,38 +930,6 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       return true
     })
     return send(res, 200, { data: { codeId: code.id, imageAssetId: code.imageAssetId } })
-  }
-
-  if (pathname === '/api/invoices/ocr') {
-    const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl.trim() : ''
-    const fileName = typeof body.fileName === 'string' ? body.fileName.trim() : ''
-    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''
-    const project = projects.find(item => item.id === projectId)
-    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
-    if (!['已满额', '已截止', '部分已结算'].includes(project.status)) {
-      return send(res, 409, { error: 'PROJECT_NOT_SETTLEMENT_ELIGIBLE', message: '项目当前状态不允许发起结算识别' })
-    }
-    if (!fileName || fileName.length > 255) {
-      return send(res, 400, { error: 'INVOICE_IMAGE_NAME_INVALID', message: '发票图片文件名无效' })
-    }
-    if (!ensureImageStorageCapacity(res, imageDataUrl)) return
-    try {
-      ocrQuota.take('ocr')
-      const data = await recognizeFinanceBill({
-        imageDataUrl,
-        appCode: process.env.INVOICE_OCR_APPCODE ?? '',
-        endpoint: process.env.INVOICE_OCR_API_URL,
-      })
-      if (!Number.isFinite(data.amount) || Number(data.amount) < 0.01) {
-        return send(res, 200, { data, message: 'OCR 已完成，但未识别到可结算金额' })
-      }
-      const proof = ocrProofStore.create({ projectId, imageDataUrl, fileName, result: data })
-      return send(res, 200, { data: { ...data, settlementProofId: proof.proofId, proofExpiresAt: proof.expiresAt }, message: '发票 OCR 识别完成' })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '发票识别失败'
-      const status = error instanceof ResourceLimitError ? 429 : message.startsWith('未配置') ? 503 : message.includes('仅支持') || message.includes('5MB') ? 400 : message.includes('凭证已达上限') ? 422 : 502
-      return send(res, status, { error: 'INVOICE_OCR_FAILED', message })
-    }
   }
 
   if (pathname === '/api/invoices/pending/delete') {
@@ -1900,7 +1355,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       id: `RULE-${Date.now()}`,
       projectId: project.id,
       projectName: project.title,
-      ruleName: body.ruleName,
+      ruleName: String(body.ruleName).trim(),
       totalAmount,
       ...shareRule,
       companyFixedAmount,
@@ -1910,8 +1365,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       allowMultiple: Boolean(body.allowMultiple),
       companyTakeover: shareRule ? true : Boolean(body.companyTakeover),
       status: normalizeRuleStatus(body.status),
-      startAt: body.startAt ?? '',
-      endAt: body.endAt ?? '',
+      startAt: typeof body.startAt === 'string' ? body.startAt : '',
+      endAt: typeof body.endAt === 'string' ? body.endAt : '',
       updatedAt: now()
     }
     rules.unshift(record)
@@ -2154,7 +1609,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const latestImage = remainingImages.at(-1)
       const recognizedTotal = Number(remainingImages.filter(item => item.status === '已识别').reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
       const hasFailedImage = remainingImages.some(item => item.status === '识别失败')
-      const pay = latest.shares !== undefined
+      const pay: PaymentStatus = latest.shares !== undefined
         ? remainingImages.length === 0 ? '未缴款' : '待复核'
         : hasFailedImage ? '待复核' : recognizedTotal === 0 ? '未缴款' : recognizedTotal < latest.amount ? '部分缴款' : '待复核'
       const record = {
@@ -2191,109 +1646,19 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     })
   }
 
-  if (pathname === '/api/payments/ocr') {
-    const subscription = subscriptions.find(item => item.id === body.subscriptionId)
-    const paymentImageUrl = typeof body.paymentImageUrl === 'string' ? body.paymentImageUrl.trim() : undefined
-    const paymentImageName = typeof body.paymentImageName === 'string' ? body.paymentImageName.trim() : undefined
-    if (!subscription) {
-      return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
-    }
-    const context = requestContext(req)
-    if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能上传本人认购的支付截图')
-    if (['已缴款', '已收款', '已释放', '公司待出资'].includes(subscription.pay)) {
-      return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
-    }
-    if (subscription.shares !== undefined && Date.now() > new Date(subscription.paymentDeadlineAt.replace(' ', 'T')).getTime()) {
-      return send(res, 409, { error: 'PAYMENT_DEADLINE_PASSED', message: '该认购的缴款期限已结束' })
-    }
-    if (!paymentImageUrl || !supportedPaymentImageDataUrl.test(paymentImageUrl) || paymentImageUrl.length > maxImageDataUrlLength) {
-      return send(res, 400, { error: 'PAYMENT_IMAGE_INVALID', message: '支付截图仅支持 PNG、JPG 或 BMP 格式，且大小不能超过 5MB' })
-    }
-    if (!paymentImageName || paymentImageName.length > 255) {
-      return send(res, 400, { error: 'PAYMENT_IMAGE_NAME_INVALID', message: '支付截图文件名无效' })
-    }
-    if ((subscription.paymentImages?.length ?? 0) >= maxPaymentImagesPerSubscription) {
-      return send(res, 429, { error: 'PAYMENT_IMAGE_LIMIT_EXCEEDED', message: `每笔认购最多保留 ${maxPaymentImagesPerSubscription} 张支付截图` })
-    }
-    if (!ensureImageStorageCapacity(res, paymentImageUrl, subscription.paymentImageUrl ?? '', 2)) return
-    const expectedAmount = Number(subscription.amount)
-    let recognizedAmount = 0
-    let recognitionFailure = ''
-    try {
-      ocrQuota.take('ocr')
-      const recognition = await recognizeFinanceBill({
-        imageDataUrl: paymentImageUrl,
-        appCode: process.env.INVOICE_OCR_APPCODE ?? '',
-        endpoint: process.env.INVOICE_OCR_API_URL,
-      })
-      if (recognition.amount !== undefined && Number.isFinite(recognition.amount) && recognition.amount > 0 && recognition.amount <= 1_000_000_000) {
-        recognizedAmount = recognition.amount
-      } else {
-        recognitionFailure = '未识别到有效交易金额'
-      }
-    } catch (error) {
-      if (error instanceof ResourceLimitError) {
-        return send(res, 429, { error: error.code, message: error.message })
-      }
-      recognitionFailure = error instanceof Error ? error.message : '支付截图识别失败'
-    }
-    const recognized = !recognitionFailure
-    const uploadedAt = now()
-    subscription.paymentUploadedAt = uploadedAt
-    subscription.paymentImages ??= []
-    subscription.paymentImages.push({
-      id: `PAYIMG-${Date.now()}-${subscription.paymentImages.length + 1}`,
-      paymentImageUrl,
-      paymentImageName,
-      recognizedAmount: Number(recognizedAmount.toFixed(2)),
-      uploadedAt,
-      status: recognized ? '已识别' : '识别失败'
-    })
-    subscription.paymentImageUrl = paymentImageUrl
-    subscription.paymentImageName = paymentImageName
-    const recognizedTotal = Number(subscription.paymentImages
-      .filter(item => item.status === '已识别')
-      .reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
-    subscription.recognizedPaidAmount = recognizedTotal
-    if (recognized) subscription.paymentSuccessAt = uploadedAt
-    subscription.pay = subscription.shares !== undefined
-      ? '待复核'
-      : !recognized
-      ? '待复核'
-      : recognizedTotal === expectedAmount
-        ? '待复核'
-        : recognizedTotal < expectedAmount
-          ? '部分缴款'
-          : '待复核'
-    subscription.action = !recognized || recognizedTotal < expectedAmount ? '重新上传截图' : '查看支付'
-    await persistState()
-    const paymentImageCount = subscription.paymentImages.length
-    const remainingAmount = Math.max(0, Number((expectedAmount - recognizedTotal).toFixed(2)))
-    const after = {
-      status: subscription.pay,
-      ocr_status: recognized ? '已识别' : '待财务复核',
-      ocr_amount: Number(recognizedAmount.toFixed(2)),
-      recognized_total: recognizedTotal,
-      expected_amount: expectedAmount,
-      remaining_amount: remainingAmount,
-      image_count: paymentImageCount,
-      confidence: recognized ? 0.98 : 0,
-      payment_success_at: recognized ? uploadedAt : undefined,
-      reason: recognitionFailure || undefined
-    }
-    await pushAudit({ actor: 'OCR 适配层', role: 'system', action: 'OCR 支付校验', target: body.paymentId ?? 'PAY-20260705-0092', before: { status: '待识别' }, after })
-    return send(res, 200, { data: after, message: recognized ? '支付截图 OCR 识别完成，等待财务审核' : '支付截图已保存，等待财务审核' })
-  }
-
   if (pathname === '/api/settlements/calc') {
     try {
+      const requiredNumber = (value: unknown) => {
+        if (typeof value !== 'number') throw new RangeError('所有金额必须明确填写为整数分')
+        return value
+      }
       return send(res, 200, { data: calculateSettlementProfit({
-        receivableCents: body.receivableCents,
-        customerReceiptsCents: body.customerReceiptsCents,
-        companyTopUpsCents: body.companyTopUpsCents,
-        companyReturnsCents: body.companyReturnsCents,
-        procurementPaymentsCents: body.procurementPaymentsCents,
-        confirmedCostsCents: body.confirmedCostsCents
+        receivableCents: requiredNumber(body.receivableCents),
+        customerReceiptsCents: requiredNumber(body.customerReceiptsCents),
+        companyTopUpsCents: requiredNumber(body.companyTopUpsCents),
+        companyReturnsCents: requiredNumber(body.companyReturnsCents),
+        procurementPaymentsCents: requiredNumber(body.procurementPaymentsCents),
+        confirmedCostsCents: requiredNumber(body.confirmedCostsCents)
       }) })
     } catch (error) {
       return send(res, 400, { error: 'SETTLEMENT_PROFIT_INPUT_INVALID', message: error instanceof Error ? error.message : '试算金额无效' })

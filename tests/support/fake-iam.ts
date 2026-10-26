@@ -42,7 +42,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-employee-token', userId: 1001, username: 'employee01', nickname: '员工甲', deptId: 100,
-    roles: ['employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create'],
+    roles: ['employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create', 'crowdfunding:payment-proof:ocr'],
     dataScope: { all: false, self: true, deptIds: [] }
   },
   {
@@ -52,7 +52,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-finance-token', userId: 1003, username: 'finance01', nickname: '财务', deptId: 200,
-    roles: ['finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query'],
+    roles: ['finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {

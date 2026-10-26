@@ -3,6 +3,7 @@ export type SettlementInvoiceRecord = {
   amount: number
   fileName: string
   assetId: string
+  imageUrl?: string
   transactionDate: string
   payer: string
   payee: string
