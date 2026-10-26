@@ -2,10 +2,15 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiRequest } from '../auth/api-client'
+import { readAccessToken } from '../auth/session'
 
 type Project = { id: string; title: string; status: string }
 type Line = { participantId: string; kind: 'employee' | 'company'; shares: number;
-  principalCents: number; profitCents: number; payoutCents: number; status: string }
+  principalCents: number; profitCents: number; payoutCents: number; status: string;
+  payout?: { paidAt: string; proofAssetIds: string[] } }
+type PayoutProxyRequest = { id: string; orderId: string; projectId: string; participantId: string;
+  reason: string; accountDisabled: boolean; offlineVerificationNote?: string;
+  proofAssetIds: string[]; status: string; reviewReason?: string }
 type Order = { id: string; projectId: string; status: string; receivableCents: number;
   procurementPaymentCents: number; profitCents: number; confirmedCostsCents: number;
   companyRoundingResidualCents: number; payoutTotalCents: number;
@@ -17,7 +22,8 @@ const props = defineProps<{ projects: Project[]; role: 'finance' | 'super_admin'
   canGenerate: boolean; canApprove: boolean; canReject: boolean; canVoid: boolean;
   canQueryCost: boolean; canRegisterCost: boolean; canUploadCostProof: boolean; canReviewCost: boolean;
   canRegisterPayout: boolean; canUploadPayoutProof: boolean; canReplyPayoutIssue: boolean;
-  canQueryFinancialReconciliation: boolean; canClose: boolean }>()
+  canQueryFinancialReconciliation: boolean; canClose: boolean;
+  canProxyQuery: boolean; canProxyRequest: boolean; canProxyReview: boolean }>()
 const emit = defineEmits<{ updated: [] }>()
 const projectId = ref('')
 const orders = ref<Order[]>([])
@@ -42,6 +48,11 @@ const payoutProofs = ref<Array<{ id: string; fileName: string }>>([])
 const payoutUploading = ref(false)
 const companyTransferConfirmed = ref(false)
 const reconciliation = ref<Record<string, number | boolean | string>>()
+const proxyRequests = ref<PayoutProxyRequest[]>([])
+const proxyTarget = ref<{ order: Order; line: Line }>()
+const proxyReason = ref('')
+const proxyAccountDisabled = ref(false)
+const proxyOfflineNote = ref('')
 const eligible = computed(() => props.projects.filter(item => item.status === '待分配'))
 const costEligible = computed(() => props.projects.filter(item => ['待回款', '回款中', '待分配'].includes(item.status)))
 const money = (cents: number) => `¥ ${(cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -64,6 +75,11 @@ async function refresh() {
     const response = await apiRequest<{ data: { items: Order[]; total: number } }>(`/api/distribution-orders?${query}`)
     orders.value = response.data.items
     total.value = response.data.total
+    if (props.canProxyQuery) {
+      const result = await apiRequest<{ data: PayoutProxyRequest[] }>(
+        `/api/distribution-payout-proxy-requests${projectId.value ? `?projectId=${encodeURIComponent(projectId.value)}` : ''}`)
+      proxyRequests.value = result.data
+    }
     if (props.canQueryCost) {
       const result = await apiRequest<{ data: Cost[] }>('/api/confirmed-costs')
       costs.value = result.data
@@ -252,6 +268,49 @@ async function act(order: Order, action: 'approve' | 'reject' | 'void') {
   finally { submitting.value = false }
 }
 
+async function submitProxy() {
+  const target = proxyTarget.value
+  if (!target || !props.canProxyRequest || submitting.value) return
+  submitting.value = true
+  try {
+    const result = await apiRequest<{ message: string }>(
+      `/api/distribution-orders/${encodeURIComponent(target.order.id)}/lines/${encodeURIComponent(target.line.participantId)}/proxy-confirm`, {
+        method: 'POST', body: JSON.stringify({ reason: proxyReason.value.trim(),
+          accountDisabled: proxyAccountDisabled.value,
+          offlineVerificationNote: proxyOfflineNote.value.trim() }) })
+    ElMessage.success(result.message)
+    proxyTarget.value = undefined; proxyReason.value = ''; proxyAccountDisabled.value = false; proxyOfflineNote.value = ''
+    await refresh(); emit('updated')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '代确认申请失败') }
+  finally { submitting.value = false }
+}
+async function reviewProxy(item: PayoutProxyRequest, action: 'approve' | 'reject') {
+  let reason = ''
+  try {
+    if (action === 'approve') await ElMessageBox.confirm('已核实原打款凭证、超期时间和收款对象，确认代员工确认收款？', '公司复核代确认', { type: 'warning' })
+    else reason = (await ElMessageBox.prompt('请输入 5 至 200 字驳回原因', '驳回代确认', { inputType: 'textarea' })).value.trim()
+  } catch { return }
+  if (action === 'reject' && (reason.length < 5 || reason.length > 200)) { ElMessage.warning('驳回原因须为 5 至 200 字'); return }
+  submitting.value = true
+  try {
+    const result = await apiRequest<{ message: string }>(
+      `/api/distribution-payout-proxy-requests/${encodeURIComponent(item.id)}/review`, {
+        method: 'POST', body: JSON.stringify({ action, reason }) })
+    ElMessage.success(result.message); await refresh(); emit('updated')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '代确认复核失败') }
+  finally { submitting.value = false }
+}
+async function openProxyProof(assetId: string) {
+  try {
+    const token = readAccessToken()
+    const response = await fetch(`/api/files/${encodeURIComponent(assetId)}/content`, {
+      credentials: 'same-origin', headers: token ? { Authorization: `Bearer ${token}` } : undefined })
+    if (!response.ok) throw new Error('凭证读取失败')
+    const url = URL.createObjectURL(await response.blob())
+    window.open(url, '_blank', 'noopener'); setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '凭证读取失败') }
+}
+
 async function closeOrder(order: Order) {
   if (!props.canClose || order.status !== '可结单' || submitting.value) return
   try {
@@ -287,7 +346,7 @@ async function closeOrder(order: Order) {
         <el-table-column label="操作" min-width="270"><template #default="scope"><el-button size="small" @click="expanded = expanded === scope.row.id ? '' : scope.row.id">明细</el-button><el-button v-if="scope.row.status === '待审批' && canApprove" size="small" type="primary" :disabled="submitting" @click="act(scope.row, 'approve')">审批通过</el-button><el-button v-if="scope.row.status === '待审批' && canReject" size="small" :disabled="submitting" @click="act(scope.row, 'reject')">驳回</el-button><el-button v-if="['待审批', '已驳回'].includes(scope.row.status) && canVoid" size="small" :disabled="submitting" @click="act(scope.row, 'void')">作废</el-button><el-button v-if="scope.row.status === '可结单' && canClose" size="small" type="primary" :disabled="submitting" @click="closeOrder(scope.row)">结单</el-button></template></el-table-column>
       </el-table>
       <el-pagination v-model:current-page="page" :page-size="10" :total="total" layout="prev, pager, next, total" />
-      <template v-for="order in orders" :key="order.id"><section v-if="expanded === order.id" class="details"><h2>分配明细 · {{ order.id }}</h2><p>已确认其他成本 {{ money(order.confirmedCostsCents) }}；审批前须核对实际成本是否已全部入账。</p><el-table :data="order.lines"><el-table-column label="认购主体"><template #default="scope">{{ scope.row.kind === 'company' ? '公司' : scope.row.participantId }}</template></el-table-column><el-table-column prop="shares" label="份数" /><el-table-column label="本金"><template #default="scope">{{ money(scope.row.principalCents) }}</template></el-table-column><el-table-column label="利润"><template #default="scope">{{ money(scope.row.profitCents) }}</template></el-table-column><el-table-column label="所得"><template #default="scope">{{ money(scope.row.payoutCents) }}</template></el-table-column><el-table-column prop="status" label="明细状态" /><el-table-column v-if="canRegisterPayout || canReplyPayoutIssue" label="操作" width="150"><template #default="scope"><el-button v-if="canRegisterPayout && scope.row.status === '待登记打款' && ['已审批', '打款登记中'].includes(order.status)" size="small" type="primary" @click="openPayout(order, scope.row)">登记打款</el-button><el-button v-if="canReplyPayoutIssue && scope.row.status === '有异议'" size="small" @click="replyIssue(order, scope.row)">回复异议</el-button></template></el-table-column></el-table></section></template>
+      <template v-for="order in orders" :key="order.id"><section v-if="expanded === order.id" class="details"><h2>分配明细 · {{ order.id }}</h2><p>已确认其他成本 {{ money(order.confirmedCostsCents) }}；审批前须核对实际成本是否已全部入账。</p><el-table :data="order.lines"><el-table-column label="认购主体"><template #default="scope">{{ scope.row.kind === 'company' ? '公司' : scope.row.participantId }}</template></el-table-column><el-table-column prop="shares" label="份数" /><el-table-column label="本金"><template #default="scope">{{ money(scope.row.principalCents) }}</template></el-table-column><el-table-column label="利润"><template #default="scope">{{ money(scope.row.profitCents) }}</template></el-table-column><el-table-column label="所得"><template #default="scope">{{ money(scope.row.payoutCents) }}</template></el-table-column><el-table-column prop="status" label="明细状态" /><el-table-column v-if="canRegisterPayout || canReplyPayoutIssue || canProxyRequest" label="操作" width="180"><template #default="scope"><el-button v-if="canRegisterPayout && scope.row.status === '待登记打款' && ['已审批', '打款登记中'].includes(order.status)" size="small" type="primary" @click="openPayout(order, scope.row)">登记打款</el-button><el-button v-if="canReplyPayoutIssue && scope.row.status === '有异议'" size="small" @click="replyIssue(order, scope.row)">回复异议</el-button><el-button v-if="canProxyRequest && scope.row.kind === 'employee' && scope.row.status === '待员工确认'" size="small" @click="proxyTarget = { order, line: scope.row }">申请代确认</el-button></template></el-table-column></el-table></section></template>
     </section>
     <section v-if="canQueryCost" class="panel">
       <h2>其他已确认成本</h2>
@@ -311,6 +370,8 @@ async function closeOrder(order: Order) {
         <el-form-item><el-button type="primary" :loading="submitting" :disabled="costUploading || !canUploadCostProof" @click="registerCost">提交公司复核</el-button></el-form-item>
       </el-form>
     </section>
+    <section v-if="canProxyQuery" class="panel"><h2>分配收款代确认申请</h2><el-table :data="proxyRequests" empty-text="暂无代确认申请" style="width:100%"><el-table-column prop="orderId" label="分配单" min-width="155" /><el-table-column prop="participantId" label="员工" width="110" /><el-table-column prop="reason" label="申请原因" min-width="180" /><el-table-column prop="offlineVerificationNote" label="线下核实记录" min-width="160" /><el-table-column prop="status" label="状态" width="110" /><el-table-column label="原打款凭证" width="115"><template #default="scope"><el-button v-for="id in scope.row.proofAssetIds" :key="id" link type="primary" @click="openProxyProof(id)">查看</el-button></template></el-table-column><el-table-column v-if="canProxyReview" label="操作" width="130"><template #default="scope"><template v-if="scope.row.status === '待公司复核'"><el-button link type="primary" :disabled="submitting" @click="reviewProxy(scope.row, 'approve')">通过</el-button><el-button link type="danger" :disabled="submitting" @click="reviewProxy(scope.row, 'reject')">驳回</el-button></template></template></el-table-column></el-table></section>
+    <el-dialog :model-value="Boolean(proxyTarget)" title="申请分配收款代确认" width="620px" @update:model-value="(value: boolean) => { if (!value) proxyTarget = undefined }"><template v-if="proxyTarget"><p>员工：{{ proxyTarget.line.participantId }}；原打款金额：{{ money(proxyTarget.line.payoutCents) }}。仅在原打款满超期天数并留有凭证时可申请。</p><el-form label-width="125px"><el-form-item label="申请原因" required><el-input v-model="proxyReason" type="textarea" maxlength="200" /></el-form-item><el-form-item label="员工账号停用"><el-checkbox v-model="proxyAccountDisabled">已停用或离职</el-checkbox></el-form-item><el-form-item v-if="proxyAccountDisabled" label="线下核实记录" required><el-input v-model="proxyOfflineNote" type="textarea" maxlength="200" /></el-form-item></el-form></template><template #footer><el-button @click="proxyTarget = undefined">取消</el-button><el-button type="primary" :loading="submitting" @click="submitProxy">提交公司复核</el-button></template></el-dialog>
     <el-dialog :model-value="Boolean(payoutTarget)" title="登记分配打款" width="620px" @update:model-value="(value: boolean) => { if (!value) payoutTarget = undefined }">
       <template v-if="payoutTarget">
         <p>认购主体：{{ payoutTarget.line.kind === 'company' ? '公司' : payoutTarget.line.participantId }}；应登记金额：{{ money(payoutTarget.line.payoutCents) }}</p>

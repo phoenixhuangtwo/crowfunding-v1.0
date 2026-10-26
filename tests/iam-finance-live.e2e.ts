@@ -106,11 +106,14 @@ try {
     assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
   }
   for (const permission of ['crowdfunding:project-refund-proxy:query',
-    'crowdfunding:project-refund-proxy:request']) {
+    'crowdfunding:project-refund-proxy:request',
+    'crowdfunding:distribution-payout-proxy:query',
+    'crowdfunding:distribution-payout-proxy:request']) {
     assert.ok(info.apiPermissions.includes(permission), `${permission} 已授予财务`)
     assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
   }
   await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:project-refund-proxy:review', claims.tenantId), /IAM 权限拒绝/)
+  await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:distribution-payout-proxy:review', claims.tenantId), /IAM 权限拒绝/)
   await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:procurement-failure:review', claims.tenantId), /IAM 权限拒绝/)
   await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:receipt-termination-refund:review', claims.tenantId), /IAM 权限拒绝/)
   assert.ok(info.uiPermissions.includes('crowdfunding:procurement-failure:query'))

@@ -32,6 +32,7 @@ import { validateProjectRefundPayment, type ProjectRefund } from './finance/proj
 import { validateSupplierRefund, type ProcurementFailureRequest, type SupplierRefund } from './finance/procurement-failure.ts'
 import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from './finance/receipt-termination-refunds.ts'
 import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
+import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -314,6 +315,7 @@ const procurementFailureRequests = mongo.db.collection<ProcurementFailureRequest
 const supplierRefunds = mongo.db.collection<SupplierRefund>(`${appConfig.mongodb.collectionPrefix}supplier_refunds`)
 const receiptTerminationRefunds = mongo.db.collection<ReceiptTerminationRefund>(`${appConfig.mongodb.collectionPrefix}receipt_termination_refunds`)
 const projectRefundProxyRequests = mongo.db.collection<ProjectRefundProxyRequest>(`${appConfig.mongodb.collectionPrefix}project_refund_proxy_requests`)
+const distributionPayoutProxyRequests = mongo.db.collection<DistributionPayoutProxyRequest>(`${appConfig.mongodb.collectionPrefix}distribution_payout_proxy_requests`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -889,6 +891,13 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     if (!['finance', 'super_admin'].includes(role)) throw new AppError(403, 'FORBIDDEN', '无权查看退款代确认申请')
     const projectId = searchParams.get('projectId')?.trim()
     return send(res, 200, { data: await projectRefundProxyRequests.find(projectId ? { projectId } : {})
+      .sort({ requestedAt: -1 }).limit(200).toArray() })
+  }
+  if (pathname === '/api/distribution-payout-proxy-requests') {
+    const role = requestContext(req).role
+    if (!['finance', 'super_admin'].includes(role)) throw new AppError(403, 'FORBIDDEN', '无权查看分配代确认申请')
+    const projectId = searchParams.get('projectId')?.trim()
+    return send(res, 200, { data: await distributionPayoutProxyRequests.find(projectId ? { projectId } : {})
       .sort({ requestedAt: -1 }).limit(200).toArray() })
   }
   if (pathname === '/api/procurement-failure-requests') {
@@ -1763,6 +1772,113 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_PROXY_CHANGED', message: '退款状态已变化' })
       if (error instanceof Error && /代确认|账号停用|凭证/.test(error.message)) {
         return send(res, 409, { error: 'PROJECT_REFUND_PROXY_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const distributionPayoutProxyMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/lines\/([^/]+)\/proxy-confirm$/)
+  if (distributionPayoutProxyMatch) {
+    const actor = financeOperator(req)
+    const orderId = decodeURIComponent(distributionPayoutProxyMatch[1])
+    const participantId = decodeURIComponent(distributionPayoutProxyMatch[2])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const order = await distributionOrders.findOne({ id: orderId }, { session })
+        const project = order && await repositories.projects.getById(order.projectId, session)
+        const line = order?.lines.find(item => item.participantId === participantId)
+        if (!order || !project || project.status !== '分配中'
+          || !['待员工确认', '打款登记中'].includes(order.status)
+          || !line || line.kind !== 'employee' || line.status !== '待员工确认' || !line.payout) {
+          throw new AppError(409, 'DISTRIBUTION_PROXY_INVALID', '分配明细当前不可申请代确认')
+        }
+        const verified = validateProjectRefundProxy({
+          reason: typeof body.reason === 'string' ? body.reason : '',
+          accountDisabled: body.accountDisabled === true,
+          offlineVerificationNote: typeof body.offlineVerificationNote === 'string' ? body.offlineVerificationNote : '',
+          paidAt: line.payout.paidAt, proofAssetIds: line.payout.proofAssetIds,
+          confirmDays: project.proxyConfirmDays ?? 7 }, new Date())
+        const existing = await distributionPayoutProxyRequests.findOne({ orderId, participantId }, { session })
+        if (existing && existing.status !== '已驳回') {
+          throw new AppError(409, 'DISTRIBUTION_PROXY_DUPLICATE', '代确认申请已存在')
+        }
+        const request: DistributionPayoutProxyRequest = { id: existing?.id ?? `DPPX-${randomUUID()}`,
+          orderId, projectId: project.id, participantId, ...verified,
+          proofAssetIds: [...line.payout.proofAssetIds], status: '待公司复核',
+          requestedBy: actor.userId, requestedAt: new Date().toISOString() }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: '分配中' }, { $inc: { distributionRevision: 1 } }, { session })
+        await distributionPayoutProxyRequests.replaceOne({ orderId, participantId }, request, { upsert: true, session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '申请员工分配收款代确认',
+          target: `${orderId}:${participantId}`, before: { status: line.status },
+          after: { requestId: request.id, accountDisabled: request.accountDisabled,
+            reason: request.reason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { request, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.request, message: '代确认申请已提交，请等待公司复核' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'DISTRIBUTION_PROXY_DUPLICATE', message: '代确认申请已存在' })
+      if (error instanceof Error && /代确认|账号停用|凭证/.test(error.message)) {
+        return send(res, 400, { error: 'DISTRIBUTION_PROXY_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const distributionPayoutProxyReviewMatch = pathname.match(/^\/api\/distribution-payout-proxy-requests\/([^/]+)\/review$/)
+  if (distributionPayoutProxyReviewMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const id = decodeURIComponent(distributionPayoutProxyReviewMatch[1])
+    const action = body.action === 'approve' ? 'approve' : body.action === 'reject' ? 'reject' : ''
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (!action || (action === 'reject' && (reason.length < 5 || reason.length > 200))) {
+      return send(res, 400, { error: 'DISTRIBUTION_PROXY_REVIEW_INVALID', message: '复核操作无效，驳回原因须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const request = await distributionPayoutProxyRequests.findOne({ id }, { session })
+        if (!request || request.status !== '待公司复核') throw new AppError(409, 'DISTRIBUTION_PROXY_CHANGED', '代确认申请不存在或已复核')
+        const order = await distributionOrders.findOne({ id: request.orderId }, { session })
+        const project = await repositories.projects.getById(request.projectId, session)
+        const index = order?.lines.findIndex(item => item.participantId === request.participantId) ?? -1
+        const line = index >= 0 ? order?.lines[index] : undefined
+        if (!order || !project || project.status !== '分配中'
+          || !['待员工确认', '打款登记中'].includes(order.status)
+          || !line || line.kind !== 'employee' || line.status !== '待员工确认'
+          || !line.payout || JSON.stringify(line.payout.proofAssetIds) !== JSON.stringify(request.proofAssetIds)) {
+          throw new AppError(409, 'DISTRIBUTION_PROXY_STATE_CHANGED', '原打款或凭证状态已变化')
+        }
+        validateProjectRefundProxy({ reason: request.reason, accountDisabled: request.accountDisabled,
+          offlineVerificationNote: request.offlineVerificationNote, paidAt: line.payout.paidAt,
+          proofAssetIds: line.payout.proofAssetIds, confirmDays: project.proxyConfirmDays ?? 7 }, new Date())
+        const reviewedAt = new Date().toISOString()
+        const next: DistributionPayoutProxyRequest = { ...request,
+          status: action === 'approve' ? '已通过' : '已驳回', reviewedBy: actor.userId,
+          reviewedAt, ...(action === 'reject' ? { reviewReason: reason } : {}) }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: '分配中' }, { $inc: { distributionRevision: 1 } }, { session })
+        const changed = await distributionPayoutProxyRequests.replaceOne({ id, status: '待公司复核' }, next, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'DISTRIBUTION_PROXY_CHANGED', '代确认申请已变化')
+        let updatedOrder: DistributionOrder | undefined
+        if (action === 'approve') {
+          const lines = [...order.lines]
+          lines[index] = { ...line, status: '已确认', confirmedAt: reviewedAt }
+          updatedOrder = { ...order, lines, status: deriveDistributionStatus(lines) }
+          await distributionOrders.replaceOne({ id: order.id, status: order.status }, updatedOrder, { session })
+        }
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '复核员工分配收款代确认',
+          target: id, before: { status: request.status }, after: { status: next.status,
+            orderStatus: updatedOrder?.status, reviewReason: next.reviewReason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { next, updatedOrder, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.next, message: action === 'approve' ? '代确认复核通过' : '已驳回' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (error instanceof Error && /代确认|账号停用|凭证/.test(error.message)) {
+        return send(res, 409, { error: 'DISTRIBUTION_PROXY_INVALID', message: error.message })
       }
       throw error
     }

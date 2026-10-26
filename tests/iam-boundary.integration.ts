@@ -880,6 +880,34 @@ try {
   assert.equal((failFinished.body.data as { companyLossCents: number }).companyLossCents, 4000)
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-FAIL' }))?.status, '已终止')
   assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-PAYOUT-PROXY', title: '分配代确认测试', source: 'integration-test',
+    status: '分配中', statusType: 'warning', progress: 100, remain: 0, deadline: '2099-12-31 12:00',
+    total: 100, costAmount: 100, salesAmount: 120, profitAmount: 20,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 100, subscribed: 100, people: 1, proxyConfirmDays: 7
+  })
+  await db.collection(`${prefix}distribution_orders`).insertOne({ id: 'DIST-IAM-PAYOUT-PROXY',
+    projectId: 'PRJ-IAM-PAYOUT-PROXY', status: '待员工确认', receivableCents: 12000,
+    procurementPaymentCents: 10000, customerReceiptsCents: 12000, companyTopUpsCents: 0,
+    companyReturnsCents: 0, confirmedCostsCents: 0, profitCents: 2000,
+    companyRoundingResidualCents: 0, payoutTotalCents: 12000, generatedBy: '1003',
+    createdAt: new Date().toISOString(), lines: [{ participantId: '1001', kind: 'employee', shares: 1,
+      principalCents: 10000, profitCents: 2000, payoutCents: 12000, status: '待员工确认',
+      payout: { amountCents: 12000, transactionNo: 'BANK-IAM-PAYOUT-PROXY',
+        paidAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+        proofAssetIds: ['ASSET-IAM-PAYOUT-PROXY'], registeredBy: '1003' } }] })
+  const payoutProxyPath = '/api/distribution-orders/DIST-IAM-PAYOUT-PROXY/lines/1001/proxy-confirm'
+  assert.equal((await postAs(payoutProxyPath, 'smoke-employee-token', {
+    reason: '员工超期仍未确认分配款项到账' })).status, 403)
+  const payoutProxyCreated = await postAs(payoutProxyPath, 'smoke-finance-token', {
+    reason: '员工超期仍未确认分配款项到账' })
+  assert.equal(payoutProxyCreated.status, 201, JSON.stringify(payoutProxyCreated.body))
+  const payoutProxyReviewPath = `/api/distribution-payout-proxy-requests/${(payoutProxyCreated.body.data as { id: string }).id}/review`
+  assert.equal((await postAs(payoutProxyReviewPath, 'smoke-finance-token', { action: 'approve' })).status, 403)
+  assert.equal((await postAs(payoutProxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 200)
+  assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: 'DIST-IAM-PAYOUT-PROXY' }))?.status, '可结单')
+  assert.equal((await postAs(payoutProxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

@@ -499,3 +499,32 @@ FROM system_role role JOIN system_api_resource resource ON resource.client_id = 
 WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
   AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
     AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+-- V1.1 分配收款代确认
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', codes.code, codes.name, codes.method, codes.path, 0, 'v11-local', 'v11-local'
+FROM (
+  SELECT 'crowdfunding:distribution-payout-proxy:query' AS code, '分配收款代确认查询' AS name, 'GET' AS method, '/api/distribution-payout-proxy-requests' AS path
+  UNION ALL SELECT 'crowdfunding:distribution-payout-proxy:request', '申请分配收款代确认', 'POST', '/api/distribution-orders/*/lines/*/proxy-confirm'
+  UNION ALL SELECT 'crowdfunding:distribution-payout-proxy:review', '复核分配收款代确认', 'POST', '/api/distribution-payout-proxy-requests/*/review'
+) codes
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
+  AND resource.code = codes.code AND resource.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:distribution-payout-proxy:query',
+    'crowdfunding:distribution-payout-proxy:request') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:distribution-payout-proxy:query',
+    'crowdfunding:distribution-payout-proxy:review') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');

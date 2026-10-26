@@ -3387,6 +3387,9 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-reply-payout-issue="canApi(authSession.permissionInfo.value, 'crowdfunding:payout:issue-reply')"
           :can-query-financial-reconciliation="canApi(authSession.permissionInfo.value, 'crowdfunding:financial-reconciliation:query')"
           :can-close="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution:close')"
+          :can-proxy-query="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution-payout-proxy:query')"
+          :can-proxy-request="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution-payout-proxy:request')"
+          :can-proxy-review="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution-payout-proxy:review')"
           @updated="loadData"
         />
 
