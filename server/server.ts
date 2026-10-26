@@ -35,6 +35,7 @@ import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './fi
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
 import { paymentReminderDue, recipientNotification, subscriptionNotification, type Notification } from './notifications.ts'
+import { planEscalationNotifications } from './notification-escalations.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -582,6 +583,24 @@ async function runDuePaymentReminders() {
     }
   } finally { notificationSweepRunning = false }
 }
+let escalationSweepRunning = false
+async function runDueEscalations() {
+  if (escalationSweepRunning) return
+  escalationSweepRunning = true
+  try {
+    const candidates = await repositories.projects.list({ status: { $in: ['待回款', '回款中', '分配中'] } } as never)
+    const projectIds = candidates.map(project => project.id)
+    if (!projectIds.length) return
+    const [orders, receipts] = await Promise.all([
+      distributionOrders.find({ projectId: { $in: projectIds }, status: '有异议' }).toArray(),
+      receiptBatches.find({ 'lines.projectId': { $in: projectIds } }).toArray()
+    ])
+    for (const notice of planEscalationNotifications({ projects: candidates, orders, receipts,
+      at: new Date() })) {
+      await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+    }
+  } finally { escalationSweepRunning = false }
+}
 async function runDueBackstops() {
   if (backstopRunning) return
   backstopRunning = true
@@ -729,7 +748,17 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
       ...defaultRuleParameters, updatedAt: '', updatedBy: '' } })
   }
   if (pathname === '/api/notifications') {
-    const recipientId = requestContext(req).userId
+    const context = requestContext(req)
+    const recipientId = context.userId
+    const roleNotices = await notifications.find({ recipientId: `role:${context.role}` }).toArray()
+    if (roleNotices.length) await notifications.bulkWrite(roleNotices.map(notice => ({
+      updateOne: { filter: { id: `${notice.id}:user:${recipientId}` }, update: { $setOnInsert: {
+        id: `${notice.id}:user:${recipientId}`, recipientId, type: notice.type,
+        title: notice.title, content: notice.content, targetPage: notice.targetPage,
+        projectId: notice.projectId, subscriptionId: notice.subscriptionId,
+        createdAt: notice.createdAt
+      } }, upsert: true }
+    })))
     const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
     const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
     const [items, total, unread] = await Promise.all([
@@ -4663,16 +4692,22 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`subscription-api listening on http://127.0.0.1:${port}`)
   void runDueBackstops().catch(error => logFailure('company.backstop', error))
   void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
+  void runDueEscalations().catch(error => logFailure('notification.escalation', error))
 })
 const backstopTimer = setInterval(() => {
   void runDueBackstops().catch(error => logFailure('company.backstop', error))
   void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
 }, 30_000)
 backstopTimer.unref()
+const escalationTimer = setInterval(() => {
+  void runDueEscalations().catch(error => logFailure('notification.escalation', error))
+}, 300_000)
+escalationTimer.unref()
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
     clearInterval(backstopTimer)
+    clearInterval(escalationTimer)
     server.close(() => {
       void mongo.close().finally(() => process.exit(0))
     })

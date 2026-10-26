@@ -18,6 +18,14 @@ export function recipientNotification(input: {
   return { ...input, id: `${input.type}:${input.sourceId}:${input.recipientId}`, title: input.type }
 }
 
+export function roleNotification(input: {
+  type: string; sourceId: string; role: 'super_admin' | 'finance';
+  content: string; targetPage: string; projectId?: string; createdAt: string
+}): Notification {
+  const { role, ...notice } = input
+  return recipientNotification({ ...notice, recipientId: `role:${role}` })
+}
+
 export function paymentReminderDue(input: {
   paymentDeadlineAt: string
   paymentReminderHours: number

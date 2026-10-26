@@ -294,6 +294,17 @@ try {
     'smoke-employee-token', {})).status, 200)
   assert.ok((await db.collection(`${prefix}notifications`).findOne({ id: ownNotice!.id }))?.readAt)
   assert.equal((await postAs('/api/notifications/read-all', 'smoke-employee-token', {})).status, 200)
+  await db.collection(`${prefix}notifications`).insertOne({ id: '异议超时升级:DIST-TEST:1001:role:super_admin',
+    recipientId: 'role:super_admin', type: '异议超时升级', title: '异议超时升级',
+    content: '公司专属提醒', targetPage: 'distributionOrders', createdAt: new Date().toISOString() })
+  const companyNotices = await request('/api/notifications', { Authorization: 'Bearer smoke-super-admin-token' })
+  assert.equal(companyNotices.status, 200, JSON.stringify(companyNotices.body))
+  const copiedNotice = (companyNotices.body.data as { items: Array<{ id: string }> }).items
+    .find(item => item.id.includes('异议超时升级:DIST-TEST:1001'))
+  assert.ok(copiedNotice)
+  assert.equal((await request('/api/notifications', { Authorization: 'Bearer smoke-finance-token' })).status, 200)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    recipientId: '1003', type: '异议超时升级' }), 0)
   assert.equal(Date.parse(`${String(publishedRecord?.paymentDeadlineAt).replace(' ', 'T')}+08:00`)
     - Date.parse(`${String(publishedRecord?.createdAt).replace(' ', 'T')}+08:00`), 24 * 60 * 60 * 1000)
   assert.ok(String(publishedRecord?.paymentDeadlineAt) <= '2100-01-01 12:00')
