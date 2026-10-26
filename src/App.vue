@@ -2523,7 +2523,7 @@ watch(() => authSession.permissionInfo.value, info => {
                 </el-form-item>
                 <el-alert type="info" :closable="false">提交前将展示当前生效的免责协议，阅读至末尾并确认后才能认购。</el-alert>
               </el-form>
-              <el-button class="wide" type="primary" :disabled="!canSubscribe" @click="startSubscribe">立即认购</el-button>
+              <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:subscription:create')" class="wide" type="primary" :disabled="!canSubscribe" @click="startSubscribe">立即认购</el-button>
               <p class="muted">每次提交均需重新确认当前生效的免责协议；项目中断后不可继续认购。</p>
             </section>
           </div>
@@ -2722,7 +2722,7 @@ watch(() => authSession.permissionInfo.value, info => {
         </template>
 
         <template v-if="currentPage === 'adminProjects'">
-          <div class="page-head"><div><h1>项目管理</h1><p>MCP 同步、发布与规则配置入口</p></div><el-button type="primary" @click="syncMcp">同步采购系统（MCP）</el-button></div>
+          <div class="page-head"><div><h1>项目管理</h1><p>MCP 同步、发布与规则配置入口</p></div><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement:sync')" type="primary" @click="syncMcp">同步采购系统（MCP）</el-button></div>
           <section class="panel filter-panel">
             <el-input v-model="adminProjectKeyword" clearable placeholder="搜索项目、线下销售单号、创建时间、状态、金额" />
             <el-select v-model="adminProjectStatus" placeholder="项目状态" style="width: 150px">
@@ -2862,7 +2862,7 @@ watch(() => authSession.permissionInfo.value, info => {
                 <template #default="{ row }">
                   <div class="project-action-group">
                     <el-button
-                      v-if="adminProjectActionLayout(row).showPayReview"
+                      v-if="adminProjectActionLayout(row).showPayReview && canApi(authSession.permissionInfo.value, 'crowdfunding:payment-review:query')"
                       size="small"
                       type="primary"
                       plain
@@ -2871,14 +2871,14 @@ watch(() => authSession.permissionInfo.value, info => {
                       支付复核
                     </el-button>
                     <el-button
-                      v-if="adminProjectActionLayout(row).showSettlement"
+                      v-if="adminProjectActionLayout(row).showSettlement && canApi(authSession.permissionInfo.value, 'crowdfunding:settlement:upload-invoice')"
                       size="small"
                       @click="goProjectSettlement(row)"
                     >
                       核对发票
                     </el-button>
                     <el-button
-                      v-if="adminProjectActionLayout(row).showOpen"
+                      v-if="adminProjectActionLayout(row).showOpen && canApi(authSession.permissionInfo.value, 'crowdfunding:project:open')"
                       size="small"
                       type="primary"
                       @click="updateProjectLifecycle(row, 'open')"
@@ -2886,7 +2886,7 @@ watch(() => authSession.permissionInfo.value, info => {
                       开放
                     </el-button>
                     <el-dropdown
-                      v-if="adminProjectActionLayout(row).showMore"
+                      v-if="adminProjectActionLayout(row).showMore && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
                       trigger="click"
                       popper-class="project-action-menu"
                       @command="handleAdminProjectMoreCommand($event, row)"
@@ -2897,14 +2897,14 @@ watch(() => authSession.permissionInfo.value, info => {
                       <template #dropdown>
                         <el-dropdown-menu>
                           <el-dropdown-item
-                            v-if="adminProjectActionLayout(row).showTerminate"
+                            v-if="adminProjectActionLayout(row).showTerminate && canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate')"
                             command="terminate"
                             class="danger-menu-item"
                           >
                             终止项目
                           </el-dropdown-item>
                           <el-dropdown-item
-                            v-if="adminProjectActionLayout(row).showTakeover"
+                            v-if="adminProjectActionLayout(row).showTakeover && canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force')"
                             command="takeover"
                             class="danger-menu-item"
                             :divided="adminProjectActionLayout(row).showTerminate"
@@ -2936,7 +2936,7 @@ watch(() => authSession.permissionInfo.value, info => {
               <h1>认购规则配置</h1>
               <p>支持按项目、状态、关键词搜索；每个项目仅可配置一条认购规则</p>
             </div>
-            <el-button type="primary" @click="openRuleCreate">创建认购规则</el-button>
+            <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:rule:create')" type="primary" @click="openRuleCreate">创建认购规则</el-button>
           </div>
           <section class="panel filter-panel">
             <label class="filter-field">
@@ -2998,6 +2998,7 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-table-column label="操作" fixed="right" width="260">
                 <template #default="{ row }">
                   <el-button
+                    v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:rule:update')"
                     size="small"
                     type="primary"
                     plain
@@ -3007,7 +3008,7 @@ watch(() => authSession.permissionInfo.value, info => {
                     修改
                   </el-button>
                   <el-button
-                    v-if="row.status === '未启用'"
+                    v-if="row.status === '未启用' && canApi(authSession.permissionInfo.value, 'crowdfunding:rule:change-status')"
                     size="small"
                     type="success"
                     plain
@@ -3016,7 +3017,7 @@ watch(() => authSession.permissionInfo.value, info => {
                     启用
                   </el-button>
                   <el-button
-                    v-if="row.status === '已启用'"
+                    v-if="row.status === '已启用' && canApi(authSession.permissionInfo.value, 'crowdfunding:rule:change-status')"
                     size="small"
                     type="warning"
                     plain
@@ -3025,7 +3026,7 @@ watch(() => authSession.permissionInfo.value, info => {
                   >
                     停用
                   </el-button>
-                  <el-button size="small" type="danger" plain :disabled="isRuleLocked(row)" @click="deleteRule(row)">删除</el-button>
+                  <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:rule:delete')" size="small" type="danger" plain :disabled="isRuleLocked(row)" @click="deleteRule(row)">删除</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -3048,7 +3049,7 @@ watch(() => authSession.permissionInfo.value, info => {
               <h1>项目收款码管理</h1>
               <p>支持创建多条收款码，供管理层在不同项目开放时选择；禁用必须记录理由</p>
             </div>
-            <el-button type="primary" @click="openReceivingCodeCreate">创建收款码</el-button>
+            <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:receiving-code:create')" type="primary" @click="openReceivingCodeCreate">创建收款码</el-button>
           </div>
           <section class="panel filter-panel">
             <el-input v-model="receivingCodeFilters.keyword" placeholder="编号 / 主体 / 账户说明 / 收款码 / 修改人 / 禁用理由" />
@@ -3090,8 +3091,8 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-table-column label="操作" fixed="right" width="210">
                 <template #default="{ row }">
                   <span v-if="row.status === '启用' && isReceivingCodeImageLocked(row.id)" class="muted">认购后图片已锁定</span>
-                  <el-button v-else-if="row.status === '启用'" size="small" type="primary" plain @click="openReceivingCodeImage(row)">{{ row.imageUrl ? '更换图片' : '上传图片' }}</el-button>
-                  <el-button v-if="row.status === '启用'" size="small" type="danger" @click="disableReceivingCode(row)">禁用</el-button>
+                  <el-button v-else-if="row.status === '启用' && canApi(authSession.permissionInfo.value, 'crowdfunding:receiving-code:update-image')" size="small" type="primary" plain @click="openReceivingCodeImage(row)">{{ row.imageUrl ? '更换图片' : '上传图片' }}</el-button>
+                  <el-button v-if="row.status === '启用' && canApi(authSession.permissionInfo.value, 'crowdfunding:receiving-code:disable')" size="small" type="danger" @click="disableReceivingCode(row)">禁用</el-button>
                   <span v-else class="muted">不可删除</span>
                 </template>
               </el-table-column>
@@ -3186,9 +3187,9 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-alert v-if="activeReviewSubscription?.shares !== undefined && activeReviewIsPending" type="warning" :closable="false" title="通过前须核对认购金额、实际到账金额及凭证识别金额一致；OCR 结果不能代替财务核实。" />
               <el-input type="textarea" placeholder="驳回或部分缴款时填写原因" :disabled="!activeReviewIsPending" />
               <div v-if="activeReviewIsPending" class="actions-row">
-                <el-button type="primary" @click="submitPaymentReview('pass')">通过</el-button>
-                <el-button type="danger" @click="submitPaymentReview('reject')">驳回</el-button>
-                <el-button @click="submitPaymentReview('partial')">标记部分缴款</el-button>
+                <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:payment-review:approve')" type="primary" @click="submitPaymentReview('pass')">通过</el-button>
+                <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:payment-review:reject')" type="danger" @click="submitPaymentReview('reject')">驳回</el-button>
+                <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:payment-review:partial')" @click="submitPaymentReview('partial')">标记部分缴款</el-button>
               </div>
               <el-alert v-else :title="activeReviewReadOnlyText" type="info" :closable="false" show-icon />
             </section>
@@ -3430,7 +3431,7 @@ watch(() => authSession.permissionInfo.value, info => {
         </template>
 
         <template v-if="currentPage === 'agreements'">
-          <div class="page-head"><div><h1>免责协议版本</h1><p>新版本提交后立即生效，历史版本与确认记录只读留存</p></div><el-button type="primary" @click="agreementFormVisible = true">新增版本</el-button></div>
+          <div class="page-head"><div><h1>免责协议版本</h1><p>新版本提交后立即生效，历史版本与确认记录只读留存</p></div><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:agreement:manage')" type="primary" @click="agreementFormVisible = true">新增版本</el-button></div>
           <section class="panel">
             <el-table :data="agreementVersions" empty-text="暂无协议版本">
               <el-table-column prop="version" label="版本号" width="100" />
