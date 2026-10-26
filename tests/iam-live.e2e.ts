@@ -106,6 +106,8 @@ try {
   assert.ok(info.apiPermissions.includes('crowdfunding:notification:query'))
   assert.ok(info.apiPermissions.includes('crowdfunding:notification:read'))
   assert.ok(info.uiPermissions.includes('crowdfunding:notification:query'))
+  assert.ok(info.menus.some(menu => menu.componentName === 'notifications'
+    || menu.children?.some(child => child.componentName === 'notifications')))
   assert.ok(info.apiPermissions.includes('crowdfunding:payout:my-query'))
   assert.ok(info.apiPermissions.includes('crowdfunding:payout:confirm'))
   assert.ok(info.uiPermissions.includes('crowdfunding:payout:my-query'))

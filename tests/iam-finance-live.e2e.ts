@@ -51,6 +51,8 @@ try {
     assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
   }
   assert.ok(info.uiPermissions.includes('crowdfunding:notification:query'))
+  assert.ok(info.menus.some(menu => menu.componentName === 'notifications'
+    || menu.children?.some(child => child.componentName === 'notifications')))
   assert.ok(info.apiPermissions.includes('crowdfunding:procurement-payment:register'))
   assert.ok(info.apiPermissions.includes('crowdfunding:procurement-payment:proof-upload'))
   assert.ok(info.uiPermissions.includes('crowdfunding:procurement-payment:register'))
