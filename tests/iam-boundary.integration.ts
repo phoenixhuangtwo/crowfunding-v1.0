@@ -122,6 +122,13 @@ try {
       paymentImages: [{ id: 'PRIVATE-IMAGE', assetId: 'PRIVATE-ASSET', paymentImageName: 'private.png', recognizedAmount: 100, uploadedAt: new Date().toISOString(), status: '已识别' }]
     })
   }
+  for (const id of ['SUB-IAM-LEGACY-PASS', 'SUB-IAM-LEGACY-REJECT']) {
+    await db.collection(`${prefix}subscriptions`).insertOne({
+      id, projectId: 'PRJ-IAM-TEST', project: 'IAM 隔离测试项目', userId: '1001',
+      amount: 100, pay: '待复核', action: '查看支付',
+      paymentDeadlineAt: '2099-12-31 23:59', createdAt: new Date().toISOString()
+    })
+  }
   const port = await freePort()
   const base = `http://127.0.0.1:${port}`
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
@@ -286,7 +293,7 @@ try {
   }
   assert.equal((await subscribe(1, 'employee01')).status, 403)
   assert.equal((await subscribe(2)).status, 409)
-  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 4)
+  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 6)
   const subscribed = await subscribe(1)
   assert.equal(subscribed.status, 201)
   assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-sub-1-self' }))?.userId, '1001')
@@ -305,6 +312,15 @@ try {
   const ownNoticeItems = (ownNotifications.body.data as { items: Array<{ id: string; type: string }> }).items
   const ownNotice = ownNoticeItems.find(item => item.id.includes(String(publishedRecord?.id)))
   assert.equal(ownNotice?.type, '认购成功')
+  assert.equal((await postAs('/api/subscriptions/SUB-IAM-LEGACY-PASS/review',
+    'smoke-second-finance-token', { result: 'pass' })).status, 200)
+  assert.equal((await postAs('/api/subscriptions/SUB-IAM-LEGACY-REJECT/review',
+    'smoke-second-finance-token', { result: 'reject', rejectReason: '缴款凭证金额与银行到账不一致' })).status, 200)
+  assert.equal((await postAs('/api/subscriptions/SUB-IAM-LEGACY-PASS/review',
+    'smoke-second-finance-token', { result: 'pass' })).status, 409)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '缴款复核结果', recipientId: '1001',
+    subscriptionId: { $in: ['SUB-IAM-LEGACY-PASS', 'SUB-IAM-LEGACY-REJECT'] } }), 2)
   const foreignNoticeId = '认购成功:SUB-FOREIGN:1002'
   await db.collection(`${prefix}notifications`).insertOne({ id: foreignNoticeId, recipientId: '1002',
     type: '认购成功', title: '认购成功', content: '他人通知', targetPage: 'mine', createdAt: new Date().toISOString() })

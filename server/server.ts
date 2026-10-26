@@ -4342,29 +4342,49 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       reviewedAt: subscription.reviewedAt,
       rejectReason: subscription.rejectReason
     }
-    subscription.pay = nextPay
-    subscription.action = result === 'reject' ? '重新上传截图' : '查看支付'
-    subscription.reviewedBy = reviewedBy
-    subscription.reviewedAt = reviewedAt
-    subscription.rejectReason = result === 'reject' ? rejectReason : undefined
-    await pushAudit({
-      actor: subscription.reviewedBy,
+    const updated: Subscription = { ...subscription, pay: nextPay,
+      action: result === 'reject' ? '重新上传截图' : '查看支付',
+      reviewedBy, reviewedAt, rejectReason: result === 'reject' ? rejectReason : undefined }
+    const audit = auditRecord({
+      actor: reviewedBy,
       role: 'finance',
       action: result === 'pass' ? '支付复核 · 通过' : result === 'reject' ? '支付复核 · 驳回' : '支付复核 · 标记部分缴款',
-      target: subscription.id,
+      target: updated.id,
       before,
       after: {
-        pay: subscription.pay,
-        action: subscription.action,
-        reviewedBy: subscription.reviewedBy,
-        reviewedAt: subscription.reviewedAt,
-        rejectReason: subscription.rejectReason
+        pay: updated.pay,
+        action: updated.action,
+        reviewedBy: updated.reviewedBy,
+        reviewedAt: updated.reviewedAt,
+        rejectReason: updated.rejectReason
       },
       result: '成功'
     })
-    await persistState()
+    await mongo.withTransaction(async session => {
+      const latest = await repositories.subscriptions.getById(updated.id, session)
+      if (!latest || latest.pay !== '待复核' || latest.shares !== undefined) {
+        throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
+      }
+      if ((await repositories.projects.getById(latest.projectId, session))?.purchasePaymentId) {
+        throw new AppError(409, 'SUBSCRIPTION_LOCKED', '采购付款登记后认购单已锁定')
+      }
+      await repositories.subscriptions.replace(updated, session)
+      await repositories.auditLogs.insert(audit as never, session)
+      if ((result === 'pass' || result === 'reject') && latest.userId) {
+        const notice = recipientNotification({ type: '缴款复核结果', sourceId: audit.id,
+          recipientId: latest.userId, projectId: latest.projectId, subscriptionId: latest.id,
+          content: result === 'pass'
+            ? `您的认购单【${latest.id}】缴款已通过复核`
+            : `您的认购单【${latest.id}】缴款被驳回，原因：【${rejectReason}】`,
+          targetPage: 'mine', createdAt: new Date().toISOString() })
+        await notifications.insertOne(notice, { session })
+      }
+      return true
+    })
+    Object.assign(subscription, updated)
+    auditLogs.unshift(audit as AuditLog)
     const message = result === 'pass' ? '复核通过，员工缴款状态已更新为缴款成功' : result === 'reject' ? '复核驳回，员工缴款状态已更新为缴款被驳回' : '已标记部分缴款，并记录复核人员与操作时间'
-    return send(res, 200, { data: subscription, message })
+    return send(res, 200, { data: updated, message })
   }
 
   if (pathname === '/api/rules') {
