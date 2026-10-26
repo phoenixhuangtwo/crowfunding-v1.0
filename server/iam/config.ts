@@ -2,6 +2,7 @@ import { normalizeIamId } from './json.ts'
 
 export type IamConfig = {
   baseUrl: URL
+  webUrl: URL
   clientId: 'crowdfunding'
   clientSecret: string
   redirectUri: URL
@@ -75,6 +76,7 @@ function tenantId(env: Environment): string {
 
 export function loadIamConfig(env: Environment = process.env): IamConfig {
   const baseUrl = httpUrl(env, 'IAM_BASE_URL')
+  const webUrl = env.IAM_WEB_URL ? httpUrl(env, 'IAM_WEB_URL') : baseUrl
   const redirectUri = httpUrl(env, 'IAM_REDIRECT_URI')
   const allowedOrigin = exactOrigin(env)
   if (redirectUri.origin !== allowedOrigin) {
@@ -91,6 +93,7 @@ export function loadIamConfig(env: Environment = process.env): IamConfig {
 
   return {
     baseUrl,
+    webUrl,
     clientId: 'crowdfunding',
     clientSecret: required(env, 'IAM_CLIENT_SECRET'),
     redirectUri,

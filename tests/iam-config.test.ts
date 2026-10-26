@@ -4,6 +4,7 @@ import { loadIamConfig } from '../server/iam/config.ts'
 
 const validIamEnv = {
   IAM_BASE_URL: 'https://iam.example.test/',
+  IAM_WEB_URL: 'https://iam-web.example.test/',
   IAM_CLIENT_ID: 'crowdfunding',
   IAM_CLIENT_SECRET: 'a-server-only-secret',
   IAM_REDIRECT_URI: 'https://crowdfunding.example.test/oauth/callback',
@@ -14,6 +15,7 @@ test('loadIamConfig applies the fixed single-tenant defaults', () => {
   const config = loadIamConfig(validIamEnv)
 
   assert.equal(config.baseUrl.href, 'https://iam.example.test/')
+  assert.equal(config.webUrl.href, 'https://iam-web.example.test/')
   assert.equal(config.clientId, 'crowdfunding')
   assert.equal(config.redirectUri.href, 'https://crowdfunding.example.test/oauth/callback')
   assert.deepEqual(config.scopes, ['openid', 'profile'])
@@ -63,6 +65,10 @@ test('loadIamConfig rejects non-http URLs and credentials in every IAM URL', () 
   assert.throws(
     () => loadIamConfig({ ...validIamEnv, IAM_BASE_URL: 'https://secret@iam.example.test/' }),
     /IAM_BASE_URL 不允许 URL credentials/
+  )
+  assert.throws(
+    () => loadIamConfig({ ...validIamEnv, IAM_WEB_URL: 'https://secret@iam-web.example.test/' }),
+    /IAM_WEB_URL 不允许 URL credentials/
   )
   assert.throws(
     () => loadIamConfig({ ...validIamEnv, IAM_REDIRECT_URI: 'https://user:password@crowdfunding.example.test/oauth/callback' }),

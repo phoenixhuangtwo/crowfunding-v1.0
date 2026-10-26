@@ -10,6 +10,7 @@ import { handleAuthRoute, type AuthRouteDependencies } from '../server/auth/rout
 
 const config: IamConfig = {
   baseUrl: new URL('https://iam.example.test/'),
+  webUrl: new URL('https://iam-web.example.test/'),
   clientId: 'crowdfunding',
   clientSecret: 'client-secret-never-expose',
   redirectUri: new URL('https://crowdfunding.example.test/oauth/callback'),
@@ -50,7 +51,7 @@ test('login builds exact S256 authorization request and hardened one-time cookie
   const verifier = Buffer.alloc(32, 7).toString('base64url')
   const challenge = createHash('sha256').update(verifier).digest('base64url')
 
-  assert.equal(location.origin, 'https://iam.example.test')
+  assert.equal(location.origin, 'https://iam-web.example.test')
   assert.equal(location.pathname, '/oauth/login')
   assert.deepEqual(Object.fromEntries(location.searchParams), {
     client_id: 'crowdfunding',

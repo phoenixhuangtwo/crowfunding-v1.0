@@ -18,7 +18,7 @@ const credentialDirectory = join(homedir(), '.config', 'crowdfunding')
 const account = JSON.parse(readFileSync(process.env.IAM_TEST_ACCOUNT_FILE ?? join(credentialDirectory, 'iam-v11-test-account.json'), 'utf8')) as { username: string; password: string }
 const clientSecret = readFileSync(process.env.IAM_CLIENT_SECRET_FILE ?? join(credentialDirectory, 'iam-client-secret'), 'utf8').trim()
 const config = loadIamConfig({
-  ...process.env, IAM_BASE_URL: 'http://system.localhost:8080', IAM_CLIENT_ID: 'crowdfunding',
+  ...process.env, IAM_BASE_URL: 'http://system.localhost:8080', IAM_WEB_URL: 'http://system.localhost:5173', IAM_CLIENT_ID: 'crowdfunding',
   IAM_CLIENT_SECRET: clientSecret, IAM_REDIRECT_URI: 'http://127.0.0.1:5174/oauth/callback',
   APP_ALLOWED_ORIGIN: 'http://127.0.0.1:5174'
 })
@@ -60,7 +60,7 @@ try {
     cwd: process.cwd(),
     env: {
       ...process.env, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix,
-      IAM_BASE_URL: config.baseUrl.href, IAM_CLIENT_ID: config.clientId, IAM_CLIENT_SECRET: clientSecret,
+      IAM_BASE_URL: config.baseUrl.href, IAM_WEB_URL: config.webUrl.href, IAM_CLIENT_ID: config.clientId, IAM_CLIENT_SECRET: clientSecret,
       IAM_REDIRECT_URI: config.redirectUri.href, APP_ALLOWED_ORIGIN: config.allowedOrigin
     },
     stdio: 'ignore'

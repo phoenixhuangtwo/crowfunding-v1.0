@@ -129,7 +129,7 @@ export async function beginOAuth(
   const state = stateValue(now, random(32))
   const challenge = createHash('sha256').update(verifier).digest('base64url')
   const safeReturn = normalizeReturnTo(returnTo).value
-  const location = new URL('/oauth/login', config.baseUrl)
+  const location = new URL('/oauth/login', config.webUrl)
   location.search = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: config.redirectUri.href,

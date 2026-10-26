@@ -12,6 +12,7 @@ import {
 
 const config: IamConfig = {
   baseUrl: new URL('https://iam.example.test/'),
+  webUrl: new URL('https://iam.example.test/'),
   clientId: 'crowdfunding',
   clientSecret: 'top-secret',
   redirectUri: new URL('https://crowdfunding.example.test/api/auth/callback'),
