@@ -34,7 +34,7 @@ import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from 
 import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
-import { paymentReminderDue, subscriptionNotification, type Notification } from './notifications.ts'
+import { paymentReminderDue, recipientNotification, subscriptionNotification, type Notification } from './notifications.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -1812,6 +1812,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
           updatedSubscription = { ...subscription, pay: '已退款', action: '查看退款' }
           await projectRefunds.replaceOne({ id: refund.id, status: '待员工确认' }, updatedRefund, { session })
           await repositories.subscriptions.replace(updatedSubscription, session)
+          await notifications.updateOne({ id: `代确认通过:${request.id}:${request.participantId}` },
+            { $setOnInsert: recipientNotification({ type: '代确认通过', sourceId: request.id,
+              recipientId: request.participantId, projectId: project.id, subscriptionId: refund.subscriptionId,
+              content: `财务已代您确认众筹单【${project.id}】的退款，如有疑问请联系财务`,
+              targetPage: 'myPayouts', createdAt: reviewedAt }) }, { upsert: true, session })
           await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
             id: `LED-${randomUUID()}`, sourceKey: `project-refund-confirm:${refund.id}`,
             type: 'subscription_refund_confirmed', projectId: refund.projectId,
@@ -1954,6 +1959,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
           lines[index] = { ...line, status: '已确认', confirmedAt: reviewedAt }
           updatedOrder = { ...order, lines, status: deriveDistributionStatus(lines) }
           await distributionOrders.replaceOne({ id: order.id, status: order.status }, updatedOrder, { session })
+          await notifications.updateOne({ id: `代确认通过:${request.id}:${request.participantId}` },
+            { $setOnInsert: recipientNotification({ type: '代确认通过', sourceId: request.id,
+              recipientId: request.participantId, projectId: project.id,
+              content: `财务已代您确认众筹单【${project.id}】的收款，如有疑问请联系财务`,
+              targetPage: 'myPayouts', createdAt: reviewedAt }) }, { upsert: true, session })
         }
         const audit = auditRecord({ actor: actor.label, role: actor.role, action: '复核员工分配收款代确认',
           target: id, before: { status: request.status }, after: { status: next.status,

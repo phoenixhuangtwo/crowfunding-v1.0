@@ -888,6 +888,8 @@ try {
   const proxyReviewPath = `/api/project-refund-proxy-requests/${(proxyCreated.body.data as { id: string }).id}/review`
   assert.equal((await postAs(proxyReviewPath, 'smoke-finance-token', { action: 'approve' })).status, 403)
   assert.equal((await postAs(proxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 200)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '代确认通过', recipientId: '1001', projectId: 'PRJ-IAM-FAIL' }), 1)
   assert.equal((await postAs(proxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
   assert.equal((await postAs(`/api/project-refunds/${failRefund?.id}/confirm`, 'smoke-employee-token', {})).status, 409)
   assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
@@ -938,6 +940,8 @@ try {
   const payoutProxyReviewPath = `/api/distribution-payout-proxy-requests/${(payoutProxyCreated.body.data as { id: string }).id}/review`
   assert.equal((await postAs(payoutProxyReviewPath, 'smoke-finance-token', { action: 'approve' })).status, 403)
   assert.equal((await postAs(payoutProxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 200)
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '代确认通过', recipientId: '1001', projectId: 'PRJ-IAM-PAYOUT-PROXY' }), 1)
   assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: 'DIST-IAM-PAYOUT-PROXY' }))?.status, '可结单')
   assert.equal((await postAs(payoutProxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))

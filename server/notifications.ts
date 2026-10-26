@@ -11,6 +11,13 @@ export type Notification = {
   readAt?: string
 }
 
+export function recipientNotification(input: {
+  type: string; sourceId: string; recipientId: string; content: string;
+  targetPage: string; projectId?: string; subscriptionId?: string; createdAt: string
+}): Notification {
+  return { ...input, id: `${input.type}:${input.sourceId}:${input.recipientId}`, title: input.type }
+}
+
 export function paymentReminderDue(input: {
   paymentDeadlineAt: string
   paymentReminderHours: number
