@@ -188,6 +188,28 @@ try {
   assert.equal(front?.pay, '公司待出资')
   assert.equal(front?.paymentDeadlineAt, draftRule.paymentCutoffAt)
   assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments(), 0)
+  const funding = await request('/api/projects/PRJ-IAM-ADMIN-DRAFT/funding-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal(funding.status, 200)
+  const fundingData = funding.body.data as { purchaseCents: number; employeeCents: number;
+    companyCents: number; differenceCents: number; balanced: boolean; companyFundsConfirmed: boolean }
+  assert.equal(fundingData.purchaseCents, 30000)
+  assert.equal(fundingData.employeeCents, 0)
+  assert.equal(fundingData.companyCents, 10000)
+  assert.equal(fundingData.differenceCents, -20000)
+  assert.equal(fundingData.balanced, false)
+  assert.equal(fundingData.companyFundsConfirmed, false)
+  assert.equal((await request('/api/projects/PRJ-IAM-ADMIN-DRAFT/funding-reconciliation',
+    { Authorization: 'Bearer smoke-employee-token' })).status, 403)
+  await db.collection(`${prefix}fund_ledger`).insertOne({
+    id: 'LED-ORPHAN', sourceKey: 'contribution:ORPHAN', type: 'employee_contribution',
+    projectId: 'PRJ-IAM-ADMIN-DRAFT', subscriptionId: 'ORPHAN', participantId: '1001',
+    shares: 1, amountCents: 10000, transactionNo: 'ORPHAN-TEST', transactionKey: 'ORPHAN-TEST',
+    proofAssetIds: [], reviewedBy: 'test', createdAt: new Date().toISOString()
+  })
+  assert.equal((await request('/api/projects/PRJ-IAM-ADMIN-DRAFT/funding-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })).status, 409)
+  await db.collection(`${prefix}fund_ledger`).deleteOne({ id: 'LED-ORPHAN' })
   assert.equal((await postAs('/api/projects/PRJ-IAM-ADMIN-DRAFT/open', 'smoke-admin-full-token', { ruleId: newRuleId })).status, 409)
   assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments({ companyKind: 'front' }), 1)
   const conflict = await postAs('/api/projects/PRJ-IAM-CONFLICT/open', 'smoke-admin-full-token', { ruleId: 'RULE-IAM-CONFLICT' })

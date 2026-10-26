@@ -23,6 +23,7 @@ import { AppError, isDuplicateKey } from './errors.ts'
 import { calculateShareSubscription, prepareShareRule } from './share-subscription.ts'
 import { createFundLedger } from './finance/fund-ledger.ts'
 import { validateContributionReview } from './finance/contribution-review.ts'
+import { reconcileProcurementFunding } from './finance/procurement-payment.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
 import { AgreementError, AgreementService, type AgreementNode } from './agreements.ts'
@@ -581,6 +582,41 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const identity = iamContextFor(req)
     return send(res, 200, { data: listed.filter(project => project.status === '未开放'
       || (project.tenantId === identity.tenantId && project.ownerUserId === identity.userId)) })
+  }
+  const fundingMatch = pathname.match(/^\/api\/projects\/([^/]+)\/funding-reconciliation$/)
+  if (fundingMatch) {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '只有财务或公司管理员可以查看付款前对账')
+    const projectId = decodeURIComponent(fundingMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    const rule = project.ruleId ? await repositories.rules.getById(project.ruleId) : null
+    if (!rule?.sharePrice) return send(res, 409, { error: 'SHARE_RULE_REQUIRED', message: '该项目尚无 V1.1 按份认购规则' })
+    const [records, ledger] = await Promise.all([
+      repositories.subscriptions.list({ projectId }), fundLedger.listProjectContributions(projectId)
+    ])
+    const approved = new Map(records.filter(record => record.userId !== 'company' && record.pay === '已缴款')
+      .map(record => [record.id, record]))
+    if (ledger.some(entry => !approved.has(entry.subscriptionId) || entry.amountCents !== Math.round(approved.get(entry.subscriptionId)!.amount * 100))
+      || [...approved.keys()].some(id => ledger.filter(entry => entry.subscriptionId === id).length !== 1)) {
+      return send(res, 409, { error: 'FUNDING_LEDGER_INCONSISTENT', message: '已生效缴款与资金台账不一致，请先核对' })
+    }
+    const cents = (value: number, name: string) => {
+      const amount = Math.round(value * 100)
+      if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(amount) || Math.abs(value * 100 - amount) > 0.000001) {
+        throw new AppError(409, 'FUNDING_AMOUNT_INVALID', `${name}金额无效，请先核对`)
+      }
+      return amount
+    }
+    const funding = reconcileProcurementFunding({
+      purchaseCents: cents(project.costAmount, '采购'),
+      approvedEmployeeCents: ledger.reduce((sum, entry) => sum + entry.amountCents, 0),
+      companyFrontCents: records.filter(record => record.companyKind === 'front').reduce((sum, record) => sum + cents(record.amount, '公司前置'), 0),
+      companyBackstopCents: records.filter(record => record.companyKind === 'backstop').reduce((sum, record) => sum + cents(record.amount, '公司兜底'), 0),
+      pendingReviewCount: records.filter(record => record.pay === '待复核' || record.pay === '部分缴款').length
+    })
+    return send(res, 200, { data: { projectId, ...funding,
+      companyContributionIsCommitment: true, companyFundsConfirmed: false, checkedAt: new Date().toISOString() } })
   }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)

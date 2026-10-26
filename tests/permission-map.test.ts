@@ -12,6 +12,7 @@ test('maps every protected route to an exact permission', () => {
     ['GET', '/api/agreements/1/confirmations', 'crowdfunding:agreement:manage'],
     ['GET', '/api/projects', 'crowdfunding:project:query'],
     ['GET', '/api/projects/P1', 'crowdfunding:project:query'],
+    ['GET', '/api/projects/P1/funding-reconciliation', 'crowdfunding:project:query'],
     ['GET', '/api/receiving-codes', 'crowdfunding:receiving-code:query'],
     ['GET', '/api/subscriptions', 'crowdfunding:subscription:query'],
     ['GET', '/api/rules', 'crowdfunding:rule:query'],

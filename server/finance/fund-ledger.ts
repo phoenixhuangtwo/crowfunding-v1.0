@@ -22,6 +22,9 @@ export function createFundLedger(db: Db, prefix = '') {
   return {
     append(entry: ContributionLedgerEntry, session: ClientSession) {
       return collection.insertOne(entry, { session })
+    },
+    async listProjectContributions(projectId: string, session?: ClientSession) {
+      return collection.find({ projectId, type: 'employee_contribution' }, { session }).toArray()
     }
   }
 }

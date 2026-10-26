@@ -33,6 +33,7 @@ const routes: Array<[string, RegExp, ApiPermissionCode]> = [
   ['GET', /^\/api\/agreements\/\d+\/confirmations$/, 'crowdfunding:agreement:manage'],
   ['GET', /^\/api\/projects$/, 'crowdfunding:project:query'],
   ['GET', new RegExp(`^\\/api\\/projects\\/${id}$`), 'crowdfunding:project:query'],
+  ['GET', new RegExp(`^\\/api\\/projects\\/${id}\\/funding-reconciliation$`), 'crowdfunding:project:query'],
   ['GET', /^\/api\/receiving-codes$/, 'crowdfunding:receiving-code:query'],
   ['GET', /^\/api\/subscriptions$/, 'crowdfunding:subscription:query'],
   ['GET', /^\/api\/rules$/, 'crowdfunding:rule:query'],
