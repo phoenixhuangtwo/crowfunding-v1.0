@@ -82,6 +82,7 @@ type Subscription = {
   projectId: string
   project: string
   userId: string
+  userName?: string
   amount: number
   shares?: number
   companyKind?: 'front' | 'backstop'
@@ -446,6 +447,11 @@ function receivingCodeManager(req: IncomingMessage) {
   const role = context.role
   if (role !== 'admin' && role !== 'finance') throw new AppError(403, 'FORBIDDEN', '只有管理员或财务可以维护收款码')
   return { userId: context.userId, role, label: `${context.userId} · ${role === 'admin' ? '管理员' : '财务'}` }
+}
+
+function iamDisplayName(req: IncomingMessage) {
+  const identity = iamContextFor(req)
+  return identity.user?.nickname?.trim() || identity.user?.username?.trim() || identity.userId
 }
 
 function managementActor(req: IncomingMessage, allowedRoles: Role[]) {
@@ -925,7 +931,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!code?.imageAssetId) throw new AppError(409, 'RECEIVING_CODE_UNAVAILABLE', '当前项目没有可用缴款码图片')
     await mongo.withTransaction(async session => {
       const current = await agreementService.requireCurrent(body.agreementVersion, session)
-      await agreementService.confirm({ version: current.version, userId: context.userId, userName: context.userId, node: '查看缴款码', relatedId: subscriptionId, codeId: code.id }, session)
+      await agreementService.confirm({ version: current.version, userId: context.userId, userName: iamDisplayName(req), node: '查看缴款码', relatedId: subscriptionId, codeId: code.id }, session)
       await repositories.auditLogs.insert(auditRecord({ actor: `${context.userId} · 员工`, role: 'employee', action: '确认协议并查看缴款码', target: code.id, before: null, after: { agreementVersion: current.version, subscriptionId } }) as never, session)
       return true
     })
@@ -1174,6 +1180,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       projectId: project.id,
       project: project.title,
       userId,
+      userName: iamDisplayName(req),
       amount,
       shares,
       pay: '未缴款',
@@ -1192,7 +1199,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       await repositories.projects.replace(nextProject, session)
       await repositories.subscriptions.insert(record, session)
       await repositories.auditLogs.insert(audit as never, session)
-      await agreementService.confirm({ version: record.agreementVersion!, userId, userName: userId, node: '提交认购', relatedId: record.id }, session)
+      await agreementService.confirm({ version: record.agreementVersion!, userId, userName: record.userName!, node: '提交认购', relatedId: record.id }, session)
       return true
     })
     Object.assign(project, nextProject)
@@ -1230,7 +1237,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (!latest || latest.pay !== '待确认收款') throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
       await repositories.subscriptions.replace(updated, session)
       await repositories.auditLogs.insert(audit as never, session)
-      await agreementService.confirm({ version: agreement.version, userId: context.userId, userName: context.userId, node: '确认收款', relatedId: subscription.id }, session)
+      await agreementService.confirm({ version: agreement.version, userId: context.userId, userName: iamDisplayName(req), node: '确认收款', relatedId: subscription.id }, session)
       return true
     })
     Object.assign(subscription, updated)

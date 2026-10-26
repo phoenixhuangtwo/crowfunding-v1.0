@@ -51,6 +51,7 @@ export type Subscription = {
   projectId: string
   project: string
   userId: string
+  userName?: string
   amount: number
   shares?: number
   companyKind?: 'front' | 'backstop'
