@@ -57,7 +57,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-super-admin-token', userId: 1004, username: 'superadmin01', nickname: '超级管理员', deptId: 900,
-    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query'],
+    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:project:open', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {

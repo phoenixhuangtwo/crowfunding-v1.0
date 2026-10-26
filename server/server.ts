@@ -31,6 +31,7 @@ import { IamClient } from './iam/client.ts'
 import { handleAuthRoute } from './auth/routes.ts'
 import { authenticateRequest, authErrorResponse, permissionInfoForClient, requireApiPermission, validateReviewAction } from './auth/middleware.ts'
 import { handleCorsPreflight, sendJson } from './http-response.ts'
+import { ownershipFrom } from './iam/data-scope.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -53,6 +54,9 @@ type Project = {
   offlineSalesOrder?: string
   createdAt?: string
   projectOwner?: string
+  tenantId?: string
+  ownerUserId?: string
+  ownerDeptId?: string
   status: ProjectStatus
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
@@ -1503,7 +1507,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       return send(res, 409, { error: 'OPEN_AMOUNT_EXCEEDS_COST', message: '开放认购金额必须满足 0≦开放认购金额≦项目成本金额' })
     }
     const before = { status: project.status, total: project.total, deadline: project.deadline, ruleId: project.ruleId }
+    const publisher = ownershipFrom(iamContextFor(req))
     project.ruleId = selectedRule.id
+    project.tenantId = publisher.tenantId
+    project.ownerUserId = publisher.ownerUserId
+    project.ownerDeptId = publisher.ownerDeptId
     project.total = selectedRule.totalAmount
     project.companyFixedAmount = selectedRule.companyFixedAmount
     project.deadline = selectedRule.endAt || project.deadline
@@ -1524,7 +1532,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         total: project.total,
         deadline: project.deadline,
         ruleId: selectedRule.id,
-        ruleName: selectedRule.ruleName
+        ruleName: selectedRule.ruleName,
+        publisher
       }
     })
     await persistState()

@@ -22,6 +22,9 @@ export type Project = {
   offlineSalesOrder?: string
   createdAt?: string
   projectOwner?: string
+  tenantId?: string
+  ownerUserId?: string
+  ownerDeptId?: string
   status: ProjectStatus
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number

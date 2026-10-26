@@ -111,5 +111,5 @@ export function assertScopedEntity(entity: ScopedEntity | null | undefined, cont
 }
 
 export function asScopeFilter<T extends object>(context: IamRequestContext, config: DataScopeConfig = {}): Filter<T> {
-  return scopeFilter(context, config) as Filter<T>
+  return scopeFilter(context, config) as unknown as Filter<T>
 }

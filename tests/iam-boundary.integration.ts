@@ -37,6 +37,18 @@ try {
     companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
     employeeSubscribedAmount: 0, subscribed: 0, people: 0
   })
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-PUBLISH', title: '待发布归属测试项目', source: 'integration-test',
+    status: '未开放', statusType: 'info', progress: 0, remain: 300, deadline: '2099-12-31 23:59',
+    total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 0, subscribed: 0, people: 0
+  })
+  await db.collection(`${prefix}subscription_rules`).insertOne({
+    id: 'RULE-IAM-PUBLISH', projectId: 'PRJ-IAM-PUBLISH', projectName: '待发布归属测试项目', ruleName: '隔离发布规则',
+    totalAmount: 300, companyFixedAmount: 0, minAmount: 100, minParticipants: 1,
+    allowMultiple: true, companyTakeover: false, status: '已启用', startAt: '', endAt: '2099-12-31 23:59', updatedAt: new Date().toISOString()
+  })
   const port = await freePort()
   const base = `http://127.0.0.1:${port}`
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
@@ -67,6 +79,16 @@ try {
   assert.equal(departmentAdmin.status, 403)
   assert.equal(departmentAdmin.body.error, 'DATA_SCOPE_MIGRATION_REQUIRED')
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-finance-token' })).status, 200)
+  const published = await fetch(`${base}/api/projects/PRJ-IAM-PUBLISH/open`, {
+    method: 'POST', headers: { Authorization: 'Bearer smoke-super-admin-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ruleId: 'RULE-IAM-PUBLISH' })
+  })
+  assert.equal(published.status, 200)
+  const publishedProject = await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PUBLISH' })
+  assert.equal(publishedProject?.tenantId, '0')
+  assert.equal(publishedProject?.ownerUserId, '1004')
+  assert.equal(publishedProject?.ownerDeptId, '900')
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-TEST' }))?.ownerUserId, undefined)
   const legacyPost = async (path: string, token: string) => fetch(`${base}${path}`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ imageDataUrl: 'data:image/png;base64,aGVsbG8=' })
