@@ -25,6 +25,7 @@ import { createFundLedger } from './finance/fund-ledger.ts'
 import { validateContributionReview } from './finance/contribution-review.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
+import { AgreementError, AgreementService, type AgreementNode } from './agreements.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -95,6 +96,8 @@ type Subscription = {
   reviewedBy?: string
   reviewedAt?: string
   rejectReason?: string
+  agreementVersion?: number
+  receiptAgreementVersion?: number
 }
 
 type AuditLog = {
@@ -148,6 +151,7 @@ type ReceivingCode = {
   disabledReason?: string
   imageUrl?: string
   imageName?: string
+  imageAssetId?: string
 }
 
 type AppState = {
@@ -749,6 +753,8 @@ const mongo = await connectMongo(appConfig.mongodb)
 await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
 const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
 const fundLedger = createFundLedger(mongo.db, appConfig.mongodb.collectionPrefix)
+const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
+await agreementService.ensureIndexes()
 const queryService = new QueryService(repositories)
 const objectStorage = new TencentCosObjectStorage(appConfig.cos)
 const fileAssetService = new FileAssetService({
@@ -994,12 +1000,42 @@ async function readValidatedUpload(
 async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
   const { pathname, searchParams } = url
   if (pathname === '/api/health') return send(res, 200, { ok: true, service: 'subscription-api', persistence: 'mongodb', database: appConfig.mongodb.database, time: new Date().toISOString() })
+  if (pathname === '/api/agreements/current') {
+    requestContext(req)
+    const current = await agreementService.current()
+    return send(res, 200, { data: current ? { ...current, status: '生效中' } : null })
+  }
+  if (pathname === '/api/agreements') {
+    managementActor(req, ['super_admin'])
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const result = await agreementService.list(page, pageSize)
+    return send(res, 200, { data: { ...result, items: result.items.map((item, index) => ({ ...item, status: page === 1 && index === 0 ? '生效中' : '已失效' })) } })
+  }
+  const agreementConfirmationsMatch = pathname.match(/^\/api\/agreements\/(\d+)\/confirmations$/)
+  if (agreementConfirmationsMatch) {
+    managementActor(req, ['super_admin'])
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const userId = searchParams.get('userId')?.trim() || undefined
+    const node = searchParams.get('node')?.trim() as AgreementNode | undefined
+    const from = searchParams.get('from')?.trim() || undefined
+    const to = searchParams.get('to')?.trim() || undefined
+    if (node && !['提交认购', '查看缴款码', '确认收款'].includes(node)) return send(res, 400, { error: 'AGREEMENT_NODE_INVALID', message: '确认节点无效' })
+    if ([from, to].some(value => value && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value))) return send(res, 400, { error: 'AGREEMENT_TIME_INVALID', message: '确认时间格式无效' })
+    return send(res, 200, { data: await agreementService.listConfirmations(Number(agreementConfirmationsMatch[1]), page, pageSize, { userId, node, from, to }) })
+  }
   const fileMatch = pathname.match(/^\/api\/files\/([^/]+)\/content$/)
   if (fileMatch) {
     const context = requestContext(req)
     const asset = await fileAssetService.getReadyAsset(decodeURIComponent(fileMatch[1]))
     if (!asset) return send(res, 404, { error: 'FILE_NOT_FOUND', message: '文件不存在或无权访问' })
     await authorizeAssetRead(context, asset, repositories)
+    if (asset.purpose === 'receiving-code' && context.role === 'employee') {
+      const current = await agreementService.current()
+      const accepted = current && await agreementService.hasRecentCodeConfirmation(context.userId, asset.ownerId, current.version, new Date(Date.now() - 5 * 60_000))
+      if (!accepted) return send(res, 404, { error: 'FILE_NOT_FOUND', message: '文件不存在或无权访问' })
+    }
     res.writeHead(200, {
       'Content-Type': asset.mimeType,
       'Content-Length': String(asset.sizeBytes),
@@ -1027,7 +1063,7 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const projectIds = new Set((await queryService.listSubscriptions(context))
       .filter(item => item.pay !== '已释放').map(item => item.projectId))
     const codeIds = new Set(rules.filter(rule => projectIds.has(rule.projectId)).map(rule => rule.receivingCodeId))
-    return send(res, 200, { data: codes.filter(code => codeIds.has(code.id)) })
+    return send(res, 200, { data: codes.filter(code => codeIds.has(code.id)).map(({ imageAssetId: _imageAssetId, imageUrl: _imageUrl, ...code }) => code) })
   }
   const procurementDetailMatch = pathname.match(/^\/api\/procurement\/orders\/([^/]+)$/)
   if (procurementDetailMatch) {
@@ -1141,6 +1177,13 @@ function validateRulePayload(body: Record<string, unknown>, res: ServerResponse)
 }
 
 async function routePost(pathname: string, req: IncomingMessage, res: ServerResponse) {
+  if (pathname === '/api/agreements') {
+    const actor = managementActor(req, ['super_admin'])
+    const body = await readJsonBody(req, 16 * 1024)
+    const created = await agreementService.create({ title: body.title, body: body.body, createdBy: actor.label })
+    await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '新增免责协议版本', target: created.id, before: null, after: { version: created.version, title: created.title } }) as never)
+    return send(res, 201, { data: created, message: '新版本已生效' })
+  }
   const settlementOperator = pathname === '/api/invoices/ocr' || pathname === '/api/invoices/pending/delete'
     || /^\/api\/projects\/[^/]+\/settlements\/confirm$/.test(pathname)
     ? financeOperator(req) : undefined
@@ -1382,6 +1425,23 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  if (pathname === '/api/agreements/confirm-view-code') {
+    const context = requestContext(req)
+    if (context.role !== 'employee' || body.agreementsConfirmed !== true) throw new AppError(403, 'FORBIDDEN', '只有员工本人确认协议后可以查看缴款码')
+    const subscriptionId = String(body.subscriptionId ?? '')
+    const subscription = await repositories.subscriptions.getById(subscriptionId)
+    if (!subscription || subscription.userId !== context.userId || subscription.pay === '已释放') throw new AppError(404, 'SUBSCRIPTION_NOT_FOUND', '认购记录不存在')
+    const rule = rules.find(item => item.projectId === subscription.projectId && item.status === '已启用')
+    const code = receivingCodes.find(item => item.id === rule?.receivingCodeId && item.status === '启用')
+    if (!code?.imageAssetId) throw new AppError(409, 'RECEIVING_CODE_UNAVAILABLE', '当前项目没有可用缴款码图片')
+    await mongo.withTransaction(async session => {
+      const current = await agreementService.requireCurrent(body.agreementVersion, session)
+      await agreementService.confirm({ version: current.version, userId: context.userId, userName: context.userId, node: '查看缴款码', relatedId: subscriptionId, codeId: code.id }, session)
+      await repositories.auditLogs.insert(auditRecord({ actor: `${context.userId} · 员工`, role: 'employee', action: '确认协议并查看缴款码', target: code.id, before: null, after: { agreementVersion: current.version, subscriptionId } }) as never, session)
+      return true
+    })
+    return send(res, 200, { data: { codeId: code.id, imageAssetId: code.imageAssetId } })
+  }
 
   if (pathname === '/api/invoices/ocr') {
     const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl.trim() : ''
@@ -1609,7 +1669,6 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const project = projects.find(item => item.id === body.projectId)
     let amount = Number(body.amount)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
-    if (!body.agreementsConfirmed) return send(res, 409, { error: 'AGREEMENT_REQUIRED', message: '请先确认当前有效协议' })
     if (!body.idempotencyKey) return send(res, 400, { error: 'IDEMPOTENCY_KEY_REQUIRED', message: '缺少 idempotency_key（幂等键）' })
     const rule = rules.find(item => item.id === project.ruleId)
     const userId = context.userId
@@ -1621,6 +1680,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (!sameRequest) return send(res, 409, { error: 'IDEMPOTENCY_KEY_CONFLICT', message: '该幂等键已用于其他认购请求' })
       return send(res, 200, { data: existing, message: '重复请求已按幂等键返回原认购记录' })
     }
+    if (body.agreementsConfirmed !== true) return send(res, 409, { error: 'AGREEMENT_REQUIRED', message: '请先确认当前有效协议' })
+    await agreementService.requireCurrent(body.agreementVersion)
     if (project.status !== '未满额') return send(res, 409, { error: 'PROJECT_NOT_SUBSCRIBABLE', message: '只有未满额项目可以继续认购' })
     let shares: number | undefined
     if (rule?.sharePrice !== undefined) {
@@ -1643,12 +1704,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (amount > project.remain) return send(res, 409, { error: 'INSUFFICIENT_REMAINING_AMOUNT', message: '剩余可认购金额不足' })
 
     const before = { subscribed: project.subscribed, remain: project.remain, people: project.people, employeeSubscribedAmount: project.employeeSubscribedAmount }
-    project.employeeSubscribedAmount += amount
-    project.people += 1
-    normalizeProjectAmounts(project)
-    if (project.remain <= 0 || project.progress >= 100) {
-      project.status = '已满额'
-      project.statusType = 'success'
+    const nextProject = { ...project, employeeSubscribedAmount: project.employeeSubscribedAmount + amount, people: project.people + 1 }
+    normalizeProjectAmounts(nextProject)
+    if (nextProject.remain <= 0 || nextProject.progress >= 100) {
+      nextProject.status = '已满额'
+      nextProject.statusType = 'success'
     }
 
     const createdAt = now()
@@ -1663,12 +1723,24 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       profit: project.profitAmount,
       action: '去支付',
       idempotencyKey: String(body.idempotencyKey),
+      agreementVersion: Number(body.agreementVersion),
       createdAt,
       paymentDeadlineAt: addHours(createdAt, 12)
     }
+    const audit = auditRecord({ actor: `${record.userId} · 员工`, role: 'employee', action: '创建认购', target: record.id, before, after: { subscribed: nextProject.subscribed, remain: nextProject.remain, subscription: record.id, agreementVersion: record.agreementVersion } }) as AuditLog
+    await mongo.withTransaction(async session => {
+      await agreementService.requireCurrent(body.agreementVersion, session)
+      const latest = await repositories.projects.getById(project.id, session)
+      if (!latest || latest.remain !== before.remain || latest.people !== before.people) throw new AppError(409, 'PROJECT_CHANGED', '项目认购额度已变化，请刷新后重试')
+      await repositories.projects.replace(nextProject, session)
+      await repositories.subscriptions.insert(record, session)
+      await repositories.auditLogs.insert(audit as never, session)
+      await agreementService.confirm({ version: record.agreementVersion!, userId, userName: userId, node: '提交认购', relatedId: record.id }, session)
+      return true
+    })
+    Object.assign(project, nextProject)
     subscriptions.unshift(record)
-    await pushAudit({ actor: `${record.userId} · 员工`, role: 'employee', action: '创建认购', target: record.id, before, after: { subscribed: project.subscribed, remain: project.remain, subscription: record.id } })
-    await persistState()
+    auditLogs.unshift(audit)
     return send(res, 201, { data: record })
   }
 
@@ -1682,20 +1754,31 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (subscription.pay !== '待确认收款') {
       return send(res, 409, { error: 'SUBSCRIPTION_STATUS_INVALID', message: '仅待确认收款状态可以确认收款' })
     }
+    if (body.agreementsConfirmed !== true) return send(res, 409, { error: 'AGREEMENT_REQUIRED', message: '请先确认当前有效协议' })
+    const agreement = await agreementService.requireCurrent(body.agreementVersion)
     const before = { pay: subscription.pay, action: subscription.action }
-    subscription.pay = '已收款'
-    subscription.action = '查看支付'
-    await pushAudit({
+    const updated = { ...subscription, pay: '已收款' as const, action: '查看支付', receiptAgreementVersion: agreement.version }
+    const audit = auditRecord({
       actor: `${context.userId} · 员工`,
       role: 'employee',
       action: '确认收款',
       target: subscription.id,
       before,
-      after: { pay: subscription.pay, action: subscription.action },
+      after: { pay: updated.pay, action: updated.action, agreementVersion: agreement.version },
       result: '成功'
+    }) as AuditLog
+    await mongo.withTransaction(async session => {
+      await agreementService.requireCurrent(agreement.version, session)
+      const latest = await repositories.subscriptions.getById(subscription.id, session)
+      if (!latest || latest.pay !== '待确认收款') throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
+      await repositories.subscriptions.replace(updated, session)
+      await repositories.auditLogs.insert(audit as never, session)
+      await agreementService.confirm({ version: agreement.version, userId: context.userId, userName: context.userId, node: '确认收款', relatedId: subscription.id }, session)
+      return true
     })
-    await persistState()
-    return send(res, 200, { data: subscription, message: '已确认收款，状态已更新为已收款' })
+    Object.assign(subscription, updated)
+    auditLogs.unshift(audit)
+    return send(res, 200, { data: updated, message: '已确认收款，状态已更新为已收款' })
   }
 
   const reviewMatch = pathname.match(/^\/api\/subscriptions\/([^/]+)\/review$/)
@@ -2347,6 +2430,7 @@ const server = createServer(observeRequests(async (req, res) => {
     if (req.method === 'POST') return await routePost(url.pathname, req, res)
     return send(res, 405, { error: 'METHOD_NOT_ALLOWED' })
   } catch (error) {
+    if (error instanceof AgreementError) return send(res, error.status, { error: error.code, message: error.message })
     if (error instanceof RequestBodyError) return send(res, error.status, { error: error.code, message: error.message })
     if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
     const message = error instanceof Error ? error.message : ''
