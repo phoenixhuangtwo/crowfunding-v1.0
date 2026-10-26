@@ -3,7 +3,9 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiRequest } from '../auth/api-client'
 
-type Project = { id: string; title: string; status: string }
+type Project = { id: string; title: string; status: string; frozenFromStatus?: string;
+  procurementDifference?: { fields: string[]; publishedCostCents: number; publishedSalesCents: number;
+    currentCostCents: number | null; currentSalesCents: number | null } }
 type Funding = {
   purchaseCents: number
   employeeCents: number
@@ -30,7 +32,14 @@ const paidAtLocal = ref('')
 const companyFundsConfirmed = ref(false)
 const note = ref('')
 const options = computed(() => props.projects.filter(project => ['已满额', '已截止', '待回款'].includes(project.status)))
+const frozenProjects = computed(() => props.projects.filter(project => project.status === '已冻结'))
 const money = (cents: number) => `¥ ${(cents / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const freezeSummary = (project: Project) => {
+  const difference = project.procurementDifference
+  if (!difference) return `${project.title}（${project.id}）已冻结，采购差异待核对`
+  const amount = (cents: number | null) => cents === null ? '无有效金额' : money(cents)
+  return `${project.title}（${project.id}）冻结前为${project.frozenFromStatus || '未知'}；采购金额 ${amount(difference.publishedCostCents)} → ${amount(difference.currentCostCents)}；销售金额 ${amount(difference.publishedSalesCents)} → ${amount(difference.currentSalesCents)}`
+}
 
 watch(options, items => {
   if (!items.some(item => item.id === projectId.value)) projectId.value = items[0]?.id ?? ''
@@ -110,6 +119,8 @@ async function registerPayment() {
 <template>
   <div class="procurement-payment">
     <header class="page-head"><div><h1>采购付款登记</h1><p>先核对员工已生效缴款和公司认购承诺，再登记实际向供应商付款。</p></div></header>
+    <el-alert v-for="project in frozenProjects" :key="project.id" :title="freezeSummary(project)"
+      type="warning" :closable="false" show-icon />
     <section class="panel">
       <el-form label-width="126px">
         <el-form-item label="众筹单">

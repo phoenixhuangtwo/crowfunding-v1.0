@@ -2380,7 +2380,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const content = `众筹单【${projectId}】冻结已处理，处理结果：【以发布时内容为准继续】`
       const sourceId = `${projectId}:${project.procurementDifference.fingerprint}`
       const notices = [roleNotification({ type: '众筹解冻', sourceId, role: 'finance',
-        projectId, content, targetPage: 'adminProjects', createdAt: resolvedAt }),
+        projectId, content, targetPage: 'procurementPayment', createdAt: resolvedAt }),
       ...(project.ownerUserId ? [recipientNotification({ type: '众筹解冻', sourceId,
         recipientId: project.ownerUserId, projectId, content,
         targetPage: 'adminProjects', createdAt: resolvedAt })] : [])]
@@ -2395,7 +2395,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
   const projectCloseMatch = pathname.match(/^\/api\/projects\/([^/]+)\/close$/)
   if (projectCloseMatch) {
-    const actor = managementActor(req, ['admin'])
+    const actor = managementActor(req, ['admin', 'super_admin'])
     const projectId = decodeURIComponent(projectCloseMatch[1])
     const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
     if (reason.length < 5 || reason.length > 200) {
@@ -2441,9 +2441,14 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         }
         const unresolvedExceptions = await exceptionFunds.countDocuments({ projectId, remainingCents: { $gt: 0 } }, { session })
         const status = refundOrders.length || unresolvedExceptions ? '关闭中' as const : '已关闭' as const
+        const wasFrozen = project.status === '已冻结' && Boolean(project.procurementDifference)
+        const closedAt = new Date().toISOString()
         const updatedProject = { ...project, status,
           statusType: status === '关闭中' ? 'warning' : 'info',
           frozenFromStatus: undefined, frozenFromStatusType: undefined,
+          ...(wasFrozen ? { procurementDifferenceResolution: {
+            differenceDetails: `采购单${project.procurementDifference!.fields.join('、')}与发布时金额不一致`,
+            reason, resolvedAt: closedAt, resolvedBy: actor.userId } } : {}),
           interruptReason: reason, interruptedAt: new Date().toISOString(), refundNotice: undefined,
           ...(status === '已关闭' ? { closedAt: new Date().toISOString(), closedBy: actor.userId } : {}) } as Project
         await repositories.projects.replace(updatedProject, session)
@@ -2459,8 +2464,19 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             await notifications.insertOne(notice, { session })
           }
         }
+        if (wasFrozen) {
+          const sourceId = `${projectId}:${project.procurementDifference!.fingerprint}:close`
+          const content = `众筹单【${projectId}】冻结已处理，处理结果：【关闭后重开】`
+          const notices = [roleNotification({ type: '众筹解冻', sourceId, role: 'finance',
+            projectId, content, targetPage: 'projectRefunds', createdAt: closedAt }),
+          ...(project.ownerUserId ? [recipientNotification({ type: '众筹解冻', sourceId,
+            recipientId: project.ownerUserId, projectId, content,
+            targetPage: 'adminProjects', createdAt: closedAt })] : [])]
+          for (const notice of notices) await notifications.updateOne({ id: notice.id },
+            { $setOnInsert: notice }, { upsert: true, session })
+        }
         const audit = auditRecord({ actor: actor.label, role: actor.role, action: '发起众筹关闭',
-          target: projectId, before: { status: project.status },
+          target: projectId, before: { status: project.status, procurementDifference: project.procurementDifference },
           after: { status, reason, refundCount: refundOrders.length,
             refundTotalCents: refundOrders.reduce((sum, item) => sum + item.amountCents, 0) } }) as AuditLog
         await repositories.auditLogs.insert(audit as never, session)
@@ -4121,7 +4137,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             projectId: published.id, content, targetPage: 'adminProjects', createdAt }))
           for (const role of ['finance', 'super_admin'] as const) freezeNotices.push(roleNotification({
             type: '众筹冻结', sourceId: noticeSource, role, projectId: published.id,
-            content, targetPage: 'adminProjects', createdAt }))
+            content, targetPage: role === 'finance' ? 'procurementPayment' : 'adminProjects', createdAt }))
         }
       }
       const skipReason = procurementOrderSkipReason(order)

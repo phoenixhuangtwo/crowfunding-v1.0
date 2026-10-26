@@ -352,6 +352,14 @@ WHERE role.code = 'crowdfunding_admin' AND role.tenant_id = 0 AND role.deleted =
 INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
 SELECT role.id, resource.id, 0
 FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code = 'crowdfunding:project:close' AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
   AND resource.code IN ('crowdfunding:project:finish-close', 'crowdfunding:project-refund:query',
     'crowdfunding:project-refund:proof-upload', 'crowdfunding:project-refund:register')
   AND resource.deleted = b'0'

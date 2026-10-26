@@ -4,7 +4,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiRequest } from '../auth/api-client'
 import { readAccessToken } from '../auth/session'
 
-type Project = { id: string; title: string; status: string; salesAmount?: number }
+type Project = { id: string; title: string; status: string; salesAmount?: number; frozenFromStatus?: string;
+  procurementDifference?: { fields: string[]; publishedCostCents: number; publishedSalesCents: number;
+    currentCostCents: number | null; currentSalesCents: number | null } }
 type Line = { projectId: string; amountCents: number }
 type Batch = { id: string; kind: '客户回款' | '公司补款'; transactionNo: string; bookedAt: string;
   totalCents: number; lines: Line[]; proofAssetIds: string[]; registeredBy: string; reason?: string;
@@ -18,6 +20,7 @@ const props = defineProps<{ projects: Project[]; role: 'finance' | 'super_admin'
   canRegister: boolean; canUploadProof: boolean; canReview: boolean; canRegisterDifference: boolean }>()
 const emit = defineEmits<{ updated: [] }>()
 const eligible = computed(() => props.projects.filter(project => ['待回款', '回款中', '待分配'].includes(project.status)))
+const frozenProjects = computed(() => props.projects.filter(project => project.status === '已冻结'))
 const projectId = ref('')
 const filterKind = ref('')
 const filterStatus = ref('')
@@ -40,6 +43,12 @@ const differenceDestination = ref<'退回客户' | '计入公司'>('退回客户
 const differenceReason = ref('')
 const refundTransactionNo = ref('')
 const money = (value: number) => `¥ ${(value / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const freezeSummary = (project: Project) => {
+  const difference = project.procurementDifference
+  if (!difference) return `${project.title}（${project.id}）已冻结，采购差异待核对`
+  const amount = (cents: number | null) => cents === null ? '无有效金额' : money(cents)
+  return `${project.title}（${project.id}）冻结前为${project.frozenFromStatus || '未知'}；采购金额 ${amount(difference.publishedCostCents)} → ${amount(difference.currentCostCents)}；销售金额 ${amount(difference.publishedSalesCents)} → ${amount(difference.currentSalesCents)}`
+}
 const lineTotal = computed(() => lines.value.reduce((sum, line) => sum + Math.round((line.amount ?? 0) * 100), 0))
 const canReviewBatch = (batch: Batch) => props.canReview && batch.status === '待复核'
   && (batch.kind === '客户回款' ? props.role === 'finance' : props.role === 'super_admin')
@@ -188,6 +197,8 @@ async function registerDifference() {
 <template>
   <div>
     <header class="page-head"><div><h1>客户回款</h1><p>分批登记客户回款与公司补款，复核后计入资金台账。</p></div></header>
+    <el-alert v-for="project in frozenProjects" :key="project.id" :title="freezeSummary(project)"
+      type="warning" :closable="false" show-icon />
     <section class="panel">
       <div class="filters">
         <el-select v-model="projectId" filterable clearable placeholder="全部众筹单"><el-option v-for="item in eligible" :key="item.id" :value="item.id" :label="`${item.title} · ${item.id}`" /></el-select>

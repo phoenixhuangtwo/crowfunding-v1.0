@@ -1402,6 +1402,13 @@ async function closeProject(project: Project) {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '发起关闭失败') }
 }
 
+function procurementFreezeSummary(project: Project) {
+  const difference = project.procurementDifference
+  if (!difference) return '该众筹单已冻结，采购差异待核对'
+  const money = (cents: number | null) => cents === null ? '无有效金额' : formatMoney(cents / 100)
+  return `冻结前：${project.frozenFromStatus || '未知'}；采购金额 ${money(difference.publishedCostCents)} → ${money(difference.currentCostCents)}；销售金额 ${money(difference.publishedSalesCents)} → ${money(difference.currentSalesCents)}`
+}
+
 async function resolveProcurementDifference(project: Project) {
   const difference = project.procurementDifference
   if (!difference) return
@@ -2946,6 +2953,7 @@ watch(() => authSession.permissionInfo.value, info => {
                 <el-table-column label="项目状态" min-width="220">
                   <template #default="{ row }">
                   <el-tag :type="row.statusType">{{ row.status === '已完结' || row.status === '部分已结算' ? '历史状态（待核实）' : row.status }}</el-tag>
+                  <div v-if="row.status === '已冻结'" class="muted">{{ procurementFreezeSummary(row) }}</div>
                   <el-tooltip
                     v-if="row.status === '已中断'"
                     placement="top-start"

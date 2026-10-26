@@ -41,6 +41,15 @@ try {
     total: 100, costAmount: 100, salesAmount: 120, profitAmount: 20,
     companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
     employeeSubscribedAmount: 0, subscribed: 0, people: 0, ownerUserId: '1002', ownerDeptId: '200' })
+  await db.collection(`${prefix}projects`).insertOne({ id: 'PRJ-FREEZE-CLOSE', title: '冻结关闭隔离测试',
+    source: 'integration-test', status: '已冻结', statusType: 'danger', frozenFromStatus: '未满额',
+    frozenFromStatusType: 'primary', progress: 0, remain: 100, deadline: '2099-12-31 23:59',
+    total: 100, costAmount: 100, salesAmount: 120, profitAmount: 20,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 0, subscribed: 0, people: 0, ownerUserId: '1002', ownerDeptId: '200',
+    procurementDifference: { fingerprint: '[10100,12000]', fields: ['采购金额'],
+      publishedCostCents: 10000, publishedSalesCents: 12000,
+      currentCostCents: 10100, currentSalesCents: 12000, detectedAt: new Date().toISOString() } })
   await db.collection(`${prefix}subscriptions`).insertOne({ id: 'SUB-FREEZE-TEST', projectId,
     project: '采购差异隔离测试', userId: '1001', amount: 100, pay: '待复核', action: '查看支付',
     createdAt: new Date().toISOString(), paymentDeadlineAt: '2099-12-31 23:59' })
@@ -82,6 +91,17 @@ try {
     'smoke-employee-token', { decision: '确认' })).body.error, 'PROJECT_FROZEN')
   assert.equal((await post('/api/distribution-orders/DIST-FREEZE-APPROVE/approve',
     'smoke-finance-token')).status, 409)
+  const pendingClose = await post(`/api/projects/${projectId}/close`, 'smoke-super-admin-token',
+    { reason: '采购金额变化，关闭后重新发布' })
+  assert.equal(pendingClose.body.error, 'PROJECT_CLOSE_PENDING_REVIEW')
+  const closed = await post('/api/projects/PRJ-FREEZE-CLOSE/close', 'smoke-super-admin-token',
+    { reason: '采购金额变化，关闭后重新发布' })
+  assert.equal(closed.status, 200, JSON.stringify(closed.body))
+  const closedProject = await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-FREEZE-CLOSE' })
+  assert.equal(closedProject?.status, '已关闭')
+  assert.equal(closedProject?.procurementDifferenceResolution?.resolvedBy, '1004')
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    projectId: 'PRJ-FREEZE-CLOSE', type: '众筹解冻' }), 2)
   const denied = await post(`/api/projects/${projectId}/procurement-difference/resolve`,
     'smoke-admin-full-token', { action: 'continue', differenceDetails: '采购成本增加一元', reason: '继续按原发布金额执行' })
   assert.equal(denied.status, 403, JSON.stringify(denied.body))
