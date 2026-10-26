@@ -4,6 +4,8 @@ export type BackstopCandidate = {
   remainingAmount: number
   subscriptionCutoffAt: string
   employeePaymentDeadlines: string[]
+  paymentCutoffAt?: string
+  unresolvedReviewCount?: number
   companyTakeover: boolean
 }
 
@@ -13,13 +15,17 @@ function timestamp(value: string) {
   return parsed
 }
 
-export function paymentCutoffTime(candidate: Pick<BackstopCandidate, 'subscriptionCutoffAt' | 'employeePaymentDeadlines'>) {
-  return candidate.employeePaymentDeadlines.reduce((latest, deadline) => Math.max(latest, timestamp(deadline)), timestamp(candidate.subscriptionCutoffAt))
+export function paymentCutoffTime(candidate: Pick<BackstopCandidate, 'subscriptionCutoffAt' | 'employeePaymentDeadlines' | 'paymentCutoffAt'>) {
+  const employeeCutoff = candidate.employeePaymentDeadlines.reduce((latest, deadline) => Math.max(latest, timestamp(deadline)), timestamp(candidate.subscriptionCutoffAt))
+  return candidate.paymentCutoffAt ? Math.max(employeeCutoff, timestamp(candidate.paymentCutoffAt)) : employeeCutoff
 }
 
 /** Returns a commitment, not evidence that company funds have been paid. */
 export function planCompanyBackstop(candidate: BackstopCandidate, at: Date) {
   if (!['未满额', '已满额'].includes(candidate.status) || !candidate.companyTakeover) return null
+  if (candidate.unresolvedReviewCount !== undefined
+    && (!Number.isSafeInteger(candidate.unresolvedReviewCount) || candidate.unresolvedReviewCount < 0)) throw new RangeError('待复核笔数无效')
+  if (candidate.unresolvedReviewCount) return null
   if (at.getTime() < paymentCutoffTime(candidate)) return null
   const priceCents = Math.round(candidate.sharePrice * 100)
   const remainingCents = Math.round(candidate.remainingAmount * 100)

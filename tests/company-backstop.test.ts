@@ -21,3 +21,11 @@ test('does not backstop disabled or closed projects and rejects fractional remai
   assert.throws(() => planCompanyBackstop({ ...candidate, sharePrice: 100.001 }, at), /金额无效/)
   assert.throws(() => planCompanyBackstop({ ...candidate, subscriptionCutoffAt: 'invalid' }, at), /截止时间/)
 })
+
+test('waits for the project payment cutoff and completion of payment reviews', () => {
+  const at = new Date('2026-10-23T06:00:00')
+  assert.equal(planCompanyBackstop({ ...candidate, paymentCutoffAt: '2026-10-23 18:00' }, at), null)
+  assert.equal(planCompanyBackstop({ ...candidate, unresolvedReviewCount: 1 }, at), null)
+  assert.deepEqual(planCompanyBackstop({ ...candidate, paymentCutoffAt: '2026-10-23 05:00', unresolvedReviewCount: 0 }, at), { shares: 2, amount: 200 })
+  assert.throws(() => planCompanyBackstop({ ...candidate, unresolvedReviewCount: -1 }, at), /待复核笔数/)
+})

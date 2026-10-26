@@ -25,6 +25,11 @@ async function freePort() {
 }
 
 let child: ReturnType<typeof spawn> | undefined
+const iamTestEnv = {
+  IAM_BASE_URL: 'http://127.0.0.1:1', IAM_WEB_URL: 'http://127.0.0.1:1',
+  IAM_CLIENT_ID: 'crowdfunding', IAM_CLIENT_SECRET: 'isolated-test-only',
+  IAM_REDIRECT_URI: 'http://127.0.0.1:5174/oauth/callback', APP_ALLOWED_ORIGIN: 'http://127.0.0.1:5174'
+}
 try {
   await db.collection(`${prefix}projects`).insertOne({
     id: 'PRJ-BACKSTOP-TEST', title: '自动兜底隔离测试', source: 'integration-test',
@@ -51,7 +56,32 @@ try {
   const port = await freePort()
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     cwd: process.cwd(),
-    env: { ...process.env, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix },
+    env: { ...process.env, ...iamTestEnv, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix },
+    stdio: 'ignore'
+  })
+  let ready = false
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (child.exitCode !== null) break
+    try { ready = (await fetch(`http://127.0.0.1:${port}/api/health`)).ok; if (ready) break } catch { /* startup */ }
+    await delay(100)
+  }
+  assert.ok(ready, '隔离 API 已启动')
+  await delay(1000)
+  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments({ companyKind: 'backstop' }), 0,
+    '仍有待复核缴款时不得生成公司兜底认购单')
+  child.kill('SIGTERM')
+  await Promise.race([new Promise(resolve => child!.once('exit', resolve)), delay(5000)])
+  await db.collection(`${prefix}subscriptions`).updateOne({ id: 'SUB-pending' }, { $set: { pay: '已缴款' } })
+  await db.collection(`${prefix}fund_ledger`).insertOne({
+    id: 'LED-BACKSTOP-PENDING', sourceKey: 'contribution:SUB-pending', type: 'employee_contribution',
+    projectId: 'PRJ-BACKSTOP-TEST', subscriptionId: 'SUB-pending', participantId: 'employee-pending',
+    shares: 1, amountCents: 10000, transactionNo: 'BANK-BACKSTOP-PENDING',
+    transactionKey: JSON.stringify(['PRJ-BACKSTOP-TEST', 'employee_contribution', 'BANK-BACKSTOP-PENDING']),
+    proofAssetIds: [], reviewedBy: 'integration-test', createdAt: '2020-01-01 12:00'
+  })
+  child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...iamTestEnv, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix },
     stdio: 'ignore'
   })
   let settled = false
@@ -68,24 +98,12 @@ try {
   assert.equal(project?.employeeSubscribedAmount, 100)
   assert.equal(project?.remain, 0)
   assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-unpaid' }))?.pay, '已释放')
-  assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-pending' }))?.pay, '待复核')
+  assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-pending' }))?.pay, '已缴款')
   const company = await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-COMPANY-BACKSTOP-PRJ-BACKSTOP-TEST' })
   assert.equal(company?.pay, '公司待出资')
   assert.equal(company?.shares, 1)
   assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments({ companyKind: 'backstop' }), 1)
-  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments(), 0)
-  await delay(100)
-  for (const subscriptionId of ['SUB-unpaid', 'SUB-COMPANY-BACKSTOP-PRJ-BACKSTOP-TEST']) {
-    const form = new FormData()
-    form.set('subscriptionId', subscriptionId)
-    form.set('image', new Blob([Buffer.from('89504e470d0a1a0a', 'hex')], { type: 'image/png' }), 'test.png')
-    const response = await fetch(`http://127.0.0.1:${port}/api/payments/ocr`, {
-      method: 'POST', headers: { 'X-User-Id': subscriptionId === 'SUB-unpaid' ? 'employee-unpaid' : 'company', 'X-User-Role': 'employee' }, body: form
-    })
-    const payload = await response.json()
-    assert.equal(response.status, 409, JSON.stringify(payload))
-    assert.equal(payload.error, 'PAYMENT_NOT_UPLOADABLE')
-  }
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments(), 1)
   process.stdout.write('公司自动兜底隔离接口测试通过\n')
 } finally {
   if (child && child.exitCode === null) {

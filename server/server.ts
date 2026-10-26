@@ -400,10 +400,13 @@ async function runDueBackstops() {
           const records = await repositories.subscriptions.list({ projectId: project.id } as never, {}, session)
           if (records.some(record => record.companyKind === 'backstop')) return null
           const employees = records.filter(record => record.shares !== undefined && !isCompanySubscription(record as Subscription))
-          const cutoffInput = { subscriptionCutoffAt: project.deadline, employeePaymentDeadlines: employees.map(record => record.paymentDeadlineAt) }
+          const cutoffInput = { subscriptionCutoffAt: project.deadline, paymentCutoffAt: rule.paymentCutoffAt,
+            employeePaymentDeadlines: employees.map(record => record.paymentDeadlineAt),
+            unresolvedReviewCount: employees.filter(record => record.pay === '待复核' || record.pay === '部分缴款').length }
           const currentTime = new Date()
+          if (cutoffInput.unresolvedReviewCount > 0) return null
           if (currentTime.getTime() < paymentCutoffTime(cutoffInput)) return null
-          const released = employees.filter(record => record.pay === '未缴款')
+          const released = employees.filter(record => record.pay === '未缴款' || record.pay === '复核驳回')
           const releasedCents = released.reduce((sum, record) => sum + Math.round(record.amount * 100), 0)
           const remainingAmount = (Math.round(project.remain * 100) + releasedCents) / 100
           const backstop = planCompanyBackstop({
