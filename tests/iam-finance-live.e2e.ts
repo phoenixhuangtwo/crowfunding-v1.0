@@ -51,6 +51,15 @@ try {
   assert.ok(info.uiPermissions.includes('crowdfunding:procurement-payment:register'))
   assert.ok(info.menus.some(menu => menu.componentName === 'procurementPayment'
     || menu.children?.some(child => child.componentName === 'procurementPayment')))
+  for (const permission of ['crowdfunding:receipt:query', 'crowdfunding:receipt:register',
+    'crowdfunding:receipt:proof-upload', 'crowdfunding:receipt:review',
+    'crowdfunding:receipt:difference-register']) {
+    assert.ok(info.apiPermissions.includes(permission), `${permission} 已授予财务`)
+    assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
+  }
+  assert.ok(info.uiPermissions.includes('crowdfunding:receipt:query'))
+  assert.ok(info.menus.some(menu => menu.componentName === 'customerReceipts'
+    || menu.children?.some(child => child.componentName === 'customerReceipts')))
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:register', claims.tenantId), true)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:proof-upload', claims.tenantId), true)
   process.stdout.write('真实 IAM 财务授权联调通过\n')

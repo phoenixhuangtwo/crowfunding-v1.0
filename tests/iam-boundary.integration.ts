@@ -339,6 +339,79 @@ try {
   const paidFunding = await request('/api/projects/PRJ-IAM-PAY-READY/funding-reconciliation',
     { Authorization: 'Bearer smoke-finance-token' })
   assert.equal((paidFunding.body.data as { companyFundsConfirmed: boolean }).companyFundsConfirmed, true)
+  for (const id of ['ASSET-IAM-TOPUP', 'ASSET-IAM-CUSTOMER', 'ASSET-IAM-EXCESS']) {
+    await db.collection(`${prefix}file_assets`).insertOne({
+      id, provider: 'tencent-cos', bucket: 'test', region: 'test',
+      objectKey: `test/customer-receipt-proof/${id}.png`, originalName: `${id}.png`,
+      extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'b'.repeat(64),
+      purpose: 'customer-receipt-proof', ownerType: 'project', ownerId: 'PRJ-IAM-PAY-READY',
+      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+    })
+  }
+  const receiptBase = { bookedAt: new Date(Date.now() - 120_000).toISOString(),
+    recognitionFailed: true, note: '已对照银行流水及付款凭证逐项人工核实' }
+  const topupInput = { ...receiptBase, kind: '公司补款', transactionNo: 'BANK-IAM-TOPUP',
+    totalCents: 16000, lines: [{ projectId: 'PRJ-IAM-PAY-READY', amountCents: 16000 }],
+    proofAssetIds: ['ASSET-IAM-TOPUP'], reason: '客户欠款暂未结清，由公司先行补足' }
+  assert.equal((await postAs('/api/receipt-batches', 'smoke-employee-token', topupInput)).status, 403)
+  assert.equal((await postAs('/api/receipt-batches', 'smoke-finance-token', {
+    ...topupInput, recognitionFailed: false })).status, 409)
+  const topupCreated = await postAs('/api/receipt-batches', 'smoke-finance-token', topupInput)
+  assert.equal(topupCreated.status, 201, JSON.stringify(topupCreated.body))
+  assert.equal((await postAs('/api/receipt-batches', 'smoke-finance-token', topupInput)).status, 409,
+    '相同银行流水不能重复登记')
+  const topupId = (topupCreated.body.data as { id: string }).id
+  assert.equal((await postAs(`/api/receipt-batches/${topupId}/review`, 'smoke-finance-token', {
+    decision: '通过', actualBankCents: 16000, actualBankTransactionNo: 'BANK-IAM-TOPUP' })).status, 409)
+  const topupReviewed = await postAs(`/api/receipt-batches/${topupId}/review`, 'smoke-super-admin-token', {
+    decision: '通过', actualBankCents: 16000, actualBankTransactionNo: 'BANK-IAM-TOPUP' })
+  assert.equal(topupReviewed.status, 200, JSON.stringify(topupReviewed.body))
+  const customerInput = { ...receiptBase, kind: '客户回款', transactionNo: 'BANK-IAM-CUSTOMER',
+    totalCents: 36000, lines: [{ projectId: 'PRJ-IAM-PAY-READY', amountCents: 36000 }],
+    proofAssetIds: ['ASSET-IAM-CUSTOMER'] }
+  const customerCreated = await postAs('/api/receipt-batches', 'smoke-finance-token', customerInput)
+  assert.equal(customerCreated.status, 201, JSON.stringify(customerCreated.body))
+  const customerId = (customerCreated.body.data as { id: string }).id
+  assert.equal((await postAs(`/api/receipt-batches/${customerId}/review`, 'smoke-finance-token', {
+    decision: '通过', actualBankCents: 35999, actualBankTransactionNo: 'BANK-IAM-CUSTOMER' })).status, 409)
+  assert.equal((await postAs(`/api/receipt-batches/${customerId}/review`, 'smoke-super-admin-token', {
+    decision: '通过', actualBankCents: 36000, actualBankTransactionNo: 'BANK-IAM-CUSTOMER' })).status, 409)
+  const customerReviewed = await postAs(`/api/receipt-batches/${customerId}/review`, 'smoke-finance-token', {
+    decision: '通过', actualBankCents: 36000, actualBankTransactionNo: 'BANK-IAM-CUSTOMER' })
+  assert.equal(customerReviewed.status, 200, JSON.stringify(customerReviewed.body))
+  assert.deepEqual((customerReviewed.body.data as { returns: unknown }).returns,
+    [{ projectId: 'PRJ-IAM-PAY-READY', amountCents: 16000 }])
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PAY-READY' }))?.status, '待分配')
+  const receiptSummary = await request('/api/projects/PRJ-IAM-PAY-READY/receipt-summary',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal((receiptSummary.body.data as { distributableCents: number }).distributableCents, 36000)
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({
+    projectId: 'PRJ-IAM-PAY-READY', type: 'company_topup_return' }), 1)
+  const excessInput = { ...receiptBase, kind: '客户回款', transactionNo: 'BANK-IAM-EXCESS',
+    totalCents: 1000, lines: [{ projectId: 'PRJ-IAM-PAY-READY', amountCents: 1000 }],
+    proofAssetIds: ['ASSET-IAM-EXCESS'] }
+  const excessCreated = await postAs('/api/receipt-batches', 'smoke-finance-token', excessInput)
+  assert.equal(excessCreated.status, 201, JSON.stringify(excessCreated.body))
+  const excessId = (excessCreated.body.data as { id: string }).id
+  assert.equal((await postAs(`/api/receipt-batches/${excessId}/review`, 'smoke-finance-token', {
+    decision: '通过', actualBankCents: 1000, actualBankTransactionNo: 'BANK-IAM-EXCESS' })).status, 200)
+  const differencePath = '/api/projects/PRJ-IAM-PAY-READY/receipt-differences'
+  assert.equal((await postAs(differencePath, 'smoke-super-admin-token', {
+    amountCents: 100, destination: '计入公司', reason: '公司收入确认' })).status, 403)
+  assert.equal((await postAs(differencePath, 'smoke-finance-token', {
+    amountCents: 1100, destination: '计入公司', reason: '超额测试记录' })).status, 400)
+  assert.equal((await postAs(differencePath, 'smoke-finance-token', {
+    amountCents: 400, destination: '退回客户', reason: '客户多付部分线下退回',
+    refundTransactionNo: 'BANK-IAM-PURCHASE' })).status, 409)
+  assert.equal((await postAs(differencePath, 'smoke-finance-token', {
+    amountCents: 400, destination: '退回客户', reason: '客户多付部分线下退回',
+    refundTransactionNo: 'BANK-IAM-REFUND' })).status, 201)
+  assert.equal((await postAs(differencePath, 'smoke-finance-token', {
+    amountCents: 600, destination: '计入公司', reason: '客户同意剩余金额归入公司' })).status, 201)
+  const finalSummary = await request('/api/projects/PRJ-IAM-PAY-READY/receipt-summary',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal((finalSummary.body.data as { unresolvedCents: number }).unresolvedCents, 0)
+  assert.equal((finalSummary.body.data as { excessCents: number }).excessCents, 1000)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

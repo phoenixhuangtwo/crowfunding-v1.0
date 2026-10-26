@@ -17,6 +17,8 @@ export type ReceiptBatch = {
   reviewedAt?: string
   rejectReason?: string
   returns?: ReceiptLine[]
+  recognitionStatus?: '凭证识别未通过' | '凭证已核对'
+  note?: string
 }
 
 export type ProjectReceipts = {
@@ -71,9 +73,11 @@ export function validateReceiptRegistration(input: {
   totalCents: number
   lines: ReceiptLine[]
   proofAssetIds: string[]
-  recognizedCents: number
-  recognizedTransactionNo: string
-  recognizedAt: string
+  recognizedCents?: number
+  recognizedTransactionNo?: string
+  recognizedAt?: string
+  recognitionFailed?: boolean
+  note?: string
   registeredBy: string
   reason?: string
 }, existing: ReceiptBatch[], receivables: Record<string, number>, now: Date, reservedTransactionNos: readonly string[] = []): ReceiptBatch {
@@ -85,9 +89,14 @@ export function validateReceiptRegistration(input: {
     throw new Error(`流水号【${transactionNo}】已被使用，请核对`)
   }
   const bookedAt = Date.parse(input.bookedAt)
-  const recognizedAt = Date.parse(input.recognizedAt)
   if (!Number.isFinite(bookedAt) || bookedAt > now.getTime()) throw new Error('到账时间无效或晚于当前时间')
-  if (!Number.isFinite(recognizedAt) || recognizedAt !== bookedAt) throw new Error('凭证识别结果与填写内容不一致，请核对后修改或重新上传')
+  if (input.recognitionFailed) {
+    if ((input.note?.trim().length ?? 0) < 5 || (input.note?.trim().length ?? 0) > 500) {
+      throw new Error('凭证识别未通过时须填写 5 至 500 字人工核对说明')
+    }
+  } else if (Date.parse(input.recognizedAt ?? '') !== bookedAt) {
+    throw new Error('凭证识别结果与填写内容不一致，请核对后修改或重新上传')
+  }
   if (!Array.isArray(input.proofAssetIds) || input.proofAssetIds.length < 1 || input.proofAssetIds.length > 5
     || input.proofAssetIds.some(id => !id.trim()) || new Set(input.proofAssetIds).size !== input.proofAssetIds.length) {
     throw new Error('回款凭证须提供 1 至 5 张不同的已留存图片')
@@ -103,7 +112,7 @@ export function validateReceiptRegistration(input: {
     cents(receivables[line.projectId], '应收金额', true)
   }
   if (sum(input.lines.map(line => line.amountCents), '拆分金额') !== input.totalCents) throw new Error('拆分金额合计须等于流水金额')
-  if (input.recognizedCents !== input.totalCents || input.recognizedTransactionNo.trim() !== transactionNo) {
+  if (!input.recognitionFailed && (input.recognizedCents !== input.totalCents || input.recognizedTransactionNo?.trim() !== transactionNo)) {
     throw new Error('凭证识别结果与填写内容不一致，请核对后修改或重新上传')
   }
   if (input.kind === '公司补款') {
@@ -120,7 +129,9 @@ export function validateReceiptRegistration(input: {
     id: input.id.trim(), kind: input.kind, transactionNo, bookedAt: new Date(bookedAt).toISOString(),
     totalCents: input.totalCents, lines: input.lines.map(line => ({ ...line })),
     proofAssetIds: [...input.proofAssetIds], registeredBy: input.registeredBy.trim(),
-    ...(input.kind === '公司补款' ? { reason: input.reason!.trim() } : {}), status: '待复核'
+    ...(input.kind === '公司补款' ? { reason: input.reason!.trim() } : {}), status: '待复核',
+    recognitionStatus: input.recognitionFailed ? '凭证识别未通过' : '凭证已核对',
+    ...(input.recognitionFailed ? { note: input.note!.trim() } : {})
   }
 }
 

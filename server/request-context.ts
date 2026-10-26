@@ -43,6 +43,7 @@ export async function authorizeAssetRead(context: RequestContext, asset: FileAss
   }
   if (asset.purpose === 'settlement-invoice' && context.role === 'finance') return
   if (asset.purpose === 'procurement-payment-proof' && context.role === 'finance') return
+  if (asset.purpose === 'customer-receipt-proof' && context.role === 'finance') return
   if (asset.purpose === 'receiving-code') {
     if (context.role === 'admin' || context.role === 'finance') return
     if (context.role === 'employee') {

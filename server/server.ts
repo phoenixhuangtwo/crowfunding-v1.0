@@ -25,6 +25,8 @@ import { createFundLedger } from './finance/fund-ledger.ts'
 import { validateContributionReview } from './finance/contribution-review.ts'
 import { reconcileProcurementFunding, validateProcurementPayment } from './finance/procurement-payment.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
+import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
+import { unresolvedReceiptDifference, validateReceiptDifference, type ReceiptDifference } from './finance/receipt-differences.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
 import { AgreementError, AgreementService, type AgreementNode } from './agreements.ts'
 import { loadIamConfig } from './iam/config.ts'
@@ -36,7 +38,7 @@ import { ownershipFrom } from './iam/data-scope.ts'
 import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '已中断' | '部分已结算' | '已完结'
+type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '已中断' | '部分已结算' | '已完结'
 type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资'
 
 type PaymentImage = {
@@ -288,6 +290,8 @@ await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
 const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
 const fundLedger = createFundLedger(mongo.db, appConfig.mongodb.collectionPrefix)
 const procurementPayments = mongo.db.collection<ProcurementPayment>(`${appConfig.mongodb.collectionPrefix}procurement_payments`)
+const receiptBatches = mongo.db.collection<ReceiptBatch>(`${appConfig.mongodb.collectionPrefix}receipt_batches`)
+const receiptDifferences = mongo.db.collection<ReceiptDifference>(`${appConfig.mongodb.collectionPrefix}receipt_differences`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -644,6 +648,41 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, { data: { projectId, ...funding,
       companyContributionIsCommitment: !payment, companyFundsConfirmed: Boolean(payment), checkedAt: new Date().toISOString() } })
   }
+  if (pathname === '/api/receipt-batches') {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '只有财务或公司可以查看回款')
+    const projectId = searchParams.get('projectId')?.trim()
+    const kind = searchParams.get('kind')?.trim()
+    const status = searchParams.get('status')?.trim()
+    if (kind && kind !== '客户回款' && kind !== '公司补款') return send(res, 400, { error: 'RECEIPT_KIND_INVALID', message: '回款类型无效' })
+    if (status && status !== '待复核' && status !== '已通过' && status !== '已驳回') return send(res, 400, { error: 'RECEIPT_STATUS_INVALID', message: '复核状态无效' })
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const filter: import('mongodb').Filter<ReceiptBatch> = {
+      ...(projectId ? { 'lines.projectId': projectId } : {}),
+      ...(kind ? { kind: kind as ReceiptBatch['kind'] } : {}),
+      ...(status ? { status: status as ReceiptBatch['status'] } : {})
+    }
+    const [items, total] = await Promise.all([
+      receiptBatches.find(filter).sort({ bookedAt: -1, id: -1 }).skip((page - 1) * pageSize).limit(pageSize).toArray(),
+      receiptBatches.countDocuments(filter)
+    ])
+    return send(res, 200, { data: { items, total, page, pageSize } })
+  }
+  const receiptSummaryMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-summary$/)
+  if (receiptSummaryMatch) {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '只有财务或公司可以查看回款对账')
+    const projectId = decodeURIComponent(receiptSummaryMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '众筹单不存在' })
+    const batches = await receiptBatches.find({ 'lines.projectId': projectId }).toArray()
+    const differences = await receiptDifferences.find({ projectId }).sort({ createdAt: -1 }).toArray()
+    const receivableCents = Math.round(project.salesAmount * 100)
+    const receipts = summarizeProjectReceipts(batches, projectId, receivableCents)
+    return send(res, 200, { data: { projectId, receivableCents,
+      ...receipts, ...unresolvedReceiptDifference(receipts.excessCents, differences), differences } })
+  }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()
@@ -785,6 +824,26 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const created = await agreementService.create({ title: body.title, body: body.body, createdBy: actor.label })
     await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '新增免责协议版本', target: created.id, before: null, after: { version: created.version, title: created.title } }) as never)
     return send(res, 201, { data: created, message: '新版本已生效' })
+  }
+  const receiptProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-proofs$/)
+  if (receiptProofMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(receiptProofMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project || !['待回款', '回款中', '待分配'].includes(project.status)
+      || !await procurementPayments.findOne({ projectId })) {
+      return send(res, 409, { error: 'PROJECT_NOT_RECEIPT_READY', message: '众筹单尚未完成采购付款或已关闭回款' })
+    }
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId: projectId,
+      purpose: 'customer-receipt-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'RECEIPT_PROOF_LIMIT', message: '该众筹单暂存回款凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'customer-receipt-proof',
+      ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '回款凭证已保存，待登记回款' })
   }
   const paymentProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-payment\/proofs$/)
   if (paymentProofMatch) {
@@ -1052,6 +1111,227 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  if (pathname === '/api/receipt-batches') {
+    const actor = financeOperator(req)
+    if (body.recognitionFailed !== true) return send(res, 409, { error: 'RECEIPT_OCR_NOT_AVAILABLE', message: '回款凭证尚无可信的金额、流水号和到账时间识别结果，请填写人工核对说明' })
+    if (!Array.isArray(body.lines) || body.lines.length < 1 || body.lines.length > 20
+      || body.lines.some(line => !line || typeof line !== 'object' || typeof line.projectId !== 'string')) {
+      return send(res, 400, { error: 'RECEIPT_LINES_INVALID', message: '请选择 1 至 20 张众筹单并填写拆分金额' })
+    }
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'RECEIPT_PROOFS_INVALID', message: '请提供已上传的回款凭证编号' })
+    }
+    const lines = body.lines as Array<{ projectId: string; amountCents: number }>
+    const proofAssetIds = body.proofAssetIds as string[]
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const projectIds = lines.map(line => line.projectId)
+        const linked = await mongo.db.collection<Project>(`${appConfig.mongodb.collectionPrefix}projects`)
+          .find({ id: { $in: projectIds } }, { session }).toArray()
+        if (linked.length !== new Set(projectIds).size) throw new AppError(409, 'RECEIPT_PROJECT_INVALID', '众筹单不存在或重复')
+        const receivables: Record<string, number> = {}
+        for (const project of linked) {
+          if (!['待回款', '回款中', '待分配'].includes(project.status)
+            || !await procurementPayments.findOne({ projectId: project.id }, { session })) {
+            throw new AppError(409, 'PROJECT_NOT_RECEIPT_READY', `众筹单【${project.id}】尚未完成采购付款或已关闭回款`)
+          }
+          receivables[project.id] = Math.round(project.salesAmount * 100)
+        }
+        const existing = await receiptBatches.find({ 'lines.projectId': { $in: projectIds } }, { session }).toArray()
+        const transactionNo = typeof body.transactionNo === 'string' ? body.transactionNo.trim() : ''
+        const occupied = await bankTransactions.findOne({ transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).findOne({ transactionNo }, { session })
+        const batch = validateReceiptRegistration({ id: `REC-${randomUUID()}`,
+          kind: body.kind as ReceiptBatch['kind'], transactionNo,
+          bookedAt: body.bookedAt as string, totalCents: body.totalCents as number,
+          lines, proofAssetIds, registeredBy: actor.userId,
+          reason: typeof body.reason === 'string' ? body.reason : undefined,
+          recognitionFailed: true, note: typeof body.note === 'string' ? body.note : undefined
+        }, existing, receivables, new Date(), occupied ? [transactionNo] : [])
+        for (const assetId of batch.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'customer-receipt-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== lines[0].projectId || asset.createdBy !== actor.userId) {
+            throw new AppError(409, 'RECEIPT_PROOF_INVALID', '回款凭证不存在、未留存或不属于当前登记人和首张众筹单')
+          }
+          if (await receiptBatches.findOne({ proofAssetIds: assetId }, { session })) {
+            throw new AppError(409, 'RECEIPT_PROOF_USED', '回款凭证已被其他流水使用')
+          }
+        }
+        // Touch the same project documents to serialize concurrent top-up gap checks.
+        for (const project of linked) {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: project.id }, { $inc: { receiptRevision: 1 },
+              ...(project.status === '待回款' ? { $set: { status: '回款中', statusType: 'warning' } } : {}) }, { session })
+        }
+        await bankTransactions.insertOne({ transactionNo: batch.transactionNo,
+          sourceKey: `receipt-batch:${batch.id}`, projectId: lines[0].projectId,
+          createdAt: now() }, { session })
+        await receiptBatches.insertOne(batch, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: batch.kind === '公司补款' ? '登记公司补款' : '登记客户回款',
+          target: batch.id, before: null, after: { transactionNo: batch.transactionNo, totalCents: batch.totalCents,
+            lines: batch.lines, recognitionStatus: batch.recognitionStatus } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { batch, linked, audit }
+      })
+      for (const project of result.linked) {
+        if (project.status !== '待回款') continue
+        const index = projects.findIndex(item => item.id === project.id)
+        if (index >= 0) projects.splice(index, 1, { ...project, status: '回款中', statusType: 'warning' })
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.batch,
+        message: result.batch.kind === '公司补款' ? '补款登记成功，请等待公司复核' : '回款登记成功，请复核' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'RECEIPT_DUPLICATE', message: '流水号或凭证已被使用' })
+      if (error instanceof Error && error.message.includes('已被使用')) {
+        return send(res, 409, { error: 'RECEIPT_DUPLICATE', message: error.message })
+      }
+      if (error instanceof Error && /回款|补款|凭证|流水号|金额|到账|众筹单|拆分|登记/.test(error.message)) {
+        return send(res, 400, { error: 'RECEIPT_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const receiptReviewMatch = pathname.match(/^\/api\/receipt-batches\/([^/]+)\/review$/)
+  if (receiptReviewMatch) {
+    const context = requestContext(req)
+    if (context.role !== 'finance' && context.role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权复核回款')
+    const batchId = decodeURIComponent(receiptReviewMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const batch = await receiptBatches.findOne({ id: batchId }, { session })
+        if (!batch) throw new AppError(404, 'RECEIPT_NOT_FOUND', '回款记录不存在')
+        const linked = await mongo.db.collection<Project>(`${appConfig.mongodb.collectionPrefix}projects`)
+          .find({ id: { $in: batch.lines.map(line => line.projectId) } }, { session }).toArray()
+        if (linked.length !== batch.lines.length || linked.some(project => !['回款中', '待分配'].includes(project.status))) {
+          throw new AppError(409, 'RECEIPT_PROJECT_LOCKED', '众筹单状态已变化，不能复核')
+        }
+        const existing = await receiptBatches.find({ 'lines.projectId': { $in: batch.lines.map(line => line.projectId) } }, { session }).toArray()
+        const receivables = Object.fromEntries(linked.map(project => [project.id, Math.round(project.salesAmount * 100)]))
+        const reviewed = reviewReceiptBatch({ batch, decision: body.decision as '通过' | '驳回',
+          reviewerId: context.userId, reviewerRole: context.role === 'finance' ? 'finance' : 'company',
+          actualBankCents: body.actualBankCents as number,
+          actualBankTransactionNo: body.actualBankTransactionNo as string,
+          reason: body.reason as string, now: new Date(), existing, receivables })
+        for (const project of linked) {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: project.id }, { $inc: { receiptRevision: 1 } }, { session })
+        }
+        await receiptBatches.replaceOne({ id: batch.id, status: '待复核' }, reviewed, { session })
+        if (reviewed.status === '已驳回') {
+          await bankTransactions.deleteOne({ transactionNo: batch.transactionNo,
+            sourceKey: `receipt-batch:${batch.id}` }, { session })
+        } else {
+          for (const line of reviewed.lines) {
+            await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+              id: `LED-${randomUUID()}`, sourceKey: `receipt:${batch.id}:${line.projectId}`,
+              type: batch.kind === '客户回款' ? 'customer_receipt' : 'company_topup',
+              projectId: line.projectId, amountCents: line.amountCents,
+              transactionNo: batch.transactionNo, transactionKey: `receipt:${batch.id}:${line.projectId}`,
+              proofAssetIds: batch.proofAssetIds, reviewedBy: context.userId, createdAt: now()
+            }, { session })
+          }
+          for (const line of reviewed.returns ?? []) {
+            await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+              id: `LED-${randomUUID()}`, sourceKey: `topup-return:${batch.id}:${line.projectId}`,
+              type: 'company_topup_return', projectId: line.projectId, amountCents: line.amountCents,
+              transactionKey: `topup-return:${batch.id}:${line.projectId}`, proofAssetIds: [],
+              reviewedBy: context.userId, createdAt: now()
+            }, { session })
+          }
+          for (const project of linked) {
+            const summary = summarizeProjectReceipts([...existing.filter(item => item.id !== batch.id), reviewed],
+              project.id, receivables[project.id])
+            if (summary.gapCents === 0 && project.status !== '待分配') {
+              await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`).updateOne({ id: project.id },
+                { $set: { status: '待分配', statusType: 'success' } }, { session })
+              project.status = '待分配'
+            }
+          }
+        }
+        const audit = auditRecord({ actor: `${context.userId} · ${context.role === 'finance' ? '财务' : '公司'}`,
+          role: context.role, action: reviewed.status === '已通过' ? '复核通过回款' : '驳回回款',
+          target: batch.id, before: { status: batch.status }, after: { status: reviewed.status,
+            returns: reviewed.returns, reason: reviewed.rejectReason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { reviewed, linked, audit }
+      })
+      for (const project of result.linked) {
+        const index = projects.findIndex(item => item.id === project.id)
+        if (index >= 0) projects.splice(index, 1, { ...projects[index], status: project.status,
+          statusType: project.status === '待分配' ? 'success' : projects[index].statusType })
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.reviewed,
+        message: result.reviewed.status === '已通过' ? '复核通过' : '已驳回，请重新登记' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'RECEIPT_ALREADY_REVIEWED', message: '回款已经复核，请刷新' })
+      if (error instanceof Error && /回款|补款|复核|金额|流水号|驳回|缺口/.test(error.message)) {
+        return send(res, 409, { error: 'RECEIPT_REVIEW_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const differenceMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-differences$/)
+  if (differenceMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(differenceMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        if (!project || !['回款中', '待分配'].includes(project.status)) {
+          throw new AppError(409, 'RECEIPT_DIFFERENCE_PROJECT_INVALID', '众筹单不存在或不允许登记回款差异')
+        }
+        const batches = await receiptBatches.find({ 'lines.projectId': projectId }, { session }).toArray()
+        const excessCents = summarizeProjectReceipts(batches, projectId, Math.round(project.salesAmount * 100)).excessCents
+        const existing = await receiptDifferences.find({ projectId }, { session }).toArray()
+        const difference = validateReceiptDifference({ id: `RDIFF-${randomUUID()}`, projectId,
+          amountCents: body.amountCents as number,
+          destination: body.destination as ReceiptDifference['destination'],
+          reason: typeof body.reason === 'string' ? body.reason : '',
+          refundTransactionNo: typeof body.refundTransactionNo === 'string' ? body.refundTransactionNo : undefined,
+          registeredBy: actor.userId }, excessCents, existing, new Date())
+        if (difference.refundTransactionNo) {
+          const occupied = await bankTransactions.findOne({ transactionNo: difference.refundTransactionNo }, { session })
+            || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+              .findOne({ transactionNo: difference.refundTransactionNo }, { session })
+          if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '退款流水号已被使用')
+        }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId }, { $inc: { receiptRevision: 1 } }, { session })
+        if (difference.refundTransactionNo) {
+          await bankTransactions.insertOne({ transactionNo: difference.refundTransactionNo,
+            sourceKey: `receipt-difference:${difference.id}`, projectId, createdAt: difference.createdAt }, { session })
+        }
+        await receiptDifferences.insertOne(difference, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `receipt-difference:${difference.id}`,
+          type: difference.destination === '退回客户' ? 'customer_refund' : 'company_excess',
+          projectId, amountCents: difference.amountCents,
+          ...(difference.refundTransactionNo ? { transactionNo: difference.refundTransactionNo } : {}),
+          transactionKey: `receipt-difference:${difference.id}`, proofAssetIds: [],
+          reviewedBy: actor.userId, createdAt: difference.createdAt
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记回款差异去向',
+          target: difference.id, before: null, after: { projectId, amountCents: difference.amountCents,
+            destination: difference.destination, refundTransactionNo: difference.refundTransactionNo } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { difference, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.difference, message: '差异去向已登记' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'RECEIPT_DIFFERENCE_DUPLICATE', message: '退款流水号或差异单已存在' })
+      if (error instanceof Error && /差异|金额|退款流水号|公司/.test(error.message)) {
+        return send(res, 400, { error: 'RECEIPT_DIFFERENCE_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
   const procurementPaymentMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-payment$/)
   if (procurementPaymentMatch) {
     const actor = financeOperator(req)

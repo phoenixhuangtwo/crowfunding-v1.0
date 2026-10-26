@@ -59,6 +59,14 @@ test('OCR, proof and global bank transaction checks reject mismatches', () => {
   assert.equal(register({ id: 'REC-2' }, [rejected]).status, '待复核', '驳回后流水号可重新使用')
 })
 
+test('manual verification records OCR failure without accepting client supplied recognition data', () => {
+  const manual = register({ recognitionFailed: true, note: '已与银行后台交易记录逐项核对',
+    recognizedCents: undefined, recognizedTransactionNo: undefined, recognizedAt: undefined })
+  assert.equal(manual.recognitionStatus, '凭证识别未通过')
+  assert.equal(manual.note, '已与银行后台交易记录逐项核对')
+  assert.throws(() => register({ recognitionFailed: true, note: '核对' }), /人工核对说明/)
+})
+
 test('company top-up reserves the gap and requires separate company review', () => {
   const topUp = register({
     id: 'TOP-1', kind: '公司补款', transactionNo: 'BANK-TOP-1', totalCents: 4000,
