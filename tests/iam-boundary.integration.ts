@@ -222,6 +222,17 @@ try {
   assert.equal(outsideScope.status, 403)
   assert.equal(outsideScope.body.error, 'DATA_SCOPE_MIGRATION_REQUIRED')
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-finance-token' })).status, 200)
+  const globalRulesPath = '/api/rule-parameters'
+  const company = { Authorization: 'Bearer smoke-super-admin-token' }
+  assert.equal((await request(globalRulesPath, employee)).status, 403)
+  assert.equal((await request(globalRulesPath, company)).body.data?.paymentHours, 12)
+  const changedRules = { paymentHours: 24, paymentReminderHours: 6, proxyConfirmDays: 9,
+    receiptWarningDays: 31, issueHandlingHours: 80 }
+  assert.equal((await postAs(globalRulesPath, 'smoke-finance-token', changedRules)).status, 403)
+  assert.equal((await postAs(globalRulesPath, 'smoke-super-admin-token',
+    { ...changedRules, paymentHours: 0 })).status, 400)
+  assert.equal((await postAs(globalRulesPath, 'smoke-super-admin-token', changedRules)).status, 200)
+  assert.equal((await db.collection(`${prefix}rule_parameters`).findOne({ id: 'global' }))?.revision, 1)
   const published = await fetch(`${base}/api/projects/PRJ-IAM-PUBLISH/open`, {
     method: 'POST', headers: { Authorization: 'Bearer smoke-super-admin-token', 'Content-Type': 'application/json' },
     body: JSON.stringify({ ruleId: 'RULE-IAM-PUBLISH' })
@@ -231,6 +242,12 @@ try {
   assert.equal(publishedProject?.tenantId, '0')
   assert.equal(publishedProject?.ownerUserId, '1004')
   assert.equal(publishedProject?.ownerDeptId, '900')
+  assert.deepEqual(publishedProject?.ruleParametersSnapshot, changedRules)
+  assert.equal(publishedProject?.proxyConfirmDays, 9)
+  assert.equal((await postAs(globalRulesPath, 'smoke-super-admin-token',
+    { ...changedRules, paymentHours: 48, proxyConfirmDays: 10 })).status, 200)
+  assert.deepEqual((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PUBLISH' }))?.ruleParametersSnapshot,
+    changedRules)
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-TEST' }))?.ownerUserId, undefined)
   const legacyPost = async (path: string, token: string) => fetch(`${base}${path}`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -263,7 +280,7 @@ try {
   const publishedRecord = await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-published-share' })
   assert.equal(publishedRecord?.shares, 1)
   assert.equal(Date.parse(`${String(publishedRecord?.paymentDeadlineAt).replace(' ', 'T')}+08:00`)
-    - Date.parse(`${String(publishedRecord?.createdAt).replace(' ', 'T')}+08:00`), 12 * 60 * 60 * 1000)
+    - Date.parse(`${String(publishedRecord?.createdAt).replace(' ', 'T')}+08:00`), 24 * 60 * 60 * 1000)
   assert.ok(String(publishedRecord?.paymentDeadlineAt) <= '2100-01-01 12:00')
   assert.equal((await request('/api/state', employee)).status, 403)
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-no-access-token' })).status, 403)

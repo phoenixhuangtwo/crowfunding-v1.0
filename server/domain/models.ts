@@ -1,4 +1,5 @@
 import type { SettlementInvoiceRecord } from '../project-settlement.ts'
+import type { RuleParameters } from '../rule-parameters.ts'
 
 export type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 export type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
@@ -52,6 +53,7 @@ export type Project = {
   purchasePaidAt?: string
   purchasePaidAmount?: number
   proxyConfirmDays?: number
+  ruleParametersSnapshot?: RuleParameters
   settlementInvoices?: SettlementInvoiceRecord[]
 }
 

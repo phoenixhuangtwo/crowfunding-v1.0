@@ -40,6 +40,7 @@ export const API_PERMISSION_CODES = [
   'crowdfunding:project-refund-proxy:review',
   'crowdfunding:distribution-payout-proxy:query', 'crowdfunding:distribution-payout-proxy:request',
   'crowdfunding:distribution-payout-proxy:review',
+  'crowdfunding:rule-parameters:query', 'crowdfunding:rule-parameters:update',
   'crowdfunding:subscription:create', 'crowdfunding:subscription:confirm-receipt',
   'crowdfunding:payment-proof:upload', 'crowdfunding:payment-proof:delete', 'crowdfunding:payment-proof:ocr',
   'crowdfunding:rule:create', 'crowdfunding:rule:update', 'crowdfunding:rule:change-status',
@@ -61,6 +62,7 @@ export class UnregisteredPermissionError extends Error {
 const id = '[^/]+'
 const routes: Array<[string, RegExp, ApiPermissionCode]> = [
   ['GET', /^\/api\/auth\/me$/, 'crowdfunding:access'],
+  ['GET', /^\/api\/rule-parameters$/, 'crowdfunding:rule-parameters:query'],
   ['GET', /^\/api\/state$/, 'crowdfunding:access'],
   ['GET', /^\/api\/rbac$/, 'crowdfunding:access'],
   ['GET', /^\/api\/agreements\/current$/, 'crowdfunding:access'],
@@ -92,6 +94,7 @@ const routes: Array<[string, RegExp, ApiPermissionCode]> = [
   ['GET', new RegExp(`^\\/api\\/procurement\\/orders\\/${id}$`), 'crowdfunding:project:query'],
   ['GET', new RegExp(`^\\/api\\/files\\/${id}\\/content$`), 'crowdfunding:access'],
   ['POST', /^\/api\/mcp\/sync$/, 'crowdfunding:procurement:sync'],
+  ['POST', /^\/api\/rule-parameters$/, 'crowdfunding:rule-parameters:update'],
   ['POST', /^\/api\/agreements$/, 'crowdfunding:agreement:manage'],
   ['POST', /^\/api\/agreements\/confirm-view-code$/, 'crowdfunding:receiving-code:query'],
   ['POST', /^\/api\/invoices\/pending\/delete$/, 'crowdfunding:settlement:upload-invoice'],

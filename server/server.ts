@@ -33,6 +33,7 @@ import { validateSupplierRefund, type ProcurementFailureRequest, type SupplierRe
 import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from './finance/receipt-termination-refunds.ts'
 import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
+import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -98,6 +99,7 @@ type Project = {
   purchasePaidAt?: string
   purchasePaidAmount?: number
   proxyConfirmDays?: number
+  ruleParametersSnapshot?: RuleParameters
   closedAt?: string
   closedBy?: string
   settlementInvoices?: SettlementInvoiceRecord[]
@@ -316,6 +318,7 @@ const supplierRefunds = mongo.db.collection<SupplierRefund>(`${appConfig.mongodb
 const receiptTerminationRefunds = mongo.db.collection<ReceiptTerminationRefund>(`${appConfig.mongodb.collectionPrefix}receipt_termination_refunds`)
 const projectRefundProxyRequests = mongo.db.collection<ProjectRefundProxyRequest>(`${appConfig.mongodb.collectionPrefix}project_refund_proxy_requests`)
 const distributionPayoutProxyRequests = mongo.db.collection<DistributionPayoutProxyRequest>(`${appConfig.mongodb.collectionPrefix}distribution_payout_proxy_requests`)
+const ruleParameters = mongo.db.collection<StoredRuleParameters>(`${appConfig.mongodb.collectionPrefix}rule_parameters`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -689,6 +692,12 @@ async function readValidatedUpload(
 async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
   const { pathname, searchParams } = url
   if (pathname === '/api/health') return send(res, 200, { ok: true, service: 'subscription-api', persistence: 'mongodb', database: appConfig.mongodb.database, time: new Date().toISOString() })
+  if (pathname === '/api/rule-parameters') {
+    managementActor(req, ['super_admin'])
+    const current = await ruleParameters.findOne({ id: 'global' })
+    return send(res, 200, { data: current ?? { id: 'global', revision: 0,
+      ...defaultRuleParameters, updatedAt: '', updatedBy: '' } })
+  }
   if (pathname === '/api/agreements/current') {
     requestContext(req)
     const current = await agreementService.current()
@@ -1490,6 +1499,26 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  if (pathname === '/api/rule-parameters') {
+    const actor = managementActor(req, ['super_admin'])
+    let values: RuleParameters
+    try { values = validateRuleParameters(body) }
+    catch (error) { return send(res, 400, { error: 'RULE_PARAMETERS_INVALID',
+      message: error instanceof Error ? error.message : '规则参数无效' }) }
+    const result = await mongo.withTransaction(async session => {
+      const previous = await ruleParameters.findOne({ id: 'global' }, { session })
+      const next: StoredRuleParameters = { id: 'global', ...values,
+        revision: (previous?.revision ?? 0) + 1,
+        updatedAt: new Date().toISOString(), updatedBy: actor.userId }
+      await ruleParameters.replaceOne({ id: 'global' }, next, { upsert: true, session })
+      const audit = auditRecord({ actor: actor.label, role: actor.role, action: '修改规则参数',
+        target: 'global', before: previous ?? defaultRuleParameters, after: next }) as AuditLog
+      await repositories.auditLogs.insert(audit as never, session)
+      return { next, audit }
+    })
+    auditLogs.unshift(result.audit)
+    return send(res, 200, { data: result.next, message: '规则参数已更新，仅影响后续发布的众筹单' })
+  }
   const projectRefundPaymentMatch = pathname.match(/^\/api\/project-refunds\/([^/]+)\/payment$/)
   if (projectRefundPaymentMatch) {
     const actor = financeOperator(req)
@@ -3839,8 +3868,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       agreementVersion: Number(body.agreementVersion),
       createdAt,
       paymentDeadlineAt: rule?.sharePrice && rule.paymentCutoffAt
-        ? employeePaymentDeadline(createdAt, rule.paymentCutoffAt)
-        : addHours(createdAt, 12)
+        ? employeePaymentDeadline(createdAt, rule.paymentCutoffAt,
+          project.ruleParametersSnapshot?.paymentHours ?? 12)
+        : addHours(createdAt, project.ruleParametersSnapshot?.paymentHours ?? 12)
     }
     const audit = auditRecord({ actor: `${record.userId} · 员工`, role: 'employee', action: '创建认购', target: record.id, before, after: { subscribed: nextProject.subscribed, remain: nextProject.remain, subscription: record.id, agreementVersion: record.agreementVersion } }) as AuditLog
     await mongo.withTransaction(async session => {
@@ -4205,10 +4235,18 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
           'totalAmount', 'endAt', 'paymentCutoffAt', 'plannedPaymentDate', 'receivingCodeId'] as const).some(field => latestRule[field] !== selectedRule[field])) {
         throw new AppError(409, 'PROJECT_CHANGED', '采购项目或规则已变化，请刷新后重试')
       }
+      const currentParameters = await ruleParameters.findOne({ id: 'global' }, { session })
+      const snapshot: RuleParameters = currentParameters ? {
+        paymentHours: currentParameters.paymentHours,
+        paymentReminderHours: currentParameters.paymentReminderHours,
+        proxyConfirmDays: currentParameters.proxyConfirmDays,
+        receiptWarningDays: currentParameters.receiptWarningDays,
+        issueHandlingHours: currentParameters.issueHandlingHours
+      } : { ...defaultRuleParameters }
       const updated = { ...latest, ruleId: latestRule.id, ...publisher,
         total: shareRule.totalAmount, companyFixedAmount: shareRule.companyFixedAmount,
         deadline: latestRule.endAt, status: '未满额' as const, statusType: 'primary' as const,
-        proxyConfirmDays: 7,
+        proxyConfirmDays: snapshot.proxyConfirmDays, ruleParametersSnapshot: snapshot,
         interruptReason: undefined, interruptedAt: undefined, refundNotice: undefined }
       normalizeProjectAmounts(updated as Project)
       const companyRecord: Subscription | undefined = shareRule.companyFrontShares > 0 ? {

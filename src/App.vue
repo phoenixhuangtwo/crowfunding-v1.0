@@ -39,6 +39,7 @@ import DistributionOrdersPage from './components/DistributionOrdersPage.vue'
 import ExceptionFundsPage from './components/ExceptionFundsPage.vue'
 import ProjectRefundsPage from './components/ProjectRefundsPage.vue'
 import ProcurementFailurePage from './components/ProcurementFailurePage.vue'
+import RuleParametersPage from './components/RuleParametersPage.vue'
 import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -60,6 +61,7 @@ type PageKey =
   | 'exceptionFunds'
   | 'projectRefunds'
   | 'procurementFailure'
+  | 'ruleParameters'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -95,6 +97,8 @@ type Project = {
   interruptedAt?: string
   refundNotice?: string
   ruleId?: string
+  ruleParametersSnapshot?: { paymentHours: number; paymentReminderHours: number;
+    proxyConfirmDays: number; receiptWarningDays: number; issueHandlingHours: number }
   settledAmount?: number
   settlementInvoices?: Array<{
     id: string
@@ -262,6 +266,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
       { key: 'adminProjects', label: '项目管理', req: 'P0', icon: Checked, permission: 'crowdfunding:project:manage' },
       { key: 'rules', label: '认购规则配置', req: 'P0', icon: Document, permission: 'crowdfunding:rule:query' },
       { key: 'agreements', label: '免责协议版本', req: 'P0', icon: Document, permission: 'crowdfunding:agreement:manage' },
+      { key: 'ruleParameters', label: '规则参数', req: 'P1', icon: Document, permission: 'crowdfunding:rule-parameters:query' },
       { key: 'receivingCode', label: '项目收款码管理', req: 'P0', icon: CreditCard, permission: 'crowdfunding:receiving-code:query' },
       { key: 'rbac', label: '权限管理', req: 'P0', icon: Lock, permission: 'crowdfunding:access' },
       { key: 'audit', label: '审计日志', req: 'P0', icon: User, permission: 'crowdfunding:audit:query' }
@@ -300,6 +305,7 @@ const pageTitleMap: Record<PageKey, string> = {
   exceptionFunds: '异常款项',
   projectRefunds: '项目退款',
   procurementFailure: '采购失败终止',
+  ruleParameters: '规则参数',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -2580,6 +2586,13 @@ watch(() => authSession.permissionInfo.value, info => {
                     <dt>计划付款日</dt><dd>{{ selectedProjectShareRule.plannedPaymentDate || '-' }}</dd>
                   </template>
                   <dt>认购时间</dt><dd>{{ selectedProjectShareRule?.startAt || '-' }} 至 {{ selectedProject.deadline }}</dd>
+                  <template v-if="selectedProject.ruleParametersSnapshot">
+                    <dt>缴款时限</dt><dd>{{ selectedProject.ruleParametersSnapshot.paymentHours }} 小时</dd>
+                    <dt>缴款提醒提前</dt><dd>{{ selectedProject.ruleParametersSnapshot.paymentReminderHours }} 小时</dd>
+                    <dt>代确认超期</dt><dd>{{ selectedProject.ruleParametersSnapshot.proxyConfirmDays }} 天</dd>
+                    <dt>回款预警</dt><dd>{{ selectedProject.ruleParametersSnapshot.receiptWarningDays }} 天</dd>
+                    <dt>异议处理时限</dt><dd>{{ selectedProject.ruleParametersSnapshot.issueHandlingHours }} 小时</dd>
+                  </template>
                   <dt>收益规则</dt><dd>{{ selectedProjectShareRule ? '回款确认后按认购份数分配本金与利润，分配到分以下的尾差归公司。' : '项目结算后按实缴金额占比分配利润，公司固定认购、公司兜底认购和公司强制接管认购部分收益归公司。' }}</dd>
                 </dl>
               </section>
@@ -3371,6 +3384,11 @@ watch(() => authSession.permissionInfo.value, info => {
           @updated="loadData"
         />
 
+        <RuleParametersPage
+          v-if="currentPage === 'ruleParameters' && currentRole === 'super_admin'"
+          :can-update="canApi(authSession.permissionInfo.value, 'crowdfunding:rule-parameters:update')"
+        />
+
         <DistributionOrdersPage
           v-if="currentPage === 'distributionOrders' && (currentRole === 'finance' || currentRole === 'super_admin')"
           :projects="projects" :role="currentRole"
@@ -3776,7 +3794,7 @@ watch(() => authSession.permissionInfo.value, info => {
         type="warning"
         :closable="false"
       >
-        提醒：认购后需12h内缴款完结，否则自动释放已认购未缴款的认购单
+        提醒：认购后请在 {{ selectedProject.ruleParametersSnapshot?.paymentHours ?? 12 }} 小时内及项目缴款截止时间前完成缴款，以较早时间为准；逾期未缴款的认购单将释放。
       </el-alert>
       <template #footer>
         <el-button @click="subscribeVisible = false">再想想</el-button>
