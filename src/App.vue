@@ -82,7 +82,7 @@ type Project = {
     payee: string
     confirmedAt: string
     operator: string
-    resultStatus?: '部分已结算' | '已完结'
+    resultStatus?: '凭证已确认' | '部分已结算' | '已完结'
     settledAmountAfter?: number
     remainingAmountAfter?: number
   }>
@@ -240,7 +240,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
     title: '财务端',
     pages: [
       { key: 'payReview', label: '支付复核', req: 'P0', icon: Tickets },
-      { key: 'settlement', label: '项目结算', req: 'P0', icon: Money }
+      { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money }
     ]
   }
 ]
@@ -254,7 +254,7 @@ const pageTitleMap: Record<PageKey, string> = {
   rules: '认购规则配置',
   receivingCode: '项目收款码管理',
   payReview: '支付复核',
-  settlement: '项目结算',
+  settlement: '发票凭证核对',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -1272,8 +1272,7 @@ function openProjectSubscriptions(project: Project) {
 
 function projectSettlementTagType(project: Project) {
   const status = projectSettlementStatus(project.status)
-  if (status === '已结算') return 'success'
-  if (status === '待结算' || status === '部分已结算') return 'warning'
+  if (status === '待结算' || status === '历史待核实') return 'warning'
   if (status === '已中断') return 'danger'
   return 'info'
 }
@@ -1294,14 +1293,14 @@ function goProjectSettlement(project: Project) {
   selectedProjectId.value = project.id
   currentRole.value = 'finance'
   currentPage.value = 'settlement'
-  settlementInvoiceVisible.value = project.status === '部分已结算'
+  settlementInvoiceVisible.value = (project.settledAmount ?? 0) > 0 && (project.settledAmount ?? 0) < projectSalesAmount(project)
   invoiceOcrState.value = 'none'
   invoiceImageUrl.value = ''
   invoiceImageName.value = ''
   invoiceOcrResult.value = undefined
   invoiceOcrError.value = ''
   invoiceSettlementKey.value = ''
-  ElMessage.success(`已进入财务端项目结算：${project.title}`)
+  ElMessage.success(`已进入发票凭证核对：${project.title}`)
 }
 
 function openPayReviewFromProject(project: Project) {
@@ -2056,7 +2055,7 @@ async function confirmSettlementInvoice() {
     resetInvoiceRecognition()
     ElMessage.success(payload.message)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '确认结算失败')
+    ElMessage.error(error instanceof Error ? error.message : '确认发票凭证失败')
   } finally {
     settlementSubmitting.value = false
   }
@@ -2077,18 +2076,18 @@ async function syncMcp() {
 async function startSettlement() {
   try {
     settlementInvoiceVisible.value = await beginSettlement(() => ElMessageBox.confirm(
-      '确认发起结算？确认后将进入发票上传阶段，请继续上传项目发票用于核对收入与成本。',
-      '发起结算',
+      '确认开始核对发票凭证？发票金额不能作为客户回款或分润完成的依据。',
+      '核对发票凭证',
       {
-        confirmButtonText: '确认发起',
+        confirmButtonText: '开始核对',
         cancelButtonText: '取消',
         type: 'warning'
       }
     ))
-    ElMessage.success('结算已发起，请继续上传项目发票')
+    ElMessage.success('请上传项目发票进行凭证核对')
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    ElMessage.error(error instanceof Error ? error.message : '发起结算失败')
+    ElMessage.error(error instanceof Error ? error.message : '开始核对失败')
   }
 }
 
@@ -2231,8 +2230,8 @@ onMounted(loadData)
               <el-option label="已满额" value="已满额" />
               <el-option label="已截止" value="已截止" />
               <el-option label="已中断" value="已中断" />
-              <el-option label="部分已结算" value="部分已结算" />
-              <el-option label="已完结" value="已完结" />
+              <el-option label="历史部分已结算（待核实）" value="部分已结算" />
+              <el-option label="历史已完结（待核实）" value="已完结" />
             </el-select>
             <el-select v-model="projectFilters.subscriptionStatus" placeholder="认购状态" style="width: 150px">
               <el-option label="认购状态：全部" value="全部" />
@@ -2263,7 +2262,7 @@ onMounted(loadData)
               </el-table-column>
               <el-table-column label="项目状态" align="center" header-align="center" min-width="220">
                 <template #default="{ row }">
-                  <el-tag :type="row.statusType">{{ row.status }}</el-tag>
+                  <el-tag :type="row.statusType">{{ row.status === '已完结' || row.status === '部分已结算' ? '历史状态（待核实）' : row.status }}</el-tag>
                   <el-tooltip
                     v-if="row.status === '已中断'"
                     placement="top-start"
@@ -2342,7 +2341,7 @@ onMounted(loadData)
             </div>
             <div class="page-head-actions">
               <el-button @click="go('projects')">返回项目列表</el-button>
-              <el-tag :type="selectedProject.statusType">{{ selectedProject.status }}</el-tag>
+              <el-tag :type="selectedProject.statusType">{{ selectedProject.status === '已完结' || selectedProject.status === '部分已结算' ? '历史状态（待核实）' : selectedProject.status }}</el-tag>
             </div>
           </div>
           <div class="detail-grid">
@@ -2617,8 +2616,8 @@ onMounted(loadData)
               <el-option label="已满额" value="已满额" />
               <el-option label="已截止" value="已截止" />
               <el-option label="已中断" value="已中断" />
-              <el-option label="部分已结算" value="部分已结算" />
-              <el-option label="已完结" value="已完结" />
+              <el-option label="历史部分已结算（待核实）" value="部分已结算" />
+              <el-option label="历史已完结（待核实）" value="已完结" />
             </el-select>
             <el-select v-model="adminSettlementStatus" placeholder="结算状态" style="width: 150px">
               <el-option label="结算状态：全部" value="全部" />
@@ -2626,8 +2625,7 @@ onMounted(loadData)
               <el-option label="未满额" value="未满额" />
               <el-option label="待结算" value="待结算" />
               <el-option label="已中断" value="已中断" />
-              <el-option label="部分已结算" value="部分已结算" />
-              <el-option label="已结算" value="已结算" />
+              <el-option label="历史待核实" value="历史待核实" />
             </el-select>
             <el-button type="primary">查询</el-button>
             <el-button @click="adminProjectKeyword = ''; adminProjectStatus = '全部'; adminSettlementStatus = '全部'">重置</el-button>
@@ -2653,7 +2651,7 @@ onMounted(loadData)
                 </el-table-column>
                 <el-table-column label="项目状态" min-width="220">
                   <template #default="{ row }">
-                    <el-tag :type="row.statusType">{{ row.status }}</el-tag>
+                  <el-tag :type="row.statusType">{{ row.status === '已完结' || row.status === '部分已结算' ? '历史状态（待核实）' : row.status }}</el-tag>
                   <el-tooltip
                     v-if="row.status === '已中断'"
                     placement="top-start"
@@ -2761,7 +2759,7 @@ onMounted(loadData)
                       size="small"
                       @click="goProjectSettlement(row)"
                     >
-                      去结算
+                      核对发票
                     </el-button>
                     <el-button
                       v-if="adminProjectActionLayout(row).showOpen"
@@ -3084,8 +3082,8 @@ onMounted(loadData)
         <template v-if="currentPage === 'settlement'">
           <div class="page-head">
             <div>
-              <h1>项目结算</h1>
-              <p>{{ selectedProject.title }} · {{ selectedProject.id }} · 核对结算凭证与认购记录</p>
+              <h1>发票凭证核对</h1>
+              <p>{{ selectedProject.title }} · {{ selectedProject.id }} · 核对发票凭证与认购记录</p>
             </div>
             <div class="page-head-actions">
               <el-tag :type="projectSettlementTagType(selectedProject)">{{ projectSettlementStatus(selectedProject.status) }}</el-tag>
@@ -3101,8 +3099,8 @@ onMounted(loadData)
                 <dt>项目编号</dt>
                 <dd>{{ selectedProject.id }}</dd>
                 <dt>项目状态</dt>
-                <dd><el-tag :type="selectedProject.statusType">{{ selectedProject.status }}</el-tag></dd>
-                <dt>结算状态</dt>
+                <dd><el-tag :type="selectedProject.statusType">{{ selectedProject.status === '已完结' || selectedProject.status === '部分已结算' ? '历史状态（待核实）' : selectedProject.status }}</el-tag></dd>
+                <dt>历史结算状态</dt>
                 <dd><el-tag :type="projectSettlementTagType(selectedProject)">{{ projectSettlementStatus(selectedProject.status) }}</el-tag></dd>
                 <dt>截止认购时间</dt>
                 <dd>{{ selectedProject.deadline }}</dd>
@@ -3121,6 +3119,7 @@ onMounted(loadData)
               </dl>
             </section>
             <el-alert title="本页仅核对发票凭证，不代表客户款项实收或完成分润。实际利润须按客户实收＋公司补款－采购实付－其他已确认成本计算；分配尾差归公司。" type="info" :closable="false" show-icon />
+            <el-alert v-if="selectedProject.status === '已完结' || selectedProject.status === '部分已结算'" title="历史项目可能因旧版发票凭证累计而改变结算状态；在核实回款、分配、打款和对账前，不应视为已结单。" type="warning" :closable="false" show-icon />
             <div class="settlement-balance-summary">
               <div><span>预计项目销售额</span><strong>{{ formatMoney(projectSalesAmount(selectedProject)) }}</strong></div>
               <div><span>累计已确认凭证金额</span><strong>{{ formatMoney(selectedProjectSettledAmount) }}</strong></div>
@@ -3146,7 +3145,7 @@ onMounted(loadData)
             </el-table>
             <div v-if="!selectedProjectSettlementCompleted" class="actions-row">
               <el-button type="primary" :disabled="settlementInvoiceVisible" @click="startSettlement">
-                {{ settlementInvoiceVisible ? (selectedProject.status === '部分已结算' ? '等待补充结算凭证' : '结算已发起') : '发起结算' }}
+                {{ settlementInvoiceVisible ? '等待补充发票凭证' : '核对发票凭证' }}
               </el-button>
             </div>
             <section
@@ -3157,7 +3156,7 @@ onMounted(loadData)
               <div class="settlement-invoice__head">
                 <div>
                   <h2>上传发票</h2>
-                  <p>上传项目发票后自动 OCR 识别票面金额，用于结算前核对收入与成本。</p>
+                  <p>上传项目发票后自动识别票面金额，仅用于核对凭证。</p>
                 </div>
                 <el-tag :type="invoiceOcrState === 'ok' ? 'success' : invoiceOcrState === 'fail' ? 'danger' : 'info'">
                   {{ invoiceOcrState === 'ok' ? '已识别' : invoiceOcrState === 'loading' ? '识别中' : invoiceOcrState === 'fail' ? '识别失败' : '待上传' }}
@@ -3176,12 +3175,12 @@ onMounted(loadData)
                 >
                   <div v-if="!invoiceImageUrl" class="invoice-upload-card__empty">
                     <el-icon class="upload-icon"><Upload /></el-icon>
-                    <strong>上传结算凭证</strong>
+                    <strong>上传发票凭证</strong>
                     <span>点击或拖拽图片到此处</span>
                     <small>支持 PNG、JPG、WebP，最大 5MB</small>
                   </div>
                   <div v-else class="invoice-upload-card__preview">
-                    <img :src="invoiceImageUrl" :alt="invoiceImageName || '待确认结算凭证'" />
+                    <img :src="invoiceImageUrl" :alt="invoiceImageName || '待确认发票凭证'" />
                     <div class="invoice-upload-card__toolbar">
                       <el-button size="small" plain @click.stop="openInvoicePreview">预览</el-button>
                       <el-button size="small" type="primary">重新上传</el-button>
@@ -3195,7 +3194,7 @@ onMounted(loadData)
                   </template>
                   <template v-else>
                     <strong class="invoice-upload-card__guide-title">等待上传凭证</strong>
-                    <p>图片上传后将在此显示固定识别字段与结算校验结果。</p>
+                    <p>图片上传后将在此显示固定识别字段与凭证校验结果。</p>
                   </template>
                   <template v-if="invoiceOcrState === 'loading'">
                     <strong>识别中...</strong>
@@ -3221,7 +3220,7 @@ onMounted(loadData)
               />
               <el-alert
                 v-if="currentInvoiceExceedsRemaining"
-                :title="`交易金额 ${formatMoney(currentInvoiceAmount ?? 0)} 超过剩余待结算金额 ${formatMoney(selectedProjectRemainingSettlementAmount)}，不能确认结算。`"
+                :title="`交易金额 ${formatMoney(currentInvoiceAmount ?? 0)} 超过剩余待核对凭证金额 ${formatMoney(selectedProjectRemainingSettlementAmount)}，不能确认。`"
                 type="error"
                 :closable="false"
                 show-icon
@@ -3232,15 +3231,15 @@ onMounted(loadData)
                   type="primary"
                   :loading="settlementSubmitting"
                   @click="confirmSettlementInvoice"
-                >确认结算</el-button>
-                <span v-else-if="currentInvoiceAmount === undefined" class="invoice-ocr-error">未识别到交易金额，暂不能确认结算。</span>
+                >确认发票凭证</el-button>
+                <span v-else-if="currentInvoiceAmount === undefined" class="invoice-ocr-error">未识别到交易金额，暂不能确认凭证。</span>
               </div>
             </section>
             <section data-testid="settlement-invoice-records" class="settlement-invoice-records">
               <div class="settlement-invoice-records__head">
                 <div>
-                  <h2>发票识别记录</h2>
-                  <p>仅展示已确认结算的发票，记录按确认时间倒序排列。</p>
+                <h2>发票识别记录</h2>
+                  <p>仅展示已核对的发票凭证，不代表客户实收；记录按确认时间倒序排列。</p>
                 </div>
                 <el-tag type="info">{{ selectedProject.settlementInvoices?.length ?? 0 }} 条</el-tag>
               </div>
@@ -3268,8 +3267,8 @@ onMounted(loadData)
                   <div class="settlement-invoice-record__content">
                     <div class="settlement-invoice-record__title">
                       <strong>{{ invoice.fileName || '未命名发票' }}</strong>
-                      <el-tag :type="invoice.resultStatus === '已完结' ? 'success' : invoice.resultStatus === '部分已结算' ? 'warning' : 'info'">
-                        {{ invoice.resultStatus ?? '已确认' }}
+                      <el-tag :type="invoice.resultStatus === '已完结' || invoice.resultStatus === '部分已结算' ? 'warning' : 'info'">
+                        {{ invoice.resultStatus === '已完结' || invoice.resultStatus === '部分已结算' ? '历史状态待核实' : invoice.resultStatus ?? '已确认' }}
                       </el-tag>
                     </div>
                     <dl class="invoice-ocr-fields settlement-invoice-record__fields">

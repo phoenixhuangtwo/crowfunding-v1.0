@@ -241,7 +241,7 @@ try {
       operator: 'finance-smoke · 财务'
     })
   })
-  assert(firstSettlement.data?.project?.status === '部分已结算', 'first settlement below sales income should mark the project partially settled')
+  assert(firstSettlement.data?.project?.status === '已满额', 'confirming an invoice must not change the project lifecycle')
   assert(firstSettlement.data?.canUploadMore === true, 'partial settlement should keep invoice upload available')
   const secondSettlementImageUrl = `data:image/png;base64,${Buffer.from(`amount:${secondSettlementAmount}`).toString('base64')}`
   const secondRecognition = await requestJson(baseUrl, '/api/invoices/ocr', {
@@ -258,16 +258,16 @@ try {
       operator: 'finance-smoke · 财务'
     })
   })
-  assert(finalSettlement.data?.project?.status === '已完结', 'cumulative settlement equal to sales income should complete the project')
+  assert(finalSettlement.data?.project?.status === '已满额', 'invoice totals alone must not close the project')
   assert(finalSettlement.data?.remainingAmount === 0 && finalSettlement.data?.canUploadMore === false, 'completed settlement should close further upload')
   const settledProjects = (await requestJson(baseUrl, '/api/projects')).data
   const persistedSettledProject = settledProjects.find(project => project.id === settlementProject.id)
-  assert(persistedSettledProject?.status === '已完结' && persistedSettledProject?.settlementInvoices?.length === 2, 'settlement confirmations should persist with the project')
+  assert(persistedSettledProject?.status === '已满额' && persistedSettledProject?.settlementInvoices?.length === 2, 'invoice confirmations should persist without closing the project')
   assert(persistedSettledProject?.settlementInvoices?.[0]?.imageUrl === firstSettlementImageUrl, 'settlement recognition history should persist the OCR-bound uploaded image')
-  assert(persistedSettledProject?.settlementInvoices?.[0]?.resultStatus === '部分已结算', 'partial settlement history should persist its result')
-  assert(persistedSettledProject?.settlementInvoices?.[1]?.resultStatus === '已完结', 'final settlement history should persist its completed result')
+  assert(persistedSettledProject?.settlementInvoices?.[0]?.resultStatus === '凭证已确认', 'first invoice should persist as proof only')
+  assert(persistedSettledProject?.settlementInvoices?.[1]?.resultStatus === '凭证已确认', 'final invoice should persist as proof only')
   const settlementAuditLogs = (await requestJson(baseUrl, '/api/audit-logs')).data
-  assert(settlementAuditLogs.some(log => log.target === settlementProject.id && log.action === '确认结算 · 项目完结'), 'completed settlement should write an audit log')
+  assert(settlementAuditLogs.some(log => log.target === settlementProject.id && log.action === '确认发票凭证'), 'invoice confirmation should write an audit log')
 
   const rulesPayload = await requestJson(baseUrl, '/api/rules?status=%E5%85%A8%E9%83%A8')
   assert(Array.isArray(rulesPayload.data), 'rules endpoint should return an array')

@@ -616,8 +616,8 @@ function normalizeProjectStatus(project: (Omit<Project, 'status' | 'costAmount' 
     return normalized
   }
   if (project.status === '部分已结算') {
-    normalized.status = normalized.settledAmount >= normalized.salesAmount ? '已完结' : '部分已结算'
-    normalized.statusType = normalized.status === '已完结' ? 'info' : 'warning'
+    normalized.status = '部分已结算'
+    normalized.statusType = 'warning'
     return normalized
   }
   if (['已结束未结算', '已结算', '已冻结', '已完结'].includes(project.status)) {
@@ -2259,7 +2259,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         await repositories.auditLogs.insert(auditRecord({
           actor: settlementOperator!.label,
           role: settlementOperator!.role,
-          action: result.duplicate ? '重复确认结算（幂等命中）' : project.status === '已完结' ? '确认结算 · 项目完结' : '确认结算 · 部分结算',
+          action: result.duplicate ? '重复确认凭证（幂等命中）' : '确认发票凭证',
           target: project.id,
           before,
           after: {
@@ -2277,7 +2277,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (localIndex >= 0) projects.splice(localIndex, 1, project)
       return send(res, 200, {
         data: { project, ...result },
-        message: project.status === '已完结' ? '项目结算已全部完成' : '本次结算已确认，可继续上传剩余结算凭证'
+        message: result.canUploadMore ? '发票凭证已记录，可继续核对其他凭证；未确认客户回款或完成分配' : '发票凭证金额已达到预计销售额；未确认客户回款或完成分配'
       })
     } catch (error) {
       const baseMessage = error instanceof Error ? error.message : '确认结算失败'

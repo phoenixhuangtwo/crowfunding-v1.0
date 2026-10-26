@@ -13,7 +13,7 @@ function projectFixture() {
   }
 }
 
-test('confirming less than project sales income marks the project partially settled and keeps upload open', () => {
+test('confirming an invoice below sales amount records the proof without changing project lifecycle', () => {
   const project = projectFixture()
   const result = confirmProjectSettlement(project, {
     idempotencyKey: 'SETTLEMENT-INVOICE-001',
@@ -26,20 +26,20 @@ test('confirming less than project sales income marks the project partially sett
     operator: 'finance01 · 财务'
   }, '2026-08-26 18:00:00')
 
-  assert.equal(project.status, '部分已结算')
-  assert.equal(project.statusType, 'warning')
+  assert.equal(project.status, '已满额')
+  assert.equal(project.statusType, 'success')
   assert.equal(project.settledAmount, 10000)
   assert.equal(result.remainingAmount, 14530.18)
   assert.equal(result.canUploadMore, true)
   assert.equal(project.settlementInvoices.length, 1)
   assert.equal(project.settlementInvoices[0].assetId, 'asset-first')
   assert.equal('imageUrl' in project.settlementInvoices[0], false)
-  assert.equal(project.settlementInvoices[0].resultStatus, '部分已结算')
+  assert.equal(project.settlementInvoices[0].resultStatus, '凭证已确认')
   assert.equal(project.settlementInvoices[0].settledAmountAfter, 10000)
   assert.equal(project.settlementInvoices[0].remainingAmountAfter, 14530.18)
 })
 
-test('multiple confirmed invoices that reach project sales income complete the project and close upload', () => {
+test('invoices reaching sales amount close proof upload but do not close the project', () => {
   const project = projectFixture()
   confirmProjectSettlement(project, {
     idempotencyKey: 'SETTLEMENT-INVOICE-001',
@@ -63,14 +63,14 @@ test('multiple confirmed invoices that reach project sales income complete the p
     operator: 'finance01 · 财务'
   }, '2026-08-26 18:05:00')
 
-  assert.equal(project.status, '已完结')
-  assert.equal(project.statusType, 'info')
+  assert.equal(project.status, '已满额')
+  assert.equal(project.statusType, 'success')
   assert.equal(project.settledAmount, 24530.18)
   assert.equal(result.remainingAmount, 0)
   assert.equal(result.canUploadMore, false)
   assert.equal(project.settlementInvoices.length, 2)
   assert.equal(project.settlementInvoices[1].assetId, 'asset-second')
-  assert.equal(project.settlementInvoices[1].resultStatus, '已完结')
+  assert.equal(project.settlementInvoices[1].resultStatus, '凭证已确认')
   assert.equal(project.settlementInvoices[1].settledAmountAfter, 24530.18)
   assert.equal(project.settlementInvoices[1].remainingAmountAfter, 0)
 })
@@ -144,9 +144,20 @@ test('settlement confirmation rejects amounts below the smallest currency unit',
     payer: '付款方',
     payee: '收款方',
     operator: 'finance01 · 财务'
-  }, '2026-08-26 18:00:00'), /交易金额不能低于 0.01 元/)
+  }, '2026-08-26 18:00:00'), /交易金额须精确到分/)
 
   assert.equal(project.status, '已满额')
+  assert.equal(project.settledAmount, 0)
+  assert.equal(project.settlementInvoices.length, 0)
+})
+
+test('invoice confirmation rejects a fractional cent instead of rounding it into a financial record', () => {
+  const project = projectFixture()
+  assert.throws(() => confirmProjectSettlement(project, {
+    idempotencyKey: 'SETTLEMENT-FRACTION', amount: 100.001,
+    fileName: '金额无效.png', assetId: 'asset-fraction', transactionDate: '2026年08月21日',
+    payer: '付款方', payee: '收款方', operator: 'finance01 · 财务'
+  }, '2026-08-26 18:00:00'), /交易金额须精确到分/)
   assert.equal(project.settledAmount, 0)
   assert.equal(project.settlementInvoices.length, 0)
 })
