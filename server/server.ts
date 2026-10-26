@@ -548,7 +548,14 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能访问全量业务状态')
     return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
   }
-  if (pathname === '/api/projects') return send(res, 200, { data: await queryService.listProjects(requestContext(req)) })
+  if (pathname === '/api/projects') {
+    const role = requestContext(req).role
+    const listed = await queryService.listProjects(requestContext(req))
+    if (role !== 'admin') return send(res, 200, { data: listed })
+    const identity = iamContextFor(req)
+    return send(res, 200, { data: listed.filter(project => project.status === '未开放'
+      || (project.tenantId === identity.tenantId && project.ownerUserId === identity.userId)) })
+  }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()
@@ -1843,7 +1850,9 @@ const server = createServer(observeRequests(async (req, res) => {
     if (role === 'employee' && !context.dataScope?.self && !context.dataScope?.all) {
       throw new AppError(403, 'DATA_SCOPE_DENIED', '无本人数据访问范围')
     }
-    if (role !== 'employee' && !context.dataScope?.all) {
+    const adminProjectList = role === 'admin' && req.method === 'GET' && url.pathname === '/api/projects'
+      && (context.dataScope?.self || context.dataScope?.deptIds.includes(context.user?.deptId ?? ''))
+    if (role !== 'employee' && !context.dataScope?.all && !adminProjectList) {
       throw new AppError(403, 'DATA_SCOPE_MIGRATION_REQUIRED', '存量业务记录尚无部门归属，暂不能使用部门数据范围')
     }
     if (req.method === 'GET') return await routeGet(url, req, res)

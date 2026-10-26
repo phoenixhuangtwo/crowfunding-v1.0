@@ -51,6 +51,11 @@ const fixtures: readonly ActiveFixture[] = [
     dataScope: { all: false, self: false, deptIds: [200] }
   },
   {
+    token: 'smoke-admin-outside-scope-token', userId: 1007, username: 'admin-outside', nickname: '范围外管理员', deptId: 200,
+    roles: ['crowdfunding_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query'],
+    dataScope: { all: false, self: false, deptIds: [201] }
+  },
+  {
     token: 'smoke-finance-token', userId: 1003, username: 'finance01', nickname: '财务', deptId: 200,
     roles: ['crowdfunding_finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice'],
     dataScope: { all: true, self: false, deptIds: [] }

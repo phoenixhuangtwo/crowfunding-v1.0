@@ -51,6 +51,15 @@ try {
     companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
     employeeSubscribedAmount: 0, subscribed: 0, people: 0
   })
+  for (const [id, ownerUserId] of [['PRJ-IAM-ADMIN-OWN', '1002'], ['PRJ-IAM-ADMIN-OTHER', '1999']]) {
+    await db.collection(`${prefix}projects`).insertOne({
+      id, title: id, source: 'integration-test', tenantId: '0', ownerUserId, ownerDeptId: '200',
+      status: '未满额', statusType: 'primary', progress: 0, remain: 300, deadline: '2099-12-31 23:59',
+      total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
+      companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+      employeeSubscribedAmount: 0, subscribed: 0, people: 0
+    })
+  }
   await db.collection(`${prefix}subscription_rules`).insertOne({
     id: 'RULE-IAM-PUBLISH', projectId: 'PRJ-IAM-PUBLISH', projectName: '待发布归属测试项目', ruleName: '隔离发布规则',
     totalAmount: 300, companyFixedAmount: 0, minAmount: 100, minParticipants: 1,
@@ -83,10 +92,15 @@ try {
   const employee = { Authorization: 'Bearer smoke-employee-token' }
   const employeeProjects = await request('/api/projects', employee)
   assert.equal(employeeProjects.status, 200)
-  assert.deepEqual((employeeProjects.body.data as Array<{ id: string }>).map(project => project.id), ['PRJ-IAM-TEST'])
+  assert.deepEqual((employeeProjects.body.data as Array<{ id: string }>).map(project => project.id).sort(),
+    ['PRJ-IAM-ADMIN-OTHER', 'PRJ-IAM-ADMIN-OWN', 'PRJ-IAM-TEST'])
   const departmentAdmin = await request('/api/projects', { Authorization: 'Bearer smoke-admin-token' })
-  assert.equal(departmentAdmin.status, 403)
-  assert.equal(departmentAdmin.body.error, 'DATA_SCOPE_MIGRATION_REQUIRED')
+  assert.equal(departmentAdmin.status, 200)
+  assert.deepEqual((departmentAdmin.body.data as Array<{ id: string }>).map(project => project.id).sort(),
+    ['PRJ-IAM-ADMIN-OWN', 'PRJ-IAM-PUBLISH'])
+  const outsideScope = await request('/api/projects', { Authorization: 'Bearer smoke-admin-outside-scope-token' })
+  assert.equal(outsideScope.status, 403)
+  assert.equal(outsideScope.body.error, 'DATA_SCOPE_MIGRATION_REQUIRED')
   assert.equal((await request('/api/projects', { Authorization: 'Bearer smoke-finance-token' })).status, 200)
   const published = await fetch(`${base}/api/projects/PRJ-IAM-PUBLISH/open`, {
     method: 'POST', headers: { Authorization: 'Bearer smoke-super-admin-token', 'Content-Type': 'application/json' },
