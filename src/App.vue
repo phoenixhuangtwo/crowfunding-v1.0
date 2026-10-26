@@ -3348,6 +3348,9 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-register="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:register')"
           :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:proof-upload')"
           :can-finish-close="canApi(authSession.permissionInfo.value, 'crowdfunding:project:finish-close')"
+          :can-proxy-query="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund-proxy:query')"
+          :can-proxy-request="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund-proxy:request')"
+          :can-proxy-review="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund-proxy:review')"
           @updated="loadData"
         />
 

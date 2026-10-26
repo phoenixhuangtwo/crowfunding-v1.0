@@ -51,6 +51,7 @@ export type Project = {
   purchasePaymentId?: string
   purchasePaidAt?: string
   purchasePaidAmount?: number
+  proxyConfirmDays?: number
   settlementInvoices?: SettlementInvoiceRecord[]
 }
 

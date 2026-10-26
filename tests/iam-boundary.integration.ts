@@ -844,7 +844,20 @@ try {
     paidAt: new Date(Date.now() - 60_000).toISOString(), proofAssetIds: ['ASSET-IAM-FAIL-EMPLOYEE'],
     manualVerificationNote: '已人工核对员工全额退款流水' })
   assert.equal(failRefundPayment.status, 200, JSON.stringify(failRefundPayment.body))
-  assert.equal((await postAs(`/api/project-refunds/${failRefund?.id}/confirm`, 'smoke-employee-token', {})).status, 200)
+  const proxyFailPath = `/api/project-refunds/${failRefund?.id}/proxy-confirm`
+  assert.equal((await postAs(proxyFailPath, 'smoke-finance-token', {
+    reason: '员工超过期限仍未确认实际退款到账' })).status, 400)
+  await db.collection(`${prefix}project_refunds`).updateOne({ id: failRefund?.id }, { $set: {
+    paidAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString() } })
+  const proxyCreated = await postAs(proxyFailPath, 'smoke-finance-token', {
+    reason: '员工超过期限仍未确认实际退款到账', accountDisabled: true,
+    offlineVerificationNote: '公司线下核对收款账户与原退款流水一致' })
+  assert.equal(proxyCreated.status, 201, JSON.stringify(proxyCreated.body))
+  const proxyReviewPath = `/api/project-refund-proxy-requests/${(proxyCreated.body.data as { id: string }).id}/review`
+  assert.equal((await postAs(proxyReviewPath, 'smoke-finance-token', { action: 'approve' })).status, 403)
+  assert.equal((await postAs(proxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 200)
+  assert.equal((await postAs(proxyReviewPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
+  assert.equal((await postAs(`/api/project-refunds/${failRefund?.id}/confirm`, 'smoke-employee-token', {})).status, 409)
   assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
   const receiptRefundPath = '/api/projects/PRJ-IAM-FAIL/receipt-termination-refunds'
   const receiptRefundInput = { receiptBatchId: 'RB-IAM-FAIL', amountCents: 2000,

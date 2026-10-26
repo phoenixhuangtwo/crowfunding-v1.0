@@ -31,6 +31,7 @@ import { reconcileProjectFinancials } from './finance/financial-reconciliation.t
 import { validateProjectRefundPayment, type ProjectRefund } from './finance/project-refunds.ts'
 import { validateSupplierRefund, type ProcurementFailureRequest, type SupplierRefund } from './finance/procurement-failure.ts'
 import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from './finance/receipt-termination-refunds.ts'
+import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -95,6 +96,7 @@ type Project = {
   purchasePaymentId?: string
   purchasePaidAt?: string
   purchasePaidAmount?: number
+  proxyConfirmDays?: number
   closedAt?: string
   closedBy?: string
   settlementInvoices?: SettlementInvoiceRecord[]
@@ -311,6 +313,7 @@ const projectRefunds = mongo.db.collection<ProjectRefund>(`${appConfig.mongodb.c
 const procurementFailureRequests = mongo.db.collection<ProcurementFailureRequest>(`${appConfig.mongodb.collectionPrefix}procurement_failure_requests`)
 const supplierRefunds = mongo.db.collection<SupplierRefund>(`${appConfig.mongodb.collectionPrefix}supplier_refunds`)
 const receiptTerminationRefunds = mongo.db.collection<ReceiptTerminationRefund>(`${appConfig.mongodb.collectionPrefix}receipt_termination_refunds`)
+const projectRefundProxyRequests = mongo.db.collection<ProjectRefundProxyRequest>(`${appConfig.mongodb.collectionPrefix}project_refund_proxy_requests`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -880,6 +883,13 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const records = await projectRefunds.find({ participantId: context.userId })
       .sort({ createdAt: -1 }).limit(100).toArray()
     return send(res, 200, { data: records })
+  }
+  if (pathname === '/api/project-refund-proxy-requests') {
+    const role = requestContext(req).role
+    if (!['finance', 'super_admin'].includes(role)) throw new AppError(403, 'FORBIDDEN', '无权查看退款代确认申请')
+    const projectId = searchParams.get('projectId')?.trim()
+    return send(res, 200, { data: await projectRefundProxyRequests.find(projectId ? { projectId } : {})
+      .sort({ requestedAt: -1 }).limit(200).toArray() })
   }
   if (pathname === '/api/procurement-failure-requests') {
     const context = requestContext(req)
@@ -1612,6 +1622,148 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     } catch (error) {
       if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
       if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_CONFIRMED', message: '退款已确认' })
+      throw error
+    }
+  }
+  const projectRefundProxyMatch = pathname.match(/^\/api\/project-refunds\/([^/]+)\/proxy-confirm$/)
+  if (projectRefundProxyMatch) {
+    const actor = financeOperator(req)
+    const refundId = decodeURIComponent(projectRefundProxyMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const refund = await projectRefunds.findOne({ id: refundId }, { session })
+        const project = refund && await repositories.projects.getById(refund.projectId, session)
+        if (!refund || refund.status !== '待员工确认' || !project
+          || !['关闭中', '采购失败终止中'].includes(project.status)) {
+          throw new AppError(409, 'PROJECT_REFUND_PROXY_INVALID', '该退款当前不可申请代确认')
+        }
+        const verified = validateProjectRefundProxy({
+          reason: typeof body.reason === 'string' ? body.reason : '',
+          accountDisabled: body.accountDisabled === true,
+          offlineVerificationNote: typeof body.offlineVerificationNote === 'string' ? body.offlineVerificationNote : '',
+          paidAt: refund.paidAt ?? '', proofAssetIds: refund.proofAssetIds ?? [],
+          confirmDays: project.proxyConfirmDays ?? 7
+        }, new Date())
+        const existing = await projectRefundProxyRequests.findOne({ refundId }, { session })
+        if (existing && existing.status !== '已驳回') {
+          throw new AppError(409, 'PROJECT_REFUND_PROXY_DUPLICATE', '代确认申请已存在')
+        }
+        const request: ProjectRefundProxyRequest = { id: existing?.id ?? `PRPX-${randomUUID()}`,
+          projectId: project.id, refundId, subscriptionId: refund.subscriptionId,
+          participantId: refund.participantId, ...verified,
+          proofAssetIds: [...refund.proofAssetIds!], status: '待公司复核',
+          requestedBy: actor.userId, requestedAt: new Date().toISOString() }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: project.status }, { $inc: { refundRevision: 1 } }, { session })
+        await projectRefundProxyRequests.replaceOne({ refundId }, request, { upsert: true, session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '申请员工退款代确认',
+          target: refundId, before: { status: refund.status }, after: { requestId: request.id,
+            reason: request.reason, accountDisabled: request.accountDisabled } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { request, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.request, message: '代确认申请已提交，请等待公司复核' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_PROXY_DUPLICATE', message: '代确认申请已存在' })
+      if (error instanceof Error && /代确认|账号停用|凭证/.test(error.message)) {
+        return send(res, 400, { error: 'PROJECT_REFUND_PROXY_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const projectRefundProxyReviewMatch = pathname.match(/^\/api\/project-refund-proxy-requests\/([^/]+)\/review$/)
+  if (projectRefundProxyReviewMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const id = decodeURIComponent(projectRefundProxyReviewMatch[1])
+    const action = body.action === 'approve' ? 'approve' : body.action === 'reject' ? 'reject' : ''
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (!action || (action === 'reject' && (reason.length < 5 || reason.length > 200))) {
+      return send(res, 400, { error: 'PROJECT_REFUND_PROXY_REVIEW_INVALID', message: '复核操作无效，驳回原因须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const request = await projectRefundProxyRequests.findOne({ id }, { session })
+        if (!request || request.status !== '待公司复核') throw new AppError(409, 'PROJECT_REFUND_PROXY_CHANGED', '代确认申请不存在或已复核')
+        const refund = await projectRefunds.findOne({ id: request.refundId }, { session })
+        const project = await repositories.projects.getById(request.projectId, session)
+        const subscription = await repositories.subscriptions.getById(request.subscriptionId, session)
+        if (!refund || refund.status !== '待员工确认' || !project
+          || !['关闭中', '采购失败终止中'].includes(project.status)
+          || !subscription || subscription.pay !== '待确认退款'
+          || refund.participantId !== request.participantId
+          || JSON.stringify(refund.proofAssetIds) !== JSON.stringify(request.proofAssetIds)) {
+          throw new AppError(409, 'PROJECT_REFUND_PROXY_STATE_CHANGED', '原退款或凭证状态已变化')
+        }
+        validateProjectRefundProxy({ reason: request.reason, accountDisabled: request.accountDisabled,
+          offlineVerificationNote: request.offlineVerificationNote, paidAt: refund.paidAt ?? '',
+          proofAssetIds: refund.proofAssetIds ?? [], confirmDays: project.proxyConfirmDays ?? 7 }, new Date())
+        const reviewedAt = new Date().toISOString()
+        const next: ProjectRefundProxyRequest = { ...request,
+          status: action === 'approve' ? '已通过' : '已驳回', reviewedBy: actor.userId,
+          reviewedAt, ...(action === 'reject' ? { reviewReason: reason } : {}) }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: project.id, status: project.status }, { $inc: { refundRevision: 1 } }, { session })
+        const changed = await projectRefundProxyRequests.replaceOne({ id, status: '待公司复核' }, next, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_REFUND_PROXY_CHANGED', '代确认申请已变化')
+        let updatedRefund: ProjectRefund | undefined
+        let updatedSubscription: Subscription | undefined
+        let closed = false
+        if (action === 'approve') {
+          updatedRefund = { ...refund, status: '已退款', confirmedAt: reviewedAt }
+          updatedSubscription = { ...subscription, pay: '已退款', action: '查看退款' }
+          await projectRefunds.replaceOne({ id: refund.id, status: '待员工确认' }, updatedRefund, { session })
+          await repositories.subscriptions.replace(updatedSubscription, session)
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+            id: `LED-${randomUUID()}`, sourceKey: `project-refund-confirm:${refund.id}`,
+            type: 'subscription_refund_confirmed', projectId: refund.projectId,
+            subscriptionId: refund.subscriptionId, participantId: refund.participantId,
+            amountCents: refund.amountCents, transactionNo: refund.transactionNo,
+            transactionKey: `project-refund-confirm:${refund.id}`,
+            proofAssetIds: refund.proofAssetIds ?? [], reviewedBy: actor.userId, createdAt: reviewedAt
+          }, { session })
+          const pending = await projectRefunds.countDocuments({ projectId: project.id,
+            status: { $ne: '已退款' }, id: { $ne: refund.id } }, { session })
+          if (pending === 0 && project.status === '关闭中') {
+            const contributions = await fundLedger.listProjectContributions(project.id, session)
+            const outflow = await mongo.db.collection<{ amountCents: number }>(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+              .find({ projectId: project.id, type: 'subscription_refund_confirmed' }, { session }).toArray()
+            const exceptions = await exceptionFunds.countDocuments({ projectId: project.id,
+              remainingCents: { $gt: 0 } }, { session })
+            if (!exceptions && contributions.reduce((sum, item) => sum + item.amountCents, 0)
+              === outflow.reduce((sum, item) => sum + item.amountCents, 0)) {
+              await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+                .updateOne({ id: project.id, status: '关闭中' }, { $set: { status: '已关闭',
+                  statusType: 'info', closedAt: reviewedAt, closedBy: actor.userId } }, { session })
+              closed = true
+            }
+          }
+        }
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '复核员工退款代确认',
+          target: id, before: { status: request.status }, after: { status: next.status,
+            refundId: refund.id, closed, reviewReason: next.reviewReason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { next, updatedRefund, updatedSubscription, projectId: project.id, closed,
+          reviewedAt, audit }
+      })
+      if (result.updatedSubscription) {
+        const index = subscriptions.findIndex(item => item.id === result.updatedSubscription?.id)
+        if (index >= 0) subscriptions.splice(index, 1, result.updatedSubscription)
+      }
+      if (result.closed) {
+        const index = projects.findIndex(item => item.id === result.projectId)
+        if (index >= 0) projects.splice(index, 1, { ...projects[index], status: '已关闭',
+          statusType: 'info', closedAt: result.reviewedAt, closedBy: actor.userId })
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.next, message: action === 'approve' ? '代确认复核通过' : '已驳回' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_PROXY_CHANGED', message: '退款状态已变化' })
+      if (error instanceof Error && /代确认|账号停用|凭证/.test(error.message)) {
+        return send(res, 409, { error: 'PROJECT_REFUND_PROXY_INVALID', message: error.message })
+      }
       throw error
     }
   }
@@ -3940,6 +4092,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const updated = { ...latest, ruleId: latestRule.id, ...publisher,
         total: shareRule.totalAmount, companyFixedAmount: shareRule.companyFixedAmount,
         deadline: latestRule.endAt, status: '未满额' as const, statusType: 'primary' as const,
+        proxyConfirmDays: 7,
         interruptReason: undefined, interruptedAt: undefined, refundNotice: undefined }
       normalizeProjectAmounts(updated as Project)
       const companyRecord: Subscription | undefined = shareRule.companyFrontShares > 0 ? {

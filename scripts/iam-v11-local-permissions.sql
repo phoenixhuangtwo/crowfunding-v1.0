@@ -470,3 +470,32 @@ FROM system_role role JOIN system_api_resource resource ON resource.client_id = 
 WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
   AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
     AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+-- V1.1 员工项目退款代确认
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', codes.code, codes.name, codes.method, codes.path, 0, 'v11-local', 'v11-local'
+FROM (
+  SELECT 'crowdfunding:project-refund-proxy:query' AS code, '项目退款代确认申请查询' AS name, 'GET' AS method, '/api/project-refund-proxy-requests' AS path
+  UNION ALL SELECT 'crowdfunding:project-refund-proxy:request', '申请项目退款代确认', 'POST', '/api/project-refunds/*/proxy-confirm'
+  UNION ALL SELECT 'crowdfunding:project-refund-proxy:review', '复核项目退款代确认', 'POST', '/api/project-refund-proxy-requests/*/review'
+) codes
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
+  AND resource.code = codes.code AND resource.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:project-refund-proxy:query', 'crowdfunding:project-refund-proxy:request')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:project-refund-proxy:query', 'crowdfunding:project-refund-proxy:review')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
