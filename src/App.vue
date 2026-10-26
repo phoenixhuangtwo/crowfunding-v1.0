@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import {
   ArrowDown,
   Briefcase,
@@ -26,6 +26,11 @@ import { settlementPaymentTime, settlementSubscriberLabel } from './settlement-d
 import { beginSettlement } from './settlement-flow'
 import { estimateShareProfit } from './estimated-share-profit'
 import { prepareShareRule } from '../server/share-subscription'
+import { apiRequest } from './auth/api-client'
+import { readAccessToken } from './auth/session'
+import { useAuthSession } from './auth/use-auth-session'
+import { allowedPageKeys, canApi, canUi, type AuthorizedPageKey } from './auth/permissions'
+import AuthStateView from './components/AuthStateView.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
 type PageKey =
@@ -42,7 +47,7 @@ type PageKey =
   | 'takeovers'
   | 'rbac'
   | 'audit'
-type NavPage = { key: PageKey; label: string; req: 'P0' | 'P1' | 'P2'; icon: unknown }
+type NavPage = { key: PageKey; label: string; req: 'P0' | 'P1' | 'P2'; icon: unknown; permission: string }
 type AgreementVersion = { id: string; version: number; title: string; body: string; effectiveAt: string; createdBy: string; status?: string }
 type AgreementConfirmation = { id: string; version: number; userId: string; userName: string; node: string; relatedId: string; confirmedAt: string }
 type Project = {
@@ -219,32 +224,31 @@ const roles: Record<Role, { label: string; account: string; home: PageKey }> = {
   finance: { label: '财务', account: 'finance01', home: 'receivingCode' },
   super_admin: { label: '公司超级管理员', account: 'superadmin01', home: 'adminProjects' }
 }
-const localIdentityMode = import.meta.env.DEV
 
 const navGroups: Array<{ title: string; pages: NavPage[] }> = [
   {
     title: '员工端',
     pages: [
-      { key: 'projects', label: '项目列表', req: 'P0', icon: Briefcase },
-      { key: 'mine', label: '我的认购', req: 'P0', icon: Wallet }
+      { key: 'projects', label: '项目列表', req: 'P0', icon: Briefcase, permission: 'crowdfunding:project:query' },
+      { key: 'mine', label: '我的认购', req: 'P0', icon: Wallet, permission: 'crowdfunding:subscription:query' }
     ]
   },
   {
     title: '项目管理端',
     pages: [
-      { key: 'adminProjects', label: '项目管理', req: 'P0', icon: Checked },
-      { key: 'rules', label: '认购规则配置', req: 'P0', icon: Document },
-      { key: 'agreements', label: '免责协议版本', req: 'P0', icon: Document },
-      { key: 'receivingCode', label: '项目收款码管理', req: 'P0', icon: CreditCard },
-      { key: 'rbac', label: '权限管理', req: 'P0', icon: Lock },
-      { key: 'audit', label: '审计日志', req: 'P0', icon: User }
+      { key: 'adminProjects', label: '项目管理', req: 'P0', icon: Checked, permission: 'crowdfunding:project:manage' },
+      { key: 'rules', label: '认购规则配置', req: 'P0', icon: Document, permission: 'crowdfunding:rule:query' },
+      { key: 'agreements', label: '免责协议版本', req: 'P0', icon: Document, permission: 'crowdfunding:agreement:manage' },
+      { key: 'receivingCode', label: '项目收款码管理', req: 'P0', icon: CreditCard, permission: 'crowdfunding:receiving-code:query' },
+      { key: 'rbac', label: '权限管理', req: 'P0', icon: Lock, permission: 'crowdfunding:access' },
+      { key: 'audit', label: '审计日志', req: 'P0', icon: User, permission: 'crowdfunding:audit:query' }
     ]
   },
   {
     title: '财务端',
     pages: [
-      { key: 'payReview', label: '支付复核', req: 'P0', icon: Tickets },
-      { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money }
+      { key: 'payReview', label: '支付复核', req: 'P0', icon: Tickets, permission: 'crowdfunding:payment-review:query' },
+      { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money, permission: 'crowdfunding:settlement:query' }
     ]
   }
 ]
@@ -266,7 +270,8 @@ const pageTitleMap: Record<PageKey, string> = {
 }
 
 const currentRole = ref<Role>('employee')
-const currentPage = ref<PageKey>('projects')
+const currentPage = ref<PageKey | ''>('')
+const authSession = useAuthSession()
 const agreementVisible = ref(false)
 const currentAgreement = ref<AgreementVersion | null>(null)
 const agreementNode = ref<'提交认购' | '查看缴款码' | '确认收款'>('提交认购')
@@ -568,11 +573,12 @@ const auditRows = reactive<AuditRow[]>([
 ])
 const rules = reactive<SubscriptionRule[]>([])
 
-const pageTitle = computed(() => pageTitleMap[currentPage.value])
+const pageTitle = computed(() => currentPage.value ? pageTitleMap[currentPage.value] : '暂无可用页面')
 const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
+const authorizedPageKeys = computed(() => new Set(allowedPageKeys(authSession.permissionInfo.value)))
 const visibleNavGroups = computed(() => navGroups.map(group => ({
   ...group,
-  pages: group.pages.filter(page => !hiddenNavPageKeys.has(page.key) && (page.key !== 'agreements' || currentRole.value === 'super_admin'))
+  pages: group.pages.filter(page => !hiddenNavPageKeys.has(page.key) && authorizedPageKeys.value.has(page.key as AuthorizedPageKey) && canUi(authSession.permissionInfo.value, page.permission))
 })).filter(group => group.pages.length > 0))
 const selectedProject = computed(() => projects.find(project => project.id === selectedProjectId.value) ?? projects[0])
 const selectedProjectRule = computed(() => {
@@ -622,7 +628,7 @@ const currentInvoiceCanConfirm = computed(() => currentInvoiceAmount.value !== u
   && !selectedProjectSettlementCompleted.value)
 const currentInvoiceExceedsRemaining = computed(() => currentInvoiceAmount.value !== undefined
   && currentInvoiceAmount.value > selectedProjectRemainingSettlementAmount.value)
-const roleMeta = computed(() => roles[currentRole.value])
+const roleMeta = computed(() => ({ ...roles[currentRole.value], account: authSession.permissionInfo.value?.user.id ?? '' }))
 const ruleDialogTitle = computed(() => ruleReadonly.value ? '查看认购规则配置' : editingRuleId.value ? '修改认购规则' : '创建认购规则')
 const openRuleOptions = computed(() => rules.filter(rule => rule.status === '已启用'))
 const selectedOpenRule = computed(() => openRuleOptions.value.find(rule => rule.id === selectedOpenRuleId.value))
@@ -891,23 +897,7 @@ const filteredAuditRows = computed(() => {
   })
 })
 
-async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const headers = new Headers(options?.headers)
-  if (!(options?.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-  headers.set('X-User-Id', roleMeta.value.account)
-  headers.set('X-User-Role', currentRole.value)
-  const response = await fetch(path, {
-    ...options,
-    headers
-  })
-  const payload = await response.json()
-  if (!response.ok) {
-    const requestId = response.headers.get('X-Request-Id')
-    const message = payload.message ?? payload.error ?? '接口请求失败'
-    throw new Error(requestId ? `${message}（请求编号：${requestId}）` : message)
-  }
-  return payload
-}
+async function api<T>(path: string, options?: RequestInit): Promise<T> { return apiRequest<T>(path, options) }
 
 const privateImageCache = new Map<string, string>()
 
@@ -916,7 +906,8 @@ async function privateImageUrl(assetId?: string) {
   const cached = privateImageCache.get(assetId)
   if (cached) return cached
   const response = await fetch(`/api/files/${encodeURIComponent(assetId)}/content`, {
-    headers: { 'X-User-Id': roleMeta.value.account, 'X-User-Role': currentRole.value }
+    credentials: 'same-origin',
+    headers: readAccessToken() ? { Authorization: `Bearer ${readAccessToken()}` } : undefined
   })
   if (!response.ok) return ''
   const objectUrl = URL.createObjectURL(await response.blob())
@@ -959,16 +950,6 @@ async function loadData() {
     ElMessage.warning(error instanceof Error ? `后端数据加载失败，保留本地模拟数据：${error.message}` : '后端数据加载失败，保留本地模拟数据')
   }
 }
-
-watch(currentRole, () => {
-  for (const url of privateImageCache.values()) URL.revokeObjectURL(url)
-  privateImageCache.clear()
-  replaceRows(subscriptions, [])
-  replaceRows(receivingCodes, [])
-  replaceRows(auditRows, [])
-  currentPage.value = roles[currentRole.value].home
-  void loadData()
-})
 
 function applyRuleFilters() {
   rulePage.value = 1
@@ -1144,7 +1125,17 @@ function reviewPaymentId(subscription: Subscription) {
 }
 
 function go(page: PageKey) {
+  if (page !== 'detail' && page !== 'payment' && !authorizedPageKeys.value.has(page as AuthorizedPageKey)) {
+    ElMessage.error('暂无访问该页面的权限')
+    return
+  }
   currentPage.value = page
+}
+
+function requireApiPermission(code: string) {
+  if (canApi(authSession.permissionInfo.value, code)) return true
+  ElMessage.error('暂无执行该操作的权限')
+  return false
 }
 
 function goProjectDetail(projectId: string) {
@@ -1299,7 +1290,6 @@ async function handleAdminProjectMoreCommand(command: string, project: Project) 
 
 function goProjectSettlement(project: Project) {
   selectedProjectId.value = project.id
-  currentRole.value = 'finance'
   currentPage.value = 'settlement'
   settlementInvoiceVisible.value = (project.settledAmount ?? 0) > 0 && (project.settledAmount ?? 0) < projectSalesAmount(project)
   invoiceOcrState.value = 'none'
@@ -1314,13 +1304,11 @@ function goProjectSettlement(project: Project) {
 function openPayReviewFromProject(project: Project) {
   selectedProjectId.value = project.id
   activePaymentSubscriptionId.value = paymentReviewSubscriptions.value.find(subscription => isProjectSubscription(project, subscription))?.id ?? ''
-  currentRole.value = 'finance'
   currentPage.value = 'payReview'
   ElMessage.success(`已进入支付复核：${project.title}`)
 }
 
 function backToAdminProjects() {
-  currentRole.value = 'admin'
   currentPage.value = 'adminProjects'
 }
 
@@ -2266,11 +2254,38 @@ async function forceTakeover(project: Project) {
   }
 }
 
-onMounted(loadData)
+watch(() => authSession.status.value, status => {
+  if (status !== 'authenticated') return
+  const roleCodes = authSession.permissionInfo.value?.roleCodes ?? authSession.permissionInfo.value?.roles ?? []
+  currentRole.value = roleCodes.includes('super_admin') ? 'super_admin'
+    : roleCodes.includes('finance') ? 'finance'
+    : roleCodes.includes('admin') ? 'admin' : 'employee'
+  const firstPage = visibleNavGroups.value[0]?.pages[0]?.key
+  currentPage.value = firstPage ?? ''
+  if (firstPage) void loadData()
+})
+
+watch(() => authSession.permissionInfo.value, info => {
+  for (const url of privateImageCache.values()) URL.revokeObjectURL(url)
+  privateImageCache.clear()
+  replaceRows(subscriptions, [])
+  replaceRows(receivingCodes, [])
+  replaceRows(auditRows, [])
+  if (!info) { currentPage.value = ''; return }
+  const firstPage = visibleNavGroups.value[0]?.pages[0]?.key
+  currentPage.value = firstPage ?? ''
+}, { deep: true })
 </script>
 
 <template>
-  <div class="app-shell">
+  <AuthStateView
+    v-if="authSession.status.value !== 'authenticated'"
+    :status="authSession.status.value"
+    @retry="authSession.retry"
+    @login="authSession.startLogin"
+    @exit="authSession.logout"
+  />
+  <div v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">认</div>
@@ -2300,16 +2315,15 @@ onMounted(loadData)
       <header class="topbar">
         <div>
           <div class="crumb">工作台 / <b>{{ pageTitle }}</b></div>
-          <div class="top-hint">账号 {{ roleMeta.account }} · 当前视角：{{ roleMeta.label }}</div>
+          <div class="top-hint">{{ authSession.permissionInfo.value?.user.nickname || authSession.permissionInfo.value?.user.username }} · 用户 {{ authSession.permissionInfo.value?.user.username }} · 部门 {{ authSession.permissionInfo.value?.user.deptId || '-' }}</div>
         </div>
         <div class="top-actions">
-          <el-select v-if="localIdentityMode" v-model="currentRole" aria-label="本地测试身份" style="width: 180px">
-            <el-option v-for="(role, key) in roles" :key="key" :label="`本地测试：${role.label}`" :value="key" />
-          </el-select>
+          <el-button @click="authSession.logout">登出</el-button>
         </div>
       </header>
 
       <section class="content">
+        <section v-if="!currentPage" class="panel empty" data-testid="iam-empty-navigation">当前账号没有可访问的页面，请联系管理员配置 IAM 菜单与权限。</section>
         <template v-if="currentPage === 'projects'">
           <div class="page-head">
             <div>
