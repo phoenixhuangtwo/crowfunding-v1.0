@@ -29,6 +29,7 @@ import { makeDistributionOrder, distributionOrderIsActive, deriveDistributionSta
 import { validateCostRegistration, type ConfirmedCost } from './finance/confirmed-costs.ts'
 import { reconcileProjectFinancials } from './finance/financial-reconciliation.ts'
 import { validateProjectRefundPayment, type ProjectRefund } from './finance/project-refunds.ts'
+import { validateSupplierRefund, type ProcurementFailureRequest, type SupplierRefund } from './finance/procurement-failure.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -44,7 +45,7 @@ import { ownershipFrom } from './iam/data-scope.ts'
 import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '部分已结算' | '已完结'
+type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
 type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资' | '待退款' | '待确认退款' | '已退款'
 
 type PaymentImage = {
@@ -306,6 +307,8 @@ const distributionOrders = mongo.db.collection<DistributionOrder>(`${appConfig.m
 const confirmedCosts = mongo.db.collection<ConfirmedCost>(`${appConfig.mongodb.collectionPrefix}confirmed_costs`)
 const exceptionFunds = mongo.db.collection<ExceptionFund>(`${appConfig.mongodb.collectionPrefix}exception_funds`)
 const projectRefunds = mongo.db.collection<ProjectRefund>(`${appConfig.mongodb.collectionPrefix}project_refunds`)
+const procurementFailureRequests = mongo.db.collection<ProcurementFailureRequest>(`${appConfig.mongodb.collectionPrefix}procurement_failure_requests`)
+const supplierRefunds = mongo.db.collection<SupplierRefund>(`${appConfig.mongodb.collectionPrefix}supplier_refunds`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -876,6 +879,26 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
       .sort({ createdAt: -1 }).limit(100).toArray()
     return send(res, 200, { data: records })
   }
+  if (pathname === '/api/procurement-failure-requests') {
+    const context = requestContext(req)
+    if (!['admin', 'super_admin'].includes(context.role)) throw new AppError(403, 'FORBIDDEN', '无权查看采购失败申请')
+    const projectId = searchParams.get('projectId')?.trim()
+    const filter = projectId ? { projectId } : {}
+    const records = await procurementFailureRequests.find(filter).sort({ requestedAt: -1 }).limit(100).toArray()
+    if (context.role === 'super_admin') return send(res, 200, { data: records })
+    const visible = await Promise.all(records.map(async record => {
+      const project = await repositories.projects.getById(record.projectId)
+      return project && isOwnedByAdmin(req, project) ? record : undefined
+    }))
+    return send(res, 200, { data: visible.filter(Boolean) })
+  }
+  if (pathname === '/api/supplier-refunds') {
+    const context = requestContext(req)
+    if (!['finance', 'super_admin'].includes(context.role)) throw new AppError(403, 'FORBIDDEN', '无权查看供应商退款')
+    const projectId = searchParams.get('projectId')?.trim()
+    return send(res, 200, { data: await supplierRefunds.find(projectId ? { projectId } : {})
+      .sort({ createdAt: -1 }).limit(200).toArray() })
+  }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()
@@ -1069,6 +1092,25 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'subscription-refund-proof',
       ownerType: 'subscription', ownerId: refund.subscriptionId, createdBy: actor.userId })
     return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '退款凭证已保存' })
+  }
+  const supplierRefundProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/supplier-refund-proofs$/)
+  if (supplierRefundProofMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(supplierRefundProofMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project || project.status !== '采购失败终止中') {
+      return send(res, 409, { error: 'PROJECT_NOT_TERMINATING', message: '众筹单当前不可上传供应商退款凭证' })
+    }
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId: projectId,
+      purpose: 'supplier-refund-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'SUPPLIER_REFUND_PROOF_LIMIT', message: '暂存供应商退款凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'supplier-refund-proof',
+      ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '供应商退款凭证已保存' })
   }
   const receiptProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/receipt-proofs$/)
   if (receiptProofMatch) {
@@ -1414,7 +1456,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         if (!refund || refund.status !== '待退款') throw new AppError(409, 'PROJECT_REFUND_INVALID', '退款事项不存在或已登记')
         const project = await repositories.projects.getById(refund.projectId, session)
         const subscription = await repositories.subscriptions.getById(refund.subscriptionId, session)
-        if (!project || project.status !== '关闭中' || !subscription || subscription.pay !== '待退款') {
+        if (!project || !['关闭中', '采购失败终止中'].includes(project.status) || !subscription || subscription.pay !== '待退款') {
           throw new AppError(409, 'PROJECT_REFUND_STATE_INVALID', '众筹单或认购单当前不可登记退款')
         }
         const payment = validateProjectRefundPayment({ amountCents: body.amountCents as number,
@@ -1437,7 +1479,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         }
         const updatedRefund: ProjectRefund = { ...refund, ...payment, status: '待员工确认', registeredBy: actor.userId }
         await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
-          .updateOne({ id: project.id, status: '关闭中' }, { $inc: { refundRevision: 1 } }, { session })
+          .updateOne({ id: project.id, status: project.status }, { $inc: { refundRevision: 1 } }, { session })
         const changed = await projectRefunds.replaceOne({ id: refund.id, status: '待退款' }, updatedRefund, { session })
         if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_REFUND_CHANGED', '退款事项已变化，请刷新后重试')
         const updatedSubscription: Subscription = { ...subscription, pay: '待确认退款', action: '确认退款到账' }
@@ -1485,7 +1527,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         if (refund.participantId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能确认本人退款')
         const subscription = await repositories.subscriptions.getById(refund.subscriptionId, session)
         const project = await repositories.projects.getById(refund.projectId, session)
-        if (!subscription || subscription.pay !== '待确认退款' || !project || project.status !== '关闭中') {
+        if (!subscription || subscription.pay !== '待确认退款' || !project || !['关闭中', '采购失败终止中'].includes(project.status)) {
           throw new AppError(409, 'PROJECT_REFUND_STATE_INVALID', '退款状态已变化')
         }
         const confirmedAt = new Date().toISOString()
@@ -1507,7 +1549,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const pending = await projectRefunds.countDocuments({ projectId: project.id,
           status: { $ne: '已退款' }, id: { $ne: refund.id } }, { session })
         let closed = false
-        if (pending === 0) {
+        if (pending === 0 && project.status === '关闭中') {
           const contributions = await fundLedger.listProjectContributions(project.id, session)
           const outflow = await mongo.db.collection<{ projectId: string; type: string; amountCents: number }>(
             `${appConfig.mongodb.collectionPrefix}fund_ledger`)
@@ -1542,6 +1584,128 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     } catch (error) {
       if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
       if (isDuplicateKey(error)) return send(res, 409, { error: 'PROJECT_REFUND_CONFIRMED', message: '退款已确认' })
+      throw error
+    }
+  }
+  const procurementFailureMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-failure$/)
+  if (procurementFailureMatch) {
+    const actor = managementActor(req, ['admin'])
+    const projectId = decodeURIComponent(procurementFailureMatch[1])
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (reason.length < 5 || reason.length > 200) {
+      return send(res, 400, { error: 'PROCUREMENT_FAILURE_REASON_INVALID', message: '采购失败原因须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        if (!project) throw new AppError(404, 'PROJECT_NOT_FOUND', '众筹单不存在')
+        requireAdminOwned(req, project)
+        if (!['待回款', '回款中', '待分配', '分配中'].includes(project.status)
+          || !await procurementPayments.findOne({ projectId }, { session })) {
+          throw new AppError(409, 'PROCUREMENT_FAILURE_STATE_INVALID', '采购付款后且分配审批前方可申请采购失败终止')
+        }
+        const approvedDistribution = await distributionOrders.findOne({ projectId,
+          status: { $nin: ['待审批', '已驳回', '已作废'] } }, { session })
+        if (approvedDistribution) throw new AppError(409, 'DISTRIBUTION_ALREADY_APPROVED', '分配单已审批，不能终止')
+        const existing = await procurementFailureRequests.findOne({ projectId }, { session })
+        if (existing?.status === '待公司复核' || existing?.status === '已通过') {
+          throw new AppError(409, 'PROCUREMENT_FAILURE_DUPLICATE', '采购失败申请已存在')
+        }
+        const request: ProcurementFailureRequest = { id: existing?.id ?? `PFAIL-${randomUUID()}`,
+          projectId, reason, status: '待公司复核', requestedBy: actor.userId,
+          requestedAt: new Date().toISOString() }
+        await procurementFailureRequests.replaceOne({ projectId }, request, { upsert: true, session })
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '申请采购失败终止',
+          target: projectId, before: { status: project.status }, after: { requestId: request.id, reason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { request, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.request, message: '已提交公司复核' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROCUREMENT_FAILURE_DUPLICATE', message: '采购失败申请已存在' })
+      throw error
+    }
+  }
+  const procurementFailureReviewMatch = pathname.match(/^\/api\/procurement-failure-requests\/([^/]+)\/review$/)
+  if (procurementFailureReviewMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const id = decodeURIComponent(procurementFailureReviewMatch[1])
+    const action = body.action === 'approve' ? 'approve' : body.action === 'reject' ? 'reject' : ''
+    const reviewReason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (!action || (action === 'reject' && (reviewReason.length < 5 || reviewReason.length > 200))) {
+      return send(res, 400, { error: 'PROCUREMENT_FAILURE_REVIEW_INVALID', message: '复核操作无效，驳回原因须为 5 至 200 字' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const request = await procurementFailureRequests.findOne({ id }, { session })
+        if (!request || request.status !== '待公司复核') throw new AppError(409, 'PROCUREMENT_FAILURE_CHANGED', '申请不存在或已复核')
+        const project = await repositories.projects.getById(request.projectId, session)
+        if (!project || !['待回款', '回款中', '待分配', '分配中'].includes(project.status)) {
+          throw new AppError(409, 'PROCUREMENT_FAILURE_STATE_INVALID', '众筹单状态已变化')
+        }
+        if (await distributionOrders.findOne({ projectId: project.id,
+          status: { $nin: ['待审批', '已驳回', '已作废'] } }, { session })) {
+          throw new AppError(409, 'DISTRIBUTION_ALREADY_APPROVED', '分配单已审批，不能终止')
+        }
+        const reviewedAt = new Date().toISOString()
+        const reviewed: ProcurementFailureRequest = { ...request, status: action === 'approve' ? '已通过' : '已驳回',
+          reviewedBy: actor.userId, reviewedAt, ...(action === 'reject' ? { reviewReason } : {}) }
+        const changed = await procurementFailureRequests.replaceOne({ id, status: '待公司复核' }, reviewed, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROCUREMENT_FAILURE_CHANGED', '申请已变化')
+        let updatedProject: Project | undefined
+        const updatedRecords: Subscription[] = []
+        if (action === 'approve') {
+          const records = await repositories.subscriptions.list({ projectId: project.id }, {}, session)
+          if (records.some(record => record.pay === '待复核' || record.pay === '待确认收款')) {
+            throw new AppError(409, 'PROCUREMENT_FAILURE_PENDING_REVIEW', '仍有待复核款项，请先核对到账并处理异常款项')
+          }
+          const contributions = await fundLedger.listProjectContributions(project.id, session)
+          const refundOrders: ProjectRefund[] = []
+          for (const record of records) {
+            const fundedCents = contributions.filter(entry => entry.subscriptionId === record.id)
+              .reduce((sum, entry) => sum + entry.amountCents, 0)
+            if (record.userId !== 'company' && ((record.pay === '已缴款' && fundedCents !== Math.round(record.amount * 100))
+              || (record.pay === '部分缴款' && (fundedCents <= 0 || fundedCents > Math.round(record.amount * 100)))
+              || (!['已缴款', '部分缴款'].includes(record.pay) && fundedCents !== 0))) {
+              throw new AppError(409, 'FUNDING_LEDGER_INCONSISTENT', '员工缴款与资金台账不一致，不能终止')
+            }
+            if (record.userId !== 'company' && fundedCents > 0) {
+              refundOrders.push({ id: `REF-${randomUUID()}`, projectId: project.id,
+                subscriptionId: record.id, participantId: record.userId, amountCents: fundedCents,
+                reason: '采购失败退款', status: '待退款', createdAt: reviewedAt })
+              updatedRecords.push({ ...record, pay: '待退款', action: '等待退款' })
+            } else updatedRecords.push({ ...record, pay: '已释放', action: '认购已作废' })
+          }
+          updatedProject = { ...project, status: '采购失败终止中', statusType: 'warning',
+            interruptReason: request.reason, interruptedAt: reviewedAt } as Project
+          await repositories.projects.replace(updatedProject, session)
+          await distributionOrders.updateMany({ projectId: project.id,
+            status: { $in: ['待审批', '已驳回'] } }, { $set: { status: '已作废',
+              voidedBy: actor.userId, voidedAt: reviewedAt } }, { session })
+          for (const record of updatedRecords) await repositories.subscriptions.replace(record, session)
+          if (refundOrders.length) await projectRefunds.insertMany(refundOrders, { session })
+        }
+        const audit = auditRecord({ actor: actor.label, role: actor.role, action: '复核采购失败终止',
+          target: id, before: { status: request.status }, after: { status: reviewed.status,
+            reviewReason, refundCount: updatedRecords.filter(item => item.pay === '待退款').length } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { reviewed, updatedProject, updatedRecords, audit }
+      })
+      if (result.updatedProject) {
+        const index = projects.findIndex(item => item.id === result.updatedProject?.id)
+        if (index >= 0) projects.splice(index, 1, result.updatedProject)
+      }
+      for (const record of result.updatedRecords) {
+        const index = subscriptions.findIndex(item => item.id === record.id)
+        if (index >= 0) subscriptions.splice(index, 1, record)
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.reviewed, message: action === 'approve' ? '复核通过' : '已驳回' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROCUREMENT_FAILURE_DUPLICATE', message: '退款事项已存在' })
       throw error
     }
   }
@@ -1725,6 +1889,145 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       return send(res, 200, { data: { projectId, status: '已关闭', closedAt: result.closedAt }, message: '众筹单已关闭' })
     } catch (error) {
       if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      throw error
+    }
+  }
+  const supplierRefundMatch = pathname.match(/^\/api\/projects\/([^/]+)\/supplier-refunds$/)
+  if (supplierRefundMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(supplierRefundMatch[1])
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'SUPPLIER_REFUND_PROOFS_INVALID', message: '请提供供应商退款凭证编号' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        const payment = await procurementPayments.findOne({ projectId }, { session })
+        if (!project || project.status !== '采购失败终止中' || !payment) {
+          throw new AppError(409, 'PROJECT_NOT_TERMINATING', '众筹单当前不可登记供应商退款')
+        }
+        const prior = await supplierRefunds.find({ projectId }, { session }).toArray()
+        const record = validateSupplierRefund({ id: `SREF-${randomUUID()}`, projectId,
+          amountCents: body.amountCents as number,
+          transactionNo: typeof body.transactionNo === 'string' ? body.transactionNo : '',
+          refundedAt: body.refundedAt as string, proofAssetIds: body.proofAssetIds as string[],
+          manualVerificationNote: typeof body.manualVerificationNote === 'string' ? body.manualVerificationNote : '',
+          registeredBy: actor.userId }, payment.amountCents,
+        prior.reduce((sum, item) => sum + item.amountCents, 0), new Date())
+        const occupied = await bankTransactions.findOne({ transactionNo: record.transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .findOne({ transactionNo: record.transactionNo }, { session })
+        if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '供应商退款流水号已被使用')
+        for (const assetId of record.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'supplier-refund-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== projectId || asset.createdBy !== actor.userId
+            || await supplierRefunds.findOne({ proofAssetIds: assetId }, { session })) {
+            throw new AppError(409, 'SUPPLIER_REFUND_PROOF_INVALID', '供应商退款凭证不存在、未留存或已被使用')
+          }
+        }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId, status: '采购失败终止中' }, { $inc: { refundRevision: 1 } }, { session })
+        await supplierRefunds.insertOne(record, { session })
+        const createdAt = new Date().toISOString()
+        await bankTransactions.insertOne({ transactionNo: record.transactionNo,
+          sourceKey: `supplier-refund:${record.id}`, projectId, createdAt }, { session })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `supplier-refund:${record.id}`,
+          type: 'supplier_refund', projectId, amountCents: record.amountCents,
+          transactionNo: record.transactionNo, transactionKey: `supplier-refund:${record.id}`,
+          proofAssetIds: record.proofAssetIds, reviewedBy: actor.userId, createdAt
+        }, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记供应商退款',
+          target: record.id, before: {}, after: { projectId, amountCents: record.amountCents,
+            transactionNo: record.transactionNo } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { record, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.record, message: '供应商退款登记成功' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'SUPPLIER_REFUND_DUPLICATE', message: '供应商退款流水号或凭证已登记' })
+      if (error instanceof Error && /供应商|凭证|退款|流水号|时间/.test(error.message)) {
+        return send(res, 400, { error: 'SUPPLIER_REFUND_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const finishProcurementFailureMatch = pathname.match(/^\/api\/projects\/([^/]+)\/finish-procurement-failure$/)
+  if (finishProcurementFailureMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(finishProcurementFailureMatch[1])
+    if (body.supplierRefundFinalConfirmed !== true) {
+      return send(res, 400, { error: 'SUPPLIER_REFUND_FINAL_UNCONFIRMED', message: '请确认供应商退款已最终核实，包括未退或少退情况' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        const payment = await procurementPayments.findOne({ projectId }, { session })
+        if (!project || project.status !== '采购失败终止中' || !payment) {
+          throw new AppError(409, 'PROJECT_NOT_TERMINATING', '众筹单当前不可完成采购失败终止')
+        }
+        const pending = await projectRefunds.countDocuments({ projectId, status: { $ne: '已退款' } }, { session })
+        if (pending) throw new AppError(409, 'PROJECT_REFUNDS_PENDING', `仍有 ${pending} 笔员工退款待确认`)
+        const receipts = await receiptBatches.countDocuments({ 'lines.projectId': projectId,
+          status: { $ne: '已驳回' } }, { session })
+        if (receipts) throw new AppError(409, 'CUSTOMER_RECEIPTS_PENDING_REFUND', '已有客户回款，请先核对并通过异常款项完成退回')
+        const exceptions = await exceptionFunds.countDocuments({ projectId, remainingCents: { $gt: 0 } }, { session })
+        if (exceptions) throw new AppError(409, 'EXCEPTION_FUNDS_PENDING', `仍有 ${exceptions} 笔异常款项未处理`)
+        const contributions = await fundLedger.listProjectContributions(projectId, session)
+        const employeeCents = contributions.reduce((sum, item) => sum + item.amountCents, 0)
+        const ledger = mongo.db.collection<{ projectId: string; type: string; amountCents: number }>(
+          `${appConfig.mongodb.collectionPrefix}fund_ledger`)
+        const companyEntries = await ledger.find({ projectId, type: 'company_contribution' }, { session }).toArray()
+        const companyCents = companyEntries.reduce((sum, item) => sum + item.amountCents, 0)
+        const confirmedRefunds = await ledger.find({ projectId, type: 'subscription_refund_confirmed' }, { session }).toArray()
+        const employeeRefundCents = confirmedRefunds.reduce((sum, item) => sum + item.amountCents, 0)
+        const supplierRecords = await supplierRefunds.find({ projectId }, { session }).toArray()
+        const supplierCents = supplierRecords.reduce((sum, item) => sum + item.amountCents, 0)
+        if (employeeCents + companyCents !== payment.amountCents || employeeRefundCents !== employeeCents
+          || supplierCents > payment.amountCents) {
+          throw new AppError(409, 'PROCUREMENT_FAILURE_RECONCILIATION_FAILED', '采购失败终止资金台账不相符')
+        }
+        const companyBackstopCents = Math.max(0, employeeCents - supplierCents)
+        const companyReturnCents = Math.max(0, supplierCents - employeeCents)
+        const companyLossCents = payment.amountCents - supplierCents
+        const netCents = employeeCents + companyCents + companyBackstopCents + supplierCents
+          - payment.amountCents - employeeRefundCents - companyReturnCents
+        if (netCents !== 0) throw new AppError(409, 'PROCUREMENT_FAILURE_NET_NONZERO', `台账净额不为零：${(netCents / 100).toFixed(2)} 元`)
+        const finishedAt = new Date().toISOString()
+        for (const [type, amountCents] of [
+          ['company_termination_backstop', companyBackstopCents],
+          ['company_capital_return', companyReturnCents],
+          ['company_loss', companyLossCents]
+        ] as const) {
+          if (!amountCents) continue
+          await ledger.insertOne({ id: `LED-${randomUUID()}`, sourceKey: `${type}:${projectId}`,
+            type, projectId, amountCents, transactionKey: `${type}:${projectId}`,
+            proofAssetIds: [], reviewedBy: actor.userId, createdAt: finishedAt } as never, { session })
+        }
+        const changed = await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId, status: '采购失败终止中' }, { $set: { status: '已终止',
+            statusType: 'info', closedAt: finishedAt, closedBy: actor.userId,
+            terminationSupplierFinalConfirmedAt: finishedAt } }, { session })
+        if (changed.modifiedCount !== 1) throw new AppError(409, 'PROJECT_CHANGED', '众筹单状态已变化')
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '完成采购失败终止',
+          target: projectId, before: { status: project.status }, after: { status: '已终止',
+            supplierCents, employeeRefundCents, companyBackstopCents, companyReturnCents, companyLossCents,
+            netCents, supplierRefundFinalConfirmed: true } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { audit, finishedAt, supplierCents, employeeRefundCents, companyBackstopCents,
+          companyReturnCents, companyLossCents, netCents }
+      })
+      const index = projects.findIndex(item => item.id === projectId)
+      if (index >= 0) projects.splice(index, 1, { ...projects[index], status: '已终止',
+        statusType: 'info', closedAt: result.finishedAt, closedBy: actor.userId })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: { projectId, status: '已终止', ...result }, message: '采购失败终止已完成' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PROCUREMENT_FAILURE_DUPLICATE', message: '终止台账已登记' })
       throw error
     }
   }

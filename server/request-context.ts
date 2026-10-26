@@ -49,6 +49,7 @@ export async function authorizeAssetRead(context: RequestContext, asset: FileAss
   if (asset.purpose === 'exception-fund-proof' && context.role === 'finance') return
   if (asset.purpose === 'exception-refund-proof' && context.role === 'finance') return
   if (asset.purpose === 'subscription-refund-proof' && context.role === 'finance') return
+  if (asset.purpose === 'supplier-refund-proof' && context.role === 'finance') return
   if (asset.purpose === 'subscription-refund-proof' && context.role === 'employee') {
     const subscription = await repos.subscriptions.getById(asset.ownerId)
     if (subscription?.userId === context.userId) return

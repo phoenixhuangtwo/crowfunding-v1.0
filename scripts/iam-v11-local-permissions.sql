@@ -378,3 +378,64 @@ WHERE role.code IN ('crowdfunding_finance', 'crowdfunding_super_admin') AND role
     AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
 
 COMMIT;
+
+-- V1.1 采购失败终止与供应商退款权限
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', codes.code, codes.name, codes.method, codes.path, 0, 'v11-local', 'v11-local'
+FROM (
+  SELECT 'crowdfunding:procurement-failure:request' AS code, '申请采购失败终止' AS name, 'POST' AS method, '/api/projects/*/procurement-failure' AS path
+  UNION ALL SELECT 'crowdfunding:procurement-failure:query', '查询采购失败申请', 'GET', '/api/procurement-failure-requests'
+  UNION ALL SELECT 'crowdfunding:procurement-failure:review', '复核采购失败申请', 'POST', '/api/procurement-failure-requests/*/review'
+  UNION ALL SELECT 'crowdfunding:procurement-failure:finish', '完成采购失败终止', 'POST', '/api/projects/*/finish-procurement-failure'
+  UNION ALL SELECT 'crowdfunding:supplier-refund:query', '供应商退款查询', 'GET', '/api/supplier-refunds'
+  UNION ALL SELECT 'crowdfunding:supplier-refund:proof-upload', '供应商退款凭证上传', 'POST', '/api/projects/*/supplier-refund-proofs'
+  UNION ALL SELECT 'crowdfunding:supplier-refund:register', '供应商退款登记', 'POST', '/api/projects/*/supplier-refunds'
+) codes
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
+  AND resource.code = codes.code AND resource.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:procurement-failure:request', 'crowdfunding:procurement-failure:query')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:procurement-failure:query', 'crowdfunding:procurement-failure:review',
+    'crowdfunding:supplier-refund:query') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:procurement-failure:finish', 'crowdfunding:supplier-refund:query',
+    'crowdfunding:supplier-refund:proof-upload', 'crowdfunding:supplier-refund:register')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_menu (client_id, parent_id, name, component_name, type, sort, visible, permission, status, tenant_id)
+SELECT 'crowdfunding', parent.id, '采购失败终止', 'procurementFailure', 2, 67, 0,
+  'crowdfunding:procurement-failure:query', 0, 0
+FROM system_menu parent
+WHERE parent.client_id = 'crowdfunding' AND parent.component_name = 'crowdfunding'
+  AND parent.tenant_id = 0 AND parent.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_menu WHERE client_id = 'crowdfunding'
+    AND component_name = 'procurementFailure' AND tenant_id = 0 AND deleted = b'0');
+
+INSERT INTO system_role_menu (role_id, menu_id, tenant_id)
+SELECT role.id, menu.id, 0
+FROM system_role role JOIN system_menu menu ON menu.client_id = 'crowdfunding'
+  AND menu.component_name = 'procurementFailure' AND menu.tenant_id = 0 AND menu.deleted = b'0'
+WHERE role.code IN ('crowdfunding_admin', 'crowdfunding_finance', 'crowdfunding_super_admin')
+  AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_menu grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');

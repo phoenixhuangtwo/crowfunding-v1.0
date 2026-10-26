@@ -4,7 +4,7 @@ export type ProjectRefund = {
   subscriptionId: string
   participantId: string
   amountCents: number
-  reason: '众筹关闭退款'
+  reason: '众筹关闭退款' | '采购失败退款'
   status: '待退款' | '待员工确认' | '已退款'
   createdAt: string
   transactionNo?: string

@@ -15,6 +15,8 @@ export const businessCollections = [
   'confirmed_costs',
   'exception_funds',
   'project_refunds',
+  'procurement_failure_requests',
+  'supplier_refunds',
   'risk_events',
   'file_assets'
 ] as const
@@ -43,6 +45,8 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   confirmed_costs: [],
   exception_funds: [],
   project_refunds: [],
+  procurement_failure_requests: [],
+  supplier_refunds: [],
   risk_events: [],
   file_assets: []
 }
@@ -131,6 +135,15 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'uniq_project_refund_subscription', key: { subscriptionId: 1 }, unique: true },
     { name: 'idx_project_refund_project_status', key: { projectId: 1, status: 1 } },
     { name: 'idx_project_refund_participant', key: { participantId: 1, createdAt: -1 } }
+  ],
+  procurement_failure_requests: [
+    { name: 'uniq_procurement_failure_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_procurement_failure_project', key: { projectId: 1 }, unique: true }
+  ],
+  supplier_refunds: [
+    { name: 'uniq_supplier_refund_id', key: { id: 1 }, unique: true },
+    { name: 'idx_supplier_refund_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'uniq_supplier_refund_transaction', key: { transactionNo: 1 }, unique: true }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

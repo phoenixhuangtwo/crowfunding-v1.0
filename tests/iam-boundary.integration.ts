@@ -738,6 +738,98 @@ try {
   assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-CLOSE' }))?.reopenedByProjectId,
     reopenedProject.id)
   assert.equal((await postAs('/api/projects/PRJ-IAM-CLOSE/reopen', 'smoke-admin-full-token', {})).status, 409)
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-FAIL', title: '采购失败终止测试', source: 'integration-test',
+    tenantId: '0', ownerUserId: '1002', ownerDeptId: '200',
+    status: '待回款', statusType: 'warning', progress: 100, remain: 0, deadline: '2099-12-31 12:00',
+    total: 100, costAmount: 100, salesAmount: 120, profitAmount: 20,
+    companyFixedAmount: 30, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 70, subscribed: 100, people: 1,
+    purchasePaymentId: 'PPAY-IAM-FAIL', purchasePaidAmount: 100
+  })
+  await db.collection(`${prefix}subscriptions`).insertMany([
+    { id: 'SUB-IAM-FAIL', projectId: 'PRJ-IAM-FAIL', project: '采购失败终止测试',
+      userId: '1001', amount: 70, shares: 7, pay: '已缴款', profit: 0,
+      action: '查看支付', idempotencyKey: 'SUB-IAM-FAIL', createdAt: new Date().toISOString(),
+      paymentDeadlineAt: '2099-12-31 12:00' },
+    { id: 'SUB-IAM-FAIL-COMPANY', projectId: 'PRJ-IAM-FAIL', project: '采购失败终止测试',
+      userId: 'company', companyKind: 'front', amount: 30, shares: 3, pay: '已缴款', profit: 0,
+      action: '查看出资', idempotencyKey: 'SUB-IAM-FAIL-COMPANY', createdAt: new Date().toISOString(),
+      paymentDeadlineAt: '2099-12-31 12:00' }
+  ])
+  await db.collection(`${prefix}procurement_payments`).insertOne({ id: 'PPAY-IAM-FAIL', projectId: 'PRJ-IAM-FAIL',
+    amountCents: 10000, transactionNo: 'BANK-IAM-FAIL-PROCUREMENT', paidAt: new Date().toISOString(),
+    proofAssetIds: [], operatorId: '1003', createdAt: new Date().toISOString() })
+  await db.collection(`${prefix}fund_ledger`).insertMany([
+    { id: 'LED-IAM-FAIL-EMP', sourceKey: 'contribution:SUB-IAM-FAIL', type: 'employee_contribution',
+      projectId: 'PRJ-IAM-FAIL', subscriptionId: 'SUB-IAM-FAIL', participantId: '1001', shares: 7,
+      amountCents: 7000, transactionNo: 'BANK-IAM-FAIL-CONTRIBUTION', transactionKey: 'BANK-IAM-FAIL-CONTRIBUTION',
+      proofAssetIds: [], reviewedBy: '1003', createdAt: new Date().toISOString() },
+    { id: 'LED-IAM-FAIL-COMP', sourceKey: 'company-contribution:SUB-IAM-FAIL-COMPANY', type: 'company_contribution',
+      projectId: 'PRJ-IAM-FAIL', subscriptionId: 'SUB-IAM-FAIL-COMPANY', participantId: 'company', shares: 3,
+      amountCents: 3000, transactionKey: 'company-contribution:SUB-IAM-FAIL-COMPANY',
+      proofAssetIds: [], reviewedBy: '1003', createdAt: new Date().toISOString() },
+    { id: 'LED-IAM-FAIL-PAY', sourceKey: 'procurement-payment:PRJ-IAM-FAIL', type: 'procurement_payment',
+      projectId: 'PRJ-IAM-FAIL', amountCents: 10000, transactionNo: 'BANK-IAM-FAIL-PROCUREMENT',
+      transactionKey: 'bank:BANK-IAM-FAIL-PROCUREMENT', proofAssetIds: [],
+      reviewedBy: '1003', createdAt: new Date().toISOString() }
+  ])
+  const failPath = '/api/projects/PRJ-IAM-FAIL/procurement-failure'
+  assert.equal((await postAs(failPath, 'smoke-finance-token', { reason: '供应商未能完成采购交付' })).status, 403)
+  const failRequested = await postAs(failPath, 'smoke-admin-full-token', { reason: '供应商未能完成采购交付' })
+  assert.equal(failRequested.status, 201, JSON.stringify(failRequested.body))
+  const failRequestId = (failRequested.body.data as { id: string }).id
+  assert.equal((await postAs(failPath, 'smoke-admin-full-token', { reason: '重复申请采购失败终止' })).status, 409)
+  const reviewFailPath = `/api/procurement-failure-requests/${failRequestId}/review`
+  await db.collection(`${prefix}distribution_orders`).insertOne({ id: 'DIST-IAM-FAIL-PENDING',
+    projectId: 'PRJ-IAM-FAIL', status: '待审批', lines: [], createdAt: new Date().toISOString() })
+  assert.equal((await postAs(reviewFailPath, 'smoke-finance-token', { action: 'approve' })).status, 403)
+  await db.collection(`${prefix}subscriptions`).insertOne({ id: 'SUB-IAM-FAIL-PENDING',
+    projectId: 'PRJ-IAM-FAIL', project: '采购失败终止测试', userId: '1001', amount: 10,
+    pay: '待复核', idempotencyKey: 'SUB-IAM-FAIL-PENDING' })
+  assert.equal((await postAs(reviewFailPath, 'smoke-super-admin-token', { action: 'approve' })).status, 409)
+  await db.collection(`${prefix}subscriptions`).deleteOne({ id: 'SUB-IAM-FAIL-PENDING' })
+  const failApproved = await postAs(reviewFailPath, 'smoke-super-admin-token', { action: 'approve' })
+  assert.equal(failApproved.status, 200, JSON.stringify(failApproved.body))
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-FAIL' }))?.status, '采购失败终止中')
+  assert.equal((await db.collection(`${prefix}distribution_orders`).findOne({ id: 'DIST-IAM-FAIL-PENDING' }))?.status, '已作废')
+  const failRefund = await db.collection(`${prefix}project_refunds`).findOne({ projectId: 'PRJ-IAM-FAIL' })
+  assert.equal(failRefund?.amountCents, 7000)
+  assert.equal(failRefund?.reason, '采购失败退款')
+  await db.collection(`${prefix}file_assets`).insertMany([
+    { id: 'ASSET-IAM-FAIL-SUPPLIER', provider: 'tencent-cos', bucket: 'test', region: 'test',
+      objectKey: 'test/supplier-refund-proof/ASSET-IAM-FAIL-SUPPLIER.png', originalName: 'supplier.png',
+      extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'a'.repeat(64),
+      purpose: 'supplier-refund-proof', ownerType: 'project', ownerId: 'PRJ-IAM-FAIL',
+      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' },
+    { id: 'ASSET-IAM-FAIL-EMPLOYEE', provider: 'tencent-cos', bucket: 'test', region: 'test',
+      objectKey: 'test/subscription-refund-proof/ASSET-IAM-FAIL-EMPLOYEE.png', originalName: 'employee.png',
+      extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'b'.repeat(64),
+      purpose: 'subscription-refund-proof', ownerType: 'subscription', ownerId: 'SUB-IAM-FAIL',
+      status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00' }
+  ])
+  const supplierPath = '/api/projects/PRJ-IAM-FAIL/supplier-refunds'
+  const supplierInput = { amountCents: 6000, transactionNo: 'BANK-IAM-FAIL-SUPPLIER',
+    refundedAt: new Date(Date.now() - 60_000).toISOString(), proofAssetIds: ['ASSET-IAM-FAIL-SUPPLIER'],
+    manualVerificationNote: '已核对供应商退款入账流水' }
+  assert.equal((await postAs(supplierPath, 'smoke-finance-token', { ...supplierInput, amountCents: 10001 })).status, 400)
+  const supplierCreated = await postAs(supplierPath, 'smoke-finance-token', supplierInput)
+  assert.equal(supplierCreated.status, 201, JSON.stringify(supplierCreated.body))
+  assert.equal((await postAs(supplierPath, 'smoke-finance-token', { ...supplierInput, amountCents: 3000 })).status, 409)
+  const finishFailPath = '/api/projects/PRJ-IAM-FAIL/finish-procurement-failure'
+  assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
+  const failRefundPayment = await postAs(`/api/project-refunds/${failRefund?.id}/payment`, 'smoke-finance-token', {
+    amountCents: 7000, transactionNo: 'BANK-IAM-FAIL-EMPLOYEE-REFUND',
+    paidAt: new Date(Date.now() - 60_000).toISOString(), proofAssetIds: ['ASSET-IAM-FAIL-EMPLOYEE'],
+    manualVerificationNote: '已人工核对员工全额退款流水' })
+  assert.equal(failRefundPayment.status, 200, JSON.stringify(failRefundPayment.body))
+  assert.equal((await postAs(`/api/project-refunds/${failRefund?.id}/confirm`, 'smoke-employee-token', {})).status, 200)
+  const failFinished = await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })
+  assert.equal(failFinished.status, 200, JSON.stringify(failFinished.body))
+  assert.equal((failFinished.body.data as { companyBackstopCents: number; companyLossCents: number }).companyBackstopCents, 1000)
+  assert.equal((failFinished.body.data as { companyLossCents: number }).companyLossCents, 4000)
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-FAIL' }))?.status, '已终止')
+  assert.equal((await postAs(finishFailPath, 'smoke-finance-token', { supplierRefundFinalConfirmed: true })).status, 409)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

@@ -38,6 +38,7 @@ import CustomerReceiptsPage from './components/CustomerReceiptsPage.vue'
 import DistributionOrdersPage from './components/DistributionOrdersPage.vue'
 import ExceptionFundsPage from './components/ExceptionFundsPage.vue'
 import ProjectRefundsPage from './components/ProjectRefundsPage.vue'
+import ProcurementFailurePage from './components/ProcurementFailurePage.vue'
 import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -58,6 +59,7 @@ type PageKey =
   | 'distributionOrders'
   | 'exceptionFunds'
   | 'projectRefunds'
+  | 'procurementFailure'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -73,7 +75,7 @@ type Project = {
   reopenedByProjectId?: string
   createdAt?: string
   projectOwner?: string
-  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '部分已结算' | '已完结'
+  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
   remain: number
@@ -274,6 +276,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
       { key: 'distributionOrders', label: '利润分配', req: 'P0', icon: Money, permission: 'crowdfunding:distribution:query' },
       { key: 'exceptionFunds', label: '异常款项', req: 'P0', icon: Money, permission: 'crowdfunding:exception-fund:query' },
       { key: 'projectRefunds', label: '项目退款', req: 'P0', icon: Money, permission: 'crowdfunding:project-refund:query' },
+      { key: 'procurementFailure', label: '采购失败终止', req: 'P1', icon: Money, permission: 'crowdfunding:procurement-failure:query' },
       { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money, permission: 'crowdfunding:settlement:query' }
     ]
   }
@@ -296,6 +299,7 @@ const pageTitleMap: Record<PageKey, string> = {
   distributionOrders: '利润分配',
   exceptionFunds: '异常款项',
   projectRefunds: '项目退款',
+  procurementFailure: '采购失败终止',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -618,7 +622,7 @@ const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
 const authorizedPageKeys = computed(() => new Set(allowedPageKeys(authSession.permissionInfo.value)))
 const visibleNavGroups = computed(() => navGroups.map(group => ({
   ...group,
-  pages: group.pages.filter(page => (!limitedAdmin.value || page.key === 'adminProjects')
+  pages: group.pages.filter(page => (!limitedAdmin.value || page.key === 'adminProjects' || page.key === 'procurementFailure')
     && !hiddenNavPageKeys.has(page.key) && authorizedPageKeys.value.has(page.key as AuthorizedPageKey)
     && canUi(authSession.permissionInfo.value, page.permission))
 })).filter(group => group.pages.length > 0))
@@ -1340,6 +1344,7 @@ async function handleAdminProjectMoreCommand(command: string, project: Project) 
     return
   }
   if (command === 'close') { await closeProject(project); return }
+  if (command === 'procurementFailure') { await requestProcurementFailure(project); return }
   if (command === 'reopen') { await reopenProject(project); return }
   if (command === 'takeover') await forceTakeover(project)
 }
@@ -1359,6 +1364,21 @@ async function closeProject(project: Project) {
     ElMessage.success(result.message)
     await loadData()
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '发起关闭失败') }
+}
+
+async function requestProcurementFailure(project: Project) {
+  let reason = ''
+  try {
+    reason = (await ElMessageBox.prompt('请填写 5 至 200 字采购失败原因', '采购失败终止申请', { inputType: 'textarea' })).value.trim()
+    if (reason.length < 5 || reason.length > 200) { ElMessage.warning('终止原因须为 5 至 200 字'); return }
+    await ElMessageBox.confirm('公司复核通过后，将按员工已生效缴款足额生成退款事项。确认提交？', '提交公司复核', { type: 'warning' })
+  } catch { return }
+  try {
+    const result = await api<{ message: string }>(`/api/projects/${encodeURIComponent(project.id)}/procurement-failure`, {
+      method: 'POST', body: JSON.stringify({ reason }) })
+    ElMessage.success(result.message)
+    await loadData()
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '提交采购失败申请失败') }
 }
 
 async function reopenProject(project: Project) {
@@ -2962,7 +2982,7 @@ watch(() => authSession.permissionInfo.value, info => {
                       开放
                     </el-button>
                     <el-dropdown
-                      v-if="(adminProjectActionLayout(row).showMore || ['已满额', '已截止', '已关闭'].includes(row.status)) && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:close') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
+                      v-if="(adminProjectActionLayout(row).showMore || ['已满额', '已截止', '已关闭', '待回款', '回款中', '待分配', '分配中'].includes(row.status)) && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:close') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen') || canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:request') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
                       trigger="click"
                       popper-class="project-action-menu"
                       @command="handleAdminProjectMoreCommand($event, row)"
@@ -2988,6 +3008,11 @@ watch(() => authSession.permissionInfo.value, info => {
                             v-if="row.status === '已关闭' && !row.reopenedByProjectId && canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen')"
                             command="reopen"
                           >重开众筹单</el-dropdown-item>
+                          <el-dropdown-item
+                            v-if="['待回款', '回款中', '待分配', '分配中'].includes(row.status) && canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:request')"
+                            command="procurementFailure"
+                            class="danger-menu-item"
+                          >申请采购失败终止</el-dropdown-item>
                           <el-dropdown-item
                             v-if="adminProjectActionLayout(row).showTakeover && canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force')"
                             command="takeover"
@@ -3323,6 +3348,18 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-register="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:register')"
           :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:project-refund:proof-upload')"
           :can-finish-close="canApi(authSession.permissionInfo.value, 'crowdfunding:project:finish-close')"
+          @updated="loadData"
+        />
+
+        <ProcurementFailurePage
+          v-if="currentPage === 'procurementFailure' && (currentRole === 'admin' || currentRole === 'finance' || currentRole === 'super_admin')"
+          :projects="projects" :role="currentRole"
+          :can-query-requests="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:query')"
+          :can-review="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:review')"
+          :can-query-refunds="canApi(authSession.permissionInfo.value, 'crowdfunding:supplier-refund:query')"
+          :can-register-refund="canApi(authSession.permissionInfo.value, 'crowdfunding:supplier-refund:register')"
+          :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:supplier-refund:proof-upload')"
+          :can-finish="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:finish')"
           @updated="loadData"
         />
 

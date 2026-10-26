@@ -32,6 +32,10 @@ const allApiPermissions = [
   'crowdfunding:exception-fund:transfer', 'crowdfunding:exception-fund:transfer-review',
   'crowdfunding:exception-fund:assign-project',
   'crowdfunding:project:close', 'crowdfunding:project:reopen', 'crowdfunding:project:finish-close',
+  'crowdfunding:procurement-failure:request', 'crowdfunding:procurement-failure:query',
+  'crowdfunding:procurement-failure:review', 'crowdfunding:procurement-failure:finish',
+  'crowdfunding:supplier-refund:query', 'crowdfunding:supplier-refund:proof-upload',
+  'crowdfunding:supplier-refund:register',
   'crowdfunding:project-refund:query', 'crowdfunding:project-refund:my-query',
   'crowdfunding:project-refund:proof-upload', 'crowdfunding:project-refund:register',
   'crowdfunding:project-refund:confirm',
@@ -70,7 +74,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-admin-token', userId: 1002, username: 'admin01', nickname: '部门管理员', deptId: 200,
-    roles: ['crowdfunding_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:rule:query', 'crowdfunding:subscription:query', 'crowdfunding:receiving-code:query', 'crowdfunding:takeover:query'],
+    roles: ['crowdfunding_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:rule:query', 'crowdfunding:subscription:query', 'crowdfunding:receiving-code:query', 'crowdfunding:takeover:query', 'crowdfunding:procurement-failure:request', 'crowdfunding:procurement-failure:query'],
     dataScope: { all: false, self: false, deptIds: [200] }
   },
   {
@@ -85,7 +89,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-finance-token', userId: 1003, username: 'finance01', nickname: '财务', deptId: 200,
-    roles: ['crowdfunding_finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice', 'crowdfunding:procurement-payment:register', 'crowdfunding:procurement-payment:proof-upload', 'crowdfunding:receipt:query', 'crowdfunding:receipt:register', 'crowdfunding:receipt:proof-upload', 'crowdfunding:receipt:difference-register', 'crowdfunding:receipt:review', 'crowdfunding:distribution:query', 'crowdfunding:distribution:generate', 'crowdfunding:distribution:approve', 'crowdfunding:distribution:reject', 'crowdfunding:distribution:void', 'crowdfunding:distribution:close', 'crowdfunding:cost:query', 'crowdfunding:cost:register', 'crowdfunding:cost:proof-upload', 'crowdfunding:payout:register', 'crowdfunding:payout:proof-upload', 'crowdfunding:payout:issue-reply', 'crowdfunding:financial-reconciliation:query', 'crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:register', 'crowdfunding:exception-fund:proof-upload', 'crowdfunding:exception-fund:refund', 'crowdfunding:exception-fund:refund-proof-upload', 'crowdfunding:exception-fund:transfer', 'crowdfunding:exception-fund:assign-project', 'crowdfunding:project:finish-close', 'crowdfunding:project-refund:query', 'crowdfunding:project-refund:proof-upload', 'crowdfunding:project-refund:register'],
+    roles: ['crowdfunding_finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice', 'crowdfunding:procurement-payment:register', 'crowdfunding:procurement-payment:proof-upload', 'crowdfunding:receipt:query', 'crowdfunding:receipt:register', 'crowdfunding:receipt:proof-upload', 'crowdfunding:receipt:difference-register', 'crowdfunding:receipt:review', 'crowdfunding:distribution:query', 'crowdfunding:distribution:generate', 'crowdfunding:distribution:approve', 'crowdfunding:distribution:reject', 'crowdfunding:distribution:void', 'crowdfunding:distribution:close', 'crowdfunding:cost:query', 'crowdfunding:cost:register', 'crowdfunding:cost:proof-upload', 'crowdfunding:payout:register', 'crowdfunding:payout:proof-upload', 'crowdfunding:payout:issue-reply', 'crowdfunding:financial-reconciliation:query', 'crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:register', 'crowdfunding:exception-fund:proof-upload', 'crowdfunding:exception-fund:refund', 'crowdfunding:exception-fund:refund-proof-upload', 'crowdfunding:exception-fund:transfer', 'crowdfunding:exception-fund:assign-project', 'crowdfunding:project:finish-close', 'crowdfunding:project-refund:query', 'crowdfunding:project-refund:proof-upload', 'crowdfunding:project-refund:register', 'crowdfunding:procurement-failure:finish', 'crowdfunding:supplier-refund:query', 'crowdfunding:supplier-refund:proof-upload', 'crowdfunding:supplier-refund:register'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {
@@ -95,7 +99,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-super-admin-token', userId: 1004, username: 'superadmin01', nickname: '超级管理员', deptId: 900,
-    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:project:open', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query', 'crowdfunding:receipt:query', 'crowdfunding:receipt:review', 'crowdfunding:distribution:query', 'crowdfunding:cost:query', 'crowdfunding:cost:review', 'crowdfunding:financial-reconciliation:query', 'crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:refund-confirm', 'crowdfunding:exception-fund:transfer-review', 'crowdfunding:project-refund:query'],
+    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:project:open', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query', 'crowdfunding:receipt:query', 'crowdfunding:receipt:review', 'crowdfunding:distribution:query', 'crowdfunding:cost:query', 'crowdfunding:cost:review', 'crowdfunding:financial-reconciliation:query', 'crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:refund-confirm', 'crowdfunding:exception-fund:transfer-review', 'crowdfunding:project-refund:query', 'crowdfunding:procurement-failure:query', 'crowdfunding:procurement-failure:review', 'crowdfunding:supplier-refund:query'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {

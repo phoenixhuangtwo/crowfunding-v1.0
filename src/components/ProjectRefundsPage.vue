@@ -6,7 +6,7 @@ import { readAccessToken } from '../auth/session'
 
 type Project = { id: string; title: string; status: string }
 type Refund = { id: string; projectId: string; subscriptionId: string; participantId: string;
-  amountCents: number; status: string; transactionNo?: string; paidAt?: string;
+  amountCents: number; reason: string; status: string; transactionNo?: string; paidAt?: string;
   proofAssetIds?: string[] }
 const props = defineProps<{ projects: Project[]; role: 'finance' | 'super_admin';
   canRegister: boolean; canUploadProof: boolean; canFinishClose: boolean }>()
@@ -116,7 +116,7 @@ async function openProof(assetId: string) {
 
 <template>
   <div>
-    <header class="page-head"><div><h1>项目退款</h1><p>众筹关闭后的员工认购款退款，逐笔登记并由员工确认实际到账。</p></div></header>
+    <header class="page-head"><div><h1>项目退款</h1><p>众筹关闭或采购失败后的员工认购款退款，逐笔登记并由员工确认实际到账。</p></div></header>
     <section class="panel">
       <div class="toolbar"><el-select v-model="projectId" clearable filterable placeholder="全部众筹单"><el-option v-for="project in projects" :key="project.id" :value="project.id" :label="`${project.title} · ${project.id}`" /></el-select><el-button @click="refresh">查询</el-button><el-button v-if="role === 'finance' && canFinishClose && closingProjects.some(project => project.id === projectId)" @click="finishClose">核对并完成关闭</el-button></div>
       <el-table :data="items" v-loading="loading" empty-text="暂无退款事项" style="width:100%">
@@ -124,6 +124,7 @@ async function openProof(assetId: string) {
         <el-table-column prop="projectId" label="众筹单编号" min-width="175" />
         <el-table-column prop="participantId" label="员工" width="110" />
         <el-table-column label="应退金额" width="135"><template #default="scope">{{ money(scope.row.amountCents) }}</template></el-table-column>
+        <el-table-column prop="reason" label="退款类型" width="135" />
         <el-table-column prop="status" label="状态" width="125" />
         <el-table-column label="实际退款" min-width="180"><template #default="scope">{{ scope.row.transactionNo || '-' }}<br>{{ scope.row.paidAt }}<div v-for="assetId in scope.row.proofAssetIds" :key="assetId"><el-button link type="primary" @click="openProof(assetId)">查看退款凭证</el-button></div></template></el-table-column>
         <el-table-column label="操作" width="130"><template #default="scope"><el-button v-if="role === 'finance' && canRegister && scope.row.status === '待退款'" size="small" type="primary" @click="startPayment(scope.row)">登记退款</el-button></template></el-table-column>
