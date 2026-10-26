@@ -580,11 +580,14 @@ receivingCodes.splice(0)
 auditRows.splice(0)
 
 const pageTitle = computed(() => currentPage.value ? pageTitleMap[currentPage.value] : '暂无可用页面')
+const limitedAdmin = computed(() => currentRole.value === 'admin' && authSession.permissionInfo.value?.dataScope?.all !== true)
 const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
 const authorizedPageKeys = computed(() => new Set(allowedPageKeys(authSession.permissionInfo.value)))
 const visibleNavGroups = computed(() => navGroups.map(group => ({
   ...group,
-  pages: group.pages.filter(page => !hiddenNavPageKeys.has(page.key) && authorizedPageKeys.value.has(page.key as AuthorizedPageKey) && canUi(authSession.permissionInfo.value, page.permission))
+  pages: group.pages.filter(page => (!limitedAdmin.value || page.key === 'adminProjects')
+    && !hiddenNavPageKeys.has(page.key) && authorizedPageKeys.value.has(page.key as AuthorizedPageKey)
+    && canUi(authSession.permissionInfo.value, page.permission))
 })).filter(group => group.pages.length > 0))
 const selectedProject = computed(() => projects.find(project => project.id === selectedProjectId.value) ?? projects[0])
 const selectedProjectRule = computed(() => {
@@ -943,7 +946,8 @@ function replaceRows<T>(target: T[], rows: T[]) {
 
 async function loadData() {
   try {
-    const optionalList = <T>(code: string, path: string) => canApi(authSession.permissionInfo.value, code)
+    const optionalList = <T>(code: string, path: string) => (!limitedAdmin.value || path === '/api/projects')
+      && canApi(authSession.permissionInfo.value, code)
       ? api<{ data: T[] }>(path) : Promise.resolve({ data: [] as T[] })
     const [projectPayload, subscriptionPayload, auditPayload, rulePayload, receivingCodePayload] = await Promise.all([
       optionalList<Project>('crowdfunding:project:query', '/api/projects'),
@@ -2722,7 +2726,7 @@ watch(() => authSession.permissionInfo.value, info => {
         </template>
 
         <template v-if="currentPage === 'adminProjects'">
-          <div class="page-head"><div><h1>项目管理</h1><p>MCP 同步、发布与规则配置入口</p></div><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement:sync')" type="primary" @click="syncMcp">同步采购系统（MCP）</el-button></div>
+          <div class="page-head"><div><h1>项目管理</h1><p>{{ limitedAdmin ? '当前可查看待发布采购项目和本人已发布项目' : 'MCP 同步、发布与规则配置入口' }}</p></div><el-button v-if="!limitedAdmin && canApi(authSession.permissionInfo.value, 'crowdfunding:procurement:sync')" type="primary" @click="syncMcp">同步采购系统（MCP）</el-button></div>
           <section class="panel filter-panel">
             <el-input v-model="adminProjectKeyword" clearable placeholder="搜索项目、线下销售单号、创建时间、状态、金额" />
             <el-select v-model="adminProjectStatus" placeholder="项目状态" style="width: 150px">
@@ -2860,7 +2864,7 @@ watch(() => authSession.permissionInfo.value, info => {
               </el-table-column>
               <el-table-column label="操作" width="300" fixed="right">
                 <template #default="{ row }">
-                  <div class="project-action-group">
+                  <div v-if="!limitedAdmin" class="project-action-group">
                     <el-button
                       v-if="adminProjectActionLayout(row).showPayReview && canApi(authSession.permissionInfo.value, 'crowdfunding:payment-review:query')"
                       size="small"
