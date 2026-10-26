@@ -44,6 +44,14 @@ export function proxyConfirmationReminderDue(paidAt: string | undefined, confirm
   return Number.isFinite(paidTime) && paidTime + confirmDays * 24 * 60 * 60 * 1000 <= at.getTime()
 }
 
+export function procurementReadyReminderDue(input: {
+  status: string; paymentCutoffAt?: string; balanced: boolean; hasUnresolvedPayment: boolean
+}, at: Date): boolean {
+  if (!['已满额', '已截止'].includes(input.status) || !input.balanced || input.hasUnresolvedPayment) return false
+  const cutoff = Date.parse(`${input.paymentCutoffAt?.replace(' ', 'T') ?? ''}+08:00`)
+  return Number.isFinite(cutoff) && cutoff <= at.getTime()
+}
+
 export function subscriptionNotification(input: {
   id: string; projectId?: string; userId?: string; paymentDeadlineAt: string
 }, type: '认购成功' | '缴款即将截止' | '缴款已逾期', createdAt: string): Notification | null {

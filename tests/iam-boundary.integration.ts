@@ -62,6 +62,29 @@ try {
       proxyConfirmDays: 7, receiptWarningDays: 30, issueHandlingHours: 72 }
   })
   await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-PROCUREMENT-READY', title: '采购付款待登记提醒项目', source: 'integration-test',
+    status: '已满额', statusType: 'success', progress: 100, remain: 0,
+    deadline: '2020-01-01 00:00', total: 100, costAmount: 100, salesAmount: 120,
+    profitAmount: 20, companyFixedAmount: 0, companyTakeoverAmount: 100,
+    companyForcedTakeoverAmount: 0, employeeSubscribedAmount: 0,
+    subscribed: 100, people: 0, ruleId: 'RULE-IAM-PROCUREMENT-READY'
+  })
+  await db.collection(`${prefix}subscription_rules`).insertOne({
+    id: 'RULE-IAM-PROCUREMENT-READY', projectId: 'PRJ-IAM-PROCUREMENT-READY',
+    projectName: '采购付款待登记提醒项目', ruleName: '采购付款提醒规则',
+    totalAmount: 100, companyFixedAmount: 0, sharePrice: 100, totalShares: 1,
+    companyFrontShares: 0, maxSharesPerEmployee: 1, minAmount: 100, minParticipants: 1,
+    allowMultiple: true, companyTakeover: true, status: '已启用', startAt: '',
+    endAt: '2020-01-01 00:00', paymentCutoffAt: '2020-01-01 12:00',
+    plannedPaymentDate: '2020-01-02', updatedAt: new Date().toISOString()
+  })
+  await db.collection(`${prefix}subscriptions`).insertOne({
+    id: 'SUB-IAM-PROCUREMENT-BACKSTOP', projectId: 'PRJ-IAM-PROCUREMENT-READY',
+    userId: 'company', companyKind: 'backstop', amount: 100, shares: 1,
+    pay: '公司待出资', action: '财务确认公司出资',
+    paymentDeadlineAt: '2020-01-01 12:00', createdAt: new Date().toISOString()
+  })
+  await db.collection(`${prefix}projects`).insertOne({
     id: 'PRJ-IAM-ADMIN-DRAFT', title: '管理员待发布项目', source: 'integration-test',
     status: '未开放', statusType: 'info', progress: 0, remain: 300, deadline: '2099-12-31 23:59',
     total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
@@ -158,6 +181,13 @@ try {
   assert.equal(sweptCase?.gapCents, 12000)
   assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
     recipientId: 'role:super_admin', projectId: 'PRJ-IAM-OVERDUE-SWEEP', type: '回款超期预警' }), 1)
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (await db.collection(`${prefix}notifications`).countDocuments({
+      type: '可登记采购付款', recipientId: 'role:finance', projectId: 'PRJ-IAM-PROCUREMENT-READY' })) break
+    await delay(100)
+  }
+  assert.equal(await db.collection(`${prefix}notifications`).countDocuments({
+    type: '可登记采购付款', recipientId: 'role:finance', projectId: 'PRJ-IAM-PROCUREMENT-READY' }), 1)
   const request = async (path: string, headers: Record<string, string> = {}) => {
     const response = await fetch(`${base}${path}`, { headers })
     return { status: response.status, body: await response.json() as Record<string, unknown> }
@@ -293,7 +323,7 @@ try {
   }
   assert.equal((await subscribe(1, 'employee01')).status, 403)
   assert.equal((await subscribe(2)).status, 409)
-  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 6)
+  assert.equal(await db.collection(`${prefix}subscriptions`).countDocuments(), 7)
   const subscribed = await subscribe(1)
   assert.equal(subscribed.status, 201)
   assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-sub-1-self' }))?.userId, '1001')

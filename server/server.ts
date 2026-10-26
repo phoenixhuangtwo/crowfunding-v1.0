@@ -34,7 +34,7 @@ import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from 
 import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
-import { paymentReminderDue, proxyConfirmationReminderDue, recipientNotification, roleNotification, subscriptionNotification, type Notification } from './notifications.ts'
+import { paymentReminderDue, procurementReadyReminderDue, proxyConfirmationReminderDue, recipientNotification, roleNotification, subscriptionNotification, type Notification } from './notifications.ts'
 import { planEscalationNotifications } from './notification-escalations.ts'
 import { validateOverdueResolution, type ReceiptOverdueCase } from './finance/receipt-overdue.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
@@ -584,6 +584,30 @@ async function runDuePaymentReminders() {
       } catch (error) { logFailure('notification.payment-reminder', error) }
     }
   } finally { notificationSweepRunning = false }
+}
+let procurementReminderSweepRunning = false
+async function runDueProcurementReadyReminders() {
+  if (procurementReminderSweepRunning) return
+  procurementReminderSweepRunning = true
+  try {
+    const candidates = await repositories.projects.list({ status: { $in: ['已满额', '已截止'] } } as never)
+    const at = new Date()
+    for (const project of candidates) {
+      try {
+        if (await procurementPayments.findOne({ projectId: project.id })) continue
+        const { rule, records, funding } = await procurementFundingSnapshot(project.id)
+        if (!procurementReadyReminderDue({ status: project.status,
+          paymentCutoffAt: rule.paymentCutoffAt, balanced: funding.balanced,
+          hasUnresolvedPayment: records.some(record => ['未缴款', '待复核', '部分缴款', '复核驳回'].includes(record.pay))
+        }, at)) continue
+        const notice = roleNotification({ type: '可登记采购付款', sourceId: project.id,
+          role: 'finance', projectId: project.id,
+          content: `众筹单【${project.id}】已截止且缴款复核和公司兜底完成，可登记采购付款`,
+          targetPage: 'procurementPayment', createdAt: at.toISOString() })
+        await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+      } catch (error) { logFailure('notification.procurement-ready', error) }
+    }
+  } finally { procurementReminderSweepRunning = false }
 }
 let escalationSweepRunning = false
 async function runDueEscalations() {
@@ -4948,13 +4972,15 @@ server.requestTimeout = 15_000
 server.headersTimeout = 10_000
 server.listen(port, '127.0.0.1', () => {
   console.log(`subscription-api listening on http://127.0.0.1:${port}`)
-  void runDueBackstops().catch(error => logFailure('company.backstop', error))
+  void runDueBackstops().then(runDueProcurementReadyReminders)
+    .catch(error => logFailure('company.backstop', error))
   void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
   void runDueEscalations().catch(error => logFailure('notification.escalation', error))
   void runDueProxyConfirmReminders().catch(error => logFailure('notification.proxy-confirm', error))
 })
 const backstopTimer = setInterval(() => {
-  void runDueBackstops().catch(error => logFailure('company.backstop', error))
+  void runDueBackstops().then(runDueProcurementReadyReminders)
+    .catch(error => logFailure('company.backstop', error))
   void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
 }, 30_000)
 backstopTimer.unref()

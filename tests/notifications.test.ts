@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { paymentReminderDue, proxyConfirmationReminderDue, subscriptionNotification } from '../server/notifications.ts'
+import { paymentReminderDue, procurementReadyReminderDue, proxyConfirmationReminderDue, subscriptionNotification } from '../server/notifications.ts'
 
 test('payment reminder uses the published lead time and only pending subscriptions', () => {
   const at = new Date('2026-10-26T08:00:00.000Z')
@@ -23,4 +23,14 @@ test('proxy confirmation reminder uses the published day limit', () => {
   assert.equal(proxyConfirmationReminderDue('2026-10-19T08:00:00.000Z', 7, at), true)
   assert.equal(proxyConfirmationReminderDue('2026-10-19T08:00:01.000Z', 7, at), false)
   assert.equal(proxyConfirmationReminderDue('invalid', 7, at), false)
+})
+
+test('procurement payment readiness requires cutoff and reconciled funding', () => {
+  const at = new Date('2026-10-26T08:00:00.000Z')
+  const input = { status: '已满额', paymentCutoffAt: '2026-10-26 16:00', balanced: true,
+    hasUnresolvedPayment: false }
+  assert.equal(procurementReadyReminderDue(input, at), true)
+  assert.equal(procurementReadyReminderDue({ ...input, paymentCutoffAt: '2026-10-26 16:01' }, at), false)
+  assert.equal(procurementReadyReminderDue({ ...input, balanced: false }, at), false)
+  assert.equal(procurementReadyReminderDue({ ...input, hasUnresolvedPayment: true }, at), false)
 })
