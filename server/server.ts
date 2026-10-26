@@ -5,7 +5,7 @@ import { fetchAllProcurementPages, fetchProcurementPage, formatProcurementSyncMe
 import { mapProcurementOrderToDetail, mapProcurementOrderToProject, mergeProcurementProject, procurementOrderSkipReason } from './procurement-project.ts'
 import { recognizeFinanceBill } from './invoice-ocr.ts'
 import { confirmProjectSettlement, type SettlementInvoiceRecord } from './project-settlement.ts'
-import { DEFAULT_JSON_BODY_LIMIT, readJsonBody, RequestBodyError } from './http-json-body.ts'
+import { DEFAULT_JSON_BODY_LIMIT, bodyContainsAccessToken, readJsonBody, readRawBody, RequestBodyError } from './http-json-body.ts'
 import { OcrProofStore } from './ocr-proof.ts'
 import { hasImageStorageCapacity, ResourceLimitError, SlidingWindowQuota } from './resource-limits.ts'
 import { loadAppConfig } from './config.ts'
@@ -18,7 +18,7 @@ import { readSingleImageMultipart } from './http-multipart.ts'
 import { validateImageFile, type ValidatedImage } from './image-file.ts'
 import { TencentCosObjectStorage } from './storage/object-storage.ts'
 import { FileAssetService } from './storage/file-asset-service.ts'
-import { requestContext, authorizeAssetRead } from './request-context.ts'
+import { requestContext, authorizeAssetRead, setAuthenticatedContext, iamContextFor } from './request-context.ts'
 import { AppError, isDuplicateKey } from './errors.ts'
 import { calculateShareSubscription, prepareShareRule } from './share-subscription.ts'
 import { createFundLedger } from './finance/fund-ledger.ts'
@@ -26,6 +26,11 @@ import { validateContributionReview } from './finance/contribution-review.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
 import { AgreementError, AgreementService, type AgreementNode } from './agreements.ts'
+import { loadIamConfig } from './iam/config.ts'
+import { IamClient } from './iam/client.ts'
+import { handleAuthRoute } from './auth/routes.ts'
+import { authenticateRequest, authErrorResponse, permissionInfoForClient, requireApiPermission, validateReviewAction } from './auth/middleware.ts'
+import { handleCorsPreflight, sendJson } from './http-response.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
 type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
@@ -749,6 +754,9 @@ async function requireReceivingCodeMutable(receivingCodeId: string, session?: im
 }
 
 const appConfig = loadAppConfig()
+const iamConfig = loadIamConfig()
+if (iamConfig.multiTenantEnabled) throw new Error('存量业务记录尚无租户归属，不能启用 IAM 多租户模式')
+const iam = new IamClient(iamConfig)
 const mongo = await connectMongo(appConfig.mongodb)
 await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
 const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
@@ -860,13 +868,7 @@ async function pushAudit(entry: Omit<AuditLog, 'time' | 'result'> & { result?: A
 }
 
 function send(res: ServerResponse, status: number, payload: unknown) {
-  res.writeHead(status, {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json; charset=utf-8'
-  })
-  res.end(JSON.stringify(payload))
+  sendJson(res.req, res, iamConfig.allowedOrigin, status, payload)
 }
 
 function auditRecord(input: Omit<AuditLog, 'time' | 'result'> & { result?: AuditLog['result'] }) {
@@ -2423,9 +2425,46 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
 
 const server = createServer(observeRequests(async (req, res) => {
   if (!req.url) return send(res, 400, { error: 'BAD_REQUEST' })
-  if (req.method === 'OPTIONS') return send(res, 204, null)
   const url = new URL(req.url, 'http://127.0.0.1:4100')
   try {
+    if (req.method === 'GET' && url.pathname === '/api/health') return await routeGet(url, req, res)
+    if (handleCorsPreflight(req, res, iamConfig.allowedOrigin)) return
+    if (await handleAuthRoute(req, res, url, { config: iamConfig, iam })) return
+    if (req.method !== 'GET' && req.method !== 'POST') return send(res, 405, { error: 'METHOD_NOT_ALLOWED' })
+    let reviewPermission: ReturnType<typeof validateReviewAction> | undefined
+    if (req.method === 'POST') {
+      const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
+      const raw = await readRawBody(req, DEFAULT_JSON_BODY_LIMIT)
+      if (bodyContainsAccessToken(raw, contentType)) return send(res, 401, { error: 'AUTH_REQUIRED', message: '请求凭证位置无效' })
+      if (!contentType.startsWith('multipart/form-data;')) {
+        const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+        if (/^\/api\/subscriptions\/[^/]+\/review$/.test(url.pathname)) {
+          try {
+            reviewPermission = validateReviewAction(body)
+            if (!Object.prototype.hasOwnProperty.call(body, 'result')) body.result = body.action
+          } catch {
+            return send(res, 400, { error: 'REVIEW_RESULT_INVALID', message: '复核结果不合法' })
+          }
+        }
+      }
+    }
+    try {
+      const context = await authenticateRequest(req, { iam })
+      setAuthenticatedContext(req, context)
+      if (reviewPermission) await requireApiPermission(context, reviewPermission, { iam })
+    } catch (error) {
+      const mapped = authErrorResponse(error)
+      return send(res, mapped.status, { error: mapped.code, message: mapped.message })
+    }
+    if (req.method === 'GET' && url.pathname === '/api/auth/me') return send(res, 200, { data: permissionInfoForClient(iamContextFor(req)) })
+    const context = iamContextFor(req)
+    const role = requestContext(req).role
+    if (role === 'employee' && !context.dataScope?.self && !context.dataScope?.all) {
+      throw new AppError(403, 'DATA_SCOPE_DENIED', '无本人数据访问范围')
+    }
+    if (role !== 'employee' && !context.dataScope?.all) {
+      throw new AppError(403, 'DATA_SCOPE_MIGRATION_REQUIRED', '存量业务记录尚无部门归属，暂不能使用部门数据范围')
+    }
     if (req.method === 'GET') return await routeGet(url, req, res)
     if (req.method === 'POST') return await routePost(url.pathname, req, res)
     return send(res, 405, { error: 'METHOD_NOT_ALLOWED' })

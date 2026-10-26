@@ -30,6 +30,7 @@ import { apiRequest } from './auth/api-client'
 import { readAccessToken } from './auth/session'
 import { useAuthSession } from './auth/use-auth-session'
 import { allowedPageKeys, canApi, canUi, type AuthorizedPageKey } from './auth/permissions'
+import { permissionFor, reviewPermissionFor } from '../server/iam/permissions'
 import AuthStateView from './components/AuthStateView.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -572,6 +573,11 @@ const auditRows = reactive<AuditRow[]>([
   { time: '2026-06-30 18:00:03', actor: '系统', action: '自动兜底接管', target: 'TKV-20260430-01', result: '成功' }
 ])
 const rules = reactive<SubscriptionRule[]>([])
+// Authenticated pages must not briefly present the old local demo records as real business data.
+projects.splice(0)
+subscriptions.splice(0)
+receivingCodes.splice(0)
+auditRows.splice(0)
 
 const pageTitle = computed(() => currentPage.value ? pageTitleMap[currentPage.value] : '暂无可用页面')
 const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
@@ -897,7 +903,11 @@ const filteredAuditRows = computed(() => {
   })
 })
 
-async function api<T>(path: string, options?: RequestInit): Promise<T> { return apiRequest<T>(path, options) }
+async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const code = permissionFor(options?.method ?? 'GET', new URL(path, window.location.origin).pathname)
+  if (!canApi(authSession.permissionInfo.value, code)) throw new Error('暂无执行该操作的权限')
+  return apiRequest<T>(path, options)
+}
 
 const privateImageCache = new Map<string, string>()
 
@@ -933,12 +943,14 @@ function replaceRows<T>(target: T[], rows: T[]) {
 
 async function loadData() {
   try {
+    const optionalList = <T>(code: string, path: string) => canApi(authSession.permissionInfo.value, code)
+      ? api<{ data: T[] }>(path) : Promise.resolve({ data: [] as T[] })
     const [projectPayload, subscriptionPayload, auditPayload, rulePayload, receivingCodePayload] = await Promise.all([
-      api<{ data: Project[] }>('/api/projects'),
-      api<{ data: Subscription[] }>('/api/subscriptions'),
-      currentRole.value === 'employee' ? Promise.resolve({ data: [] as AuditRow[] }) : api<{ data: AuditRow[] }>('/api/audit-logs'),
-      api<{ data: SubscriptionRule[] }>('/api/rules'),
-      api<{ data: ReceivingCode[] }>('/api/receiving-codes')
+      optionalList<Project>('crowdfunding:project:query', '/api/projects'),
+      optionalList<Subscription>('crowdfunding:subscription:query', '/api/subscriptions'),
+      optionalList<AuditRow>('crowdfunding:audit:query', '/api/audit-logs'),
+      optionalList<SubscriptionRule>('crowdfunding:rule:query', '/api/rules'),
+      optionalList<ReceivingCode>('crowdfunding:receiving-code:query', '/api/receiving-codes')
     ])
     await hydratePrivateImages(projectPayload.data, subscriptionPayload.data, receivingCodePayload.data)
     replaceRows(projects, projectPayload.data)
@@ -947,7 +959,12 @@ async function loadData() {
     replaceRows(rules, rulePayload.data)
     replaceRows(receivingCodes, receivingCodePayload.data)
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? `后端数据加载失败，保留本地模拟数据：${error.message}` : '后端数据加载失败，保留本地模拟数据')
+    replaceRows(projects, [])
+    replaceRows(subscriptions, [])
+    replaceRows(auditRows, [])
+    replaceRows(rules, [])
+    replaceRows(receivingCodes, [])
+    ElMessage.warning(error instanceof Error ? `后端数据加载失败：${error.message}` : '后端数据加载失败')
   }
 }
 
@@ -2174,6 +2191,7 @@ async function startSettlement() {
 }
 
 async function submitPaymentReview(result: 'pass' | 'reject' | 'partial') {
+  if (!requireApiPermission(reviewPermissionFor(result))) return
   const subscription = activeReviewSubscription.value
   if (!subscription || subscriptionDisplayPay(subscription) !== '待复核') {
     ElMessage.warning('当前没有待复核记录')

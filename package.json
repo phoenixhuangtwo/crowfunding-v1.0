@@ -13,6 +13,7 @@
     "test:unit": "tsx --test tests/*.test.ts",
     "test:integration:share": "node --env-file-if-exists=.env.local --import tsx tests/share-flow.integration.ts",
     "test:integration:agreements": "node --env-file-if-exists=.env.local --import tsx tests/agreements.integration.ts",
+    "test:integration:iam-boundary": "node --env-file-if-exists=.env.local --import tsx tests/iam-boundary.integration.ts",
     "test:integration:backstop": "node --env-file-if-exists=.env.local --import tsx tests/company-backstop.integration.ts",
     "test:smoke": "node tests/smoke.mjs",
     "storage:preflight": "node --env-file-if-exists=.env.local --import tsx scripts/storage-preflight.ts",

@@ -2,16 +2,26 @@ import type { IncomingMessage } from 'node:http'
 import type { FileAsset, RequestContext } from './domain/models.ts'
 import type { AppRepositories } from './persistence/repositories.ts'
 import { appError } from './errors.ts'
+import type { IamRequestContext } from './iam/types.ts'
 
-const roles = ['employee', 'admin', 'finance', 'super_admin'] as const
+const authenticated = new WeakMap<IncomingMessage, IamRequestContext>()
+
+export function setAuthenticatedContext(req: IncomingMessage, context: IamRequestContext) {
+  authenticated.set(req, context)
+}
+
+export function iamContextFor(req: IncomingMessage): IamRequestContext {
+  const context = authenticated.get(req)
+  if (!context) throw appError(401, 'REQUEST_CONTEXT_REQUIRED', '缺少有效 IAM 访问身份')
+  return context
+}
 
 export function requestContext(req: IncomingMessage): RequestContext {
-  const userId = String(req.headers['x-user-id'] ?? '').trim()
-  const role = String(req.headers['x-user-role'] ?? '').trim()
-  if (!userId || !roles.includes(role as (typeof roles)[number])) {
-    throw appError(401, 'REQUEST_CONTEXT_REQUIRED', '缺少有效访问身份')
-  }
-  return { userId, role: role as RequestContext['role'] }
+  const context = iamContextFor(req)
+  const roles = context.roleCodes ?? []
+  const role: RequestContext['role'] = roles.includes('super_admin') || roles.includes('super-admin') ? 'super_admin'
+    : roles.includes('finance') ? 'finance' : roles.includes('admin') ? 'admin' : 'employee'
+  return { userId: context.userId, role }
 }
 
 function fileNotFound() {

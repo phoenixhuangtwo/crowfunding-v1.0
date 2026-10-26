@@ -5,6 +5,11 @@ import { permissionFor, type ApiPermissionCode, reviewPermissionFor } from '../s
 test('maps every protected route to an exact permission', () => {
   const cases: Array<[string, string, ApiPermissionCode]> = [
     ['GET', '/api/auth/me', 'crowdfunding:access'],
+    ['GET', '/api/state', 'crowdfunding:access'],
+    ['GET', '/api/rbac', 'crowdfunding:access'],
+    ['GET', '/api/agreements/current', 'crowdfunding:access'],
+    ['GET', '/api/agreements', 'crowdfunding:agreement:manage'],
+    ['GET', '/api/agreements/1/confirmations', 'crowdfunding:agreement:manage'],
     ['GET', '/api/projects', 'crowdfunding:project:query'],
     ['GET', '/api/projects/P1', 'crowdfunding:project:query'],
     ['GET', '/api/receiving-codes', 'crowdfunding:receiving-code:query'],
@@ -15,6 +20,9 @@ test('maps every protected route to an exact permission', () => {
     ['GET', '/api/procurement/orders/P1', 'crowdfunding:project:query'],
     ['GET', '/api/files/A1/content', 'crowdfunding:access'],
     ['POST', '/api/mcp/sync', 'crowdfunding:procurement:sync'],
+    ['POST', '/api/agreements', 'crowdfunding:agreement:manage'],
+    ['POST', '/api/agreements/confirm-view-code', 'crowdfunding:receiving-code:query'],
+    ['POST', '/api/invoices/pending/delete', 'crowdfunding:settlement:upload-invoice'],
     ['POST', '/api/projects/P1/open', 'crowdfunding:project:open'],
     ['POST', '/api/projects/P1/terminate', 'crowdfunding:project:terminate'],
     ['POST', '/api/projects/P1/interrupt', 'crowdfunding:project:interrupt'],
@@ -40,8 +48,7 @@ test('maps every protected route to an exact permission', () => {
 })
 
 test('does not silently permit unregistered routes', () => {
-  assert.throws(() => permissionFor('GET', '/api/state'), /未登记权限/)
-  assert.throws(() => permissionFor('GET', '/api/rbac'), /未登记权限/)
+  assert.throws(() => permissionFor('GET', '/api/agreements/word/confirmations'), /未登记权限/)
   assert.throws(() => permissionFor('GET', '/api/projects/P1/unknown'), /未登记权限/)
 })
 

@@ -127,6 +127,9 @@ export async function authenticateRequest(req: IncomingMessage, dependencies?: A
   // intentionally scope-less (which fails closed in data-scope helpers).
   if (dependencies.iam.permissionInfo) {
     try { info = await dependencies.iam.permissionInfo(token) } catch (error) { throw boundary(error) }
+    if (info.user.id !== claims.userId || info.clientId !== claims.clientId) {
+      throw boundary(new IamProtocolError())
+    }
   }
   return freezeContext(claims, token, info)
 }

@@ -79,6 +79,20 @@ test('permissionInfo is hydrated after decision and projected with menus and API
   assert.equal(Object.isFrozen(context.menus?.[0]?.children), true)
 })
 
+test('permission-info identity must match the checked token subject', async () => {
+  const iam = {
+    checkToken: async () => claims,
+    decideApi: async () => true,
+    permissionInfo: async () => ({
+      user: { id: '9999', username: 'other', nickname: 'Other' },
+      roleCodes: ['employee'], permissions: [], apiPermissions: [], uiPermissions: [],
+      clientId: 'crowdfunding' as const, dataScope: { all: false, self: true, deptIds: [] }, menus: []
+    })
+  }
+  await assert.rejects(authenticateRequest(request({ authorization: 'Bearer mismatched-token' }), { iam }),
+    (error: AuthBoundaryError) => error.status === 503 && error.code === 'IAM_UNAVAILABLE')
+})
+
 test('check-token failure makes no decision and maps IAM failures without token leakage', async () => {
   for (const failure of [new IamUnauthorizedError(), new IamUnavailableError(), new IamProtocolError()]) {
     const calls: string[] = []
