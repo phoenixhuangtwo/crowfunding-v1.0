@@ -46,6 +46,7 @@ const allApiPermissions = [
   'crowdfunding:distribution-payout-proxy:query', 'crowdfunding:distribution-payout-proxy:request',
   'crowdfunding:distribution-payout-proxy:review',
   'crowdfunding:rule-parameters:query', 'crowdfunding:rule-parameters:update',
+  'crowdfunding:notification:query', 'crowdfunding:notification:read',
   'crowdfunding:subscription:create', 'crowdfunding:subscription:confirm-receipt',
   'crowdfunding:payment-proof:upload', 'crowdfunding:payment-proof:delete', 'crowdfunding:payment-proof:ocr',
   'crowdfunding:rule:create', 'crowdfunding:rule:update', 'crowdfunding:rule:change-status',
@@ -76,7 +77,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-employee-token', userId: 1001, username: 'employee01', nickname: '员工甲', deptId: 100,
-    roles: ['crowdfunding_employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create', 'crowdfunding:payment-proof:ocr', 'crowdfunding:payout:my-query', 'crowdfunding:payout:confirm', 'crowdfunding:exception-fund:my-refunds', 'crowdfunding:exception-fund:refund-confirm', 'crowdfunding:project-refund:my-query', 'crowdfunding:project-refund:confirm'],
+    roles: ['crowdfunding_employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create', 'crowdfunding:payment-proof:ocr', 'crowdfunding:payout:my-query', 'crowdfunding:payout:confirm', 'crowdfunding:exception-fund:my-refunds', 'crowdfunding:exception-fund:refund-confirm', 'crowdfunding:project-refund:my-query', 'crowdfunding:project-refund:confirm', 'crowdfunding:notification:query', 'crowdfunding:notification:read'],
     dataScope: { all: false, self: true, deptIds: [] }
   },
   {

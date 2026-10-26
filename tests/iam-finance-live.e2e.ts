@@ -46,6 +46,11 @@ try {
   const info = await iam.permissionInfo(accessToken)
   assert.equal(info.user.username, account.username)
   assert.ok(info.roleCodes.includes('crowdfunding_finance'))
+  for (const permission of ['crowdfunding:notification:query', 'crowdfunding:notification:read']) {
+    assert.ok(info.apiPermissions.includes(permission), `${permission} 已授予财务`)
+    assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
+  }
+  assert.ok(info.uiPermissions.includes('crowdfunding:notification:query'))
   assert.ok(info.apiPermissions.includes('crowdfunding:procurement-payment:register'))
   assert.ok(info.apiPermissions.includes('crowdfunding:procurement-payment:proof-upload'))
   assert.ok(info.uiPermissions.includes('crowdfunding:procurement-payment:register'))

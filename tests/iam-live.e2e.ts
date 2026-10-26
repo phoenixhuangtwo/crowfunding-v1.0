@@ -103,6 +103,9 @@ try {
   refreshToken = pair.refreshToken
   const claims = await iam.checkToken(accessToken)
   const info = await iam.permissionInfo(accessToken)
+  assert.ok(info.apiPermissions.includes('crowdfunding:notification:query'))
+  assert.ok(info.apiPermissions.includes('crowdfunding:notification:read'))
+  assert.ok(info.uiPermissions.includes('crowdfunding:notification:query'))
   assert.ok(info.apiPermissions.includes('crowdfunding:payout:my-query'))
   assert.ok(info.apiPermissions.includes('crowdfunding:payout:confirm'))
   assert.ok(info.uiPermissions.includes('crowdfunding:payout:my-query'))

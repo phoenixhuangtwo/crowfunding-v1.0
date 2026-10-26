@@ -34,6 +34,7 @@ import { validateReceiptTerminationRefund, type ReceiptTerminationRefund } from 
 import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './finance/project-refund-proxy.ts'
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
+import { paymentReminderDue, subscriptionNotification, type Notification } from './notifications.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
   validateExceptionFund, type ExceptionFund } from './finance/exception-funds.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
@@ -319,6 +320,7 @@ const receiptTerminationRefunds = mongo.db.collection<ReceiptTerminationRefund>(
 const projectRefundProxyRequests = mongo.db.collection<ProjectRefundProxyRequest>(`${appConfig.mongodb.collectionPrefix}project_refund_proxy_requests`)
 const distributionPayoutProxyRequests = mongo.db.collection<DistributionPayoutProxyRequest>(`${appConfig.mongodb.collectionPrefix}distribution_payout_proxy_requests`)
 const ruleParameters = mongo.db.collection<StoredRuleParameters>(`${appConfig.mongodb.collectionPrefix}rule_parameters`)
+const notifications = mongo.db.collection<Notification>(`${appConfig.mongodb.collectionPrefix}notifications`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -557,6 +559,29 @@ function auditRecord(input: Omit<AuditLog, 'time' | 'result'> & { result?: Audit
 }
 
 let backstopRunning = false
+let notificationSweepRunning = false
+async function runDuePaymentReminders() {
+  if (notificationSweepRunning) return
+  notificationSweepRunning = true
+  try {
+    const nowAt = new Date()
+    const pending = await repositories.subscriptions.list({ pay: { $in: ['未缴款', '复核驳回'] } } as never)
+    const projectIds = [...new Set(pending.map(item => item.projectId).filter((id): id is string => Boolean(id)))]
+    const records = await repositories.projects.list({ id: { $in: projectIds } } as never)
+    const projectById = new Map(records.map(project => [project.id, project]))
+    for (const item of pending) {
+      try {
+        const project = projectById.get(item.projectId ?? '')
+        if (!project || !['未满额', '已满额'].includes(project.status)) continue
+        if (!paymentReminderDue({ paymentDeadlineAt: item.paymentDeadlineAt,
+          paymentReminderHours: project.ruleParametersSnapshot?.paymentReminderHours ?? 4,
+          pay: item.pay }, nowAt)) continue
+        const notice = subscriptionNotification(item, '缴款即将截止', nowAt.toISOString())
+        if (notice) await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice }, { upsert: true })
+      } catch (error) { logFailure('notification.payment-reminder', error) }
+    }
+  } finally { notificationSweepRunning = false }
+}
 async function runDueBackstops() {
   if (backstopRunning) return
   backstopRunning = true
@@ -601,7 +626,12 @@ async function runDueBackstops() {
             nextProject.statusType = 'success'
           }
           const releasedRecords = released.map(record => ({ ...record, pay: '已释放' as const, action: '已释放' }))
-          for (const record of releasedRecords) await repositories.subscriptions.replace(record, session)
+          for (const record of releasedRecords) {
+            await repositories.subscriptions.replace(record, session)
+            const notice = subscriptionNotification(record, '缴款已逾期', new Date().toISOString())
+            if (notice) await notifications.updateOne({ id: notice.id }, { $setOnInsert: notice },
+              { upsert: true, session })
+          }
           let companyRecord: Subscription | undefined
           if (backstop) {
             companyRecord = {
@@ -697,6 +727,18 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const current = await ruleParameters.findOne({ id: 'global' })
     return send(res, 200, { data: current ?? { id: 'global', revision: 0,
       ...defaultRuleParameters, updatedAt: '', updatedBy: '' } })
+  }
+  if (pathname === '/api/notifications') {
+    const recipientId = requestContext(req).userId
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const [items, total, unread] = await Promise.all([
+      notifications.find({ recipientId }).sort({ readAt: 1, createdAt: -1, id: -1 })
+        .skip((page - 1) * pageSize).limit(pageSize).toArray(),
+      notifications.countDocuments({ recipientId }),
+      notifications.countDocuments({ recipientId, readAt: { $exists: false } })
+    ])
+    return send(res, 200, { data: { items, total, unread, page, pageSize } })
   }
   if (pathname === '/api/agreements/current') {
     requestContext(req)
@@ -1518,6 +1560,23 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     })
     auditLogs.unshift(result.audit)
     return send(res, 200, { data: result.next, message: '规则参数已更新，仅影响后续发布的众筹单' })
+  }
+  if (pathname === '/api/notifications/read-all') {
+    const recipientId = requestContext(req).userId
+    const result = await notifications.updateMany({ recipientId, readAt: { $exists: false } },
+      { $set: { readAt: new Date().toISOString() } })
+    return send(res, 200, { data: { updated: result.modifiedCount }, message: '已标记为已读' })
+  }
+  const notificationReadMatch = pathname.match(/^\/api\/notifications\/([^/]+)\/read$/)
+  if (notificationReadMatch) {
+    const recipientId = requestContext(req).userId
+    const id = decodeURIComponent(notificationReadMatch[1])
+    const result = await notifications.updateOne({ id, recipientId, readAt: { $exists: false } },
+      { $set: { readAt: new Date().toISOString() } })
+    if (result.matchedCount === 0 && !await notifications.findOne({ id, recipientId })) {
+      return send(res, 404, { error: 'NOTIFICATION_NOT_FOUND', message: '通知不存在' })
+    }
+    return send(res, 200, { data: { id }, message: '已标记为已读' })
   }
   const projectRefundPaymentMatch = pathname.match(/^\/api\/project-refunds\/([^/]+)\/payment$/)
   if (projectRefundPaymentMatch) {
@@ -3879,6 +3938,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (!latest || latest.remain !== before.remain || latest.people !== before.people) throw new AppError(409, 'PROJECT_CHANGED', '项目认购额度已变化，请刷新后重试')
       await repositories.projects.replace(nextProject, session)
       await repositories.subscriptions.insert(record, session)
+      const notice = subscriptionNotification(record, '认购成功', new Date().toISOString())
+      if (notice) await notifications.insertOne(notice, { session })
       await repositories.auditLogs.insert(audit as never, session)
       await agreementService.confirm({ version: record.agreementVersion!, userId, userName: record.userName!, node: '提交认购', relatedId: record.id }, session)
       return true
@@ -4564,7 +4625,9 @@ const server = createServer(observeRequests(async (req, res) => {
       && (['/api/projects', '/api/rules', '/api/subscriptions', '/api/receiving-codes'].includes(url.pathname)
         || /^\/api\/procurement\/orders\/[^/]+$/.test(url.pathname)
         || /^\/api\/files\/[^/]+\/content$/.test(url.pathname))
-    if (role !== 'employee' && !context.dataScope?.all && !adminScopedRead) {
+    const personalNotice = /^\/api\/notifications(?:\/read-all|\/[^/]+\/read)?$/.test(url.pathname)
+      && (context.dataScope?.self || context.dataScope?.all)
+    if (role !== 'employee' && !context.dataScope?.all && !adminScopedRead && !personalNotice) {
       throw new AppError(403, 'DATA_SCOPE_MIGRATION_REQUIRED', '存量业务记录尚无部门归属，暂不能使用部门数据范围')
     }
     if (req.method === 'GET') return await routeGet(url, req, res)
@@ -4589,9 +4652,11 @@ server.headersTimeout = 10_000
 server.listen(port, '127.0.0.1', () => {
   console.log(`subscription-api listening on http://127.0.0.1:${port}`)
   void runDueBackstops().catch(error => logFailure('company.backstop', error))
+  void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
 })
 const backstopTimer = setInterval(() => {
   void runDueBackstops().catch(error => logFailure('company.backstop', error))
+  void runDuePaymentReminders().catch(error => logFailure('notification.payment-reminder', error))
 }, 30_000)
 backstopTimer.unref()
 

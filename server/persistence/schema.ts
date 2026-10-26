@@ -21,6 +21,7 @@ export const businessCollections = [
   'project_refund_proxy_requests',
   'distribution_payout_proxy_requests',
   'rule_parameters',
+  'notifications',
   'risk_events',
   'file_assets'
 ] as const
@@ -55,6 +56,7 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   project_refund_proxy_requests: [],
   distribution_payout_proxy_requests: [],
   rule_parameters: [],
+  notifications: [],
   risk_events: [],
   file_assets: []
 }
@@ -170,6 +172,10 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
   ],
   rule_parameters: [
     { name: 'uniq_rule_parameters_id', key: { id: 1 }, unique: true }
+  ],
+  notifications: [
+    { name: 'uniq_notification_id', key: { id: 1 }, unique: true },
+    { name: 'idx_notification_recipient', key: { recipientId: 1, readAt: 1, createdAt: -1 } }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

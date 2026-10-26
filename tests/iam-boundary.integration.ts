@@ -279,6 +279,21 @@ try {
   assert.equal(publishedSubscription.status, 201)
   const publishedRecord = await db.collection(`${prefix}subscriptions`).findOne({ idempotencyKey: 'iam-published-share' })
   assert.equal(publishedRecord?.shares, 1)
+  const ownNotifications = await request('/api/notifications', employee)
+  assert.equal(ownNotifications.status, 200)
+  const ownNoticeItems = (ownNotifications.body.data as { items: Array<{ id: string; type: string }> }).items
+  const ownNotice = ownNoticeItems.find(item => item.id.includes(String(publishedRecord?.id)))
+  assert.equal(ownNotice?.type, '认购成功')
+  const foreignNoticeId = '认购成功:SUB-FOREIGN:1002'
+  await db.collection(`${prefix}notifications`).insertOne({ id: foreignNoticeId, recipientId: '1002',
+    type: '认购成功', title: '认购成功', content: '他人通知', targetPage: 'mine', createdAt: new Date().toISOString() })
+  assert.equal((await postAs(`/api/notifications/${encodeURIComponent(foreignNoticeId)}/read`,
+    'smoke-employee-token', {})).status, 404)
+  assert.equal((await db.collection(`${prefix}notifications`).findOne({ id: foreignNoticeId }))?.readAt, undefined)
+  assert.equal((await postAs(`/api/notifications/${encodeURIComponent(ownNotice!.id)}/read`,
+    'smoke-employee-token', {})).status, 200)
+  assert.ok((await db.collection(`${prefix}notifications`).findOne({ id: ownNotice!.id }))?.readAt)
+  assert.equal((await postAs('/api/notifications/read-all', 'smoke-employee-token', {})).status, 200)
   assert.equal(Date.parse(`${String(publishedRecord?.paymentDeadlineAt).replace(' ', 'T')}+08:00`)
     - Date.parse(`${String(publishedRecord?.createdAt).replace(' ', 'T')}+08:00`), 24 * 60 * 60 * 1000)
   assert.ok(String(publishedRecord?.paymentDeadlineAt) <= '2100-01-01 12:00')

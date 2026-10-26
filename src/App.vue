@@ -40,6 +40,7 @@ import ExceptionFundsPage from './components/ExceptionFundsPage.vue'
 import ProjectRefundsPage from './components/ProjectRefundsPage.vue'
 import ProcurementFailurePage from './components/ProcurementFailurePage.vue'
 import RuleParametersPage from './components/RuleParametersPage.vue'
+import NotificationsPage from './components/NotificationsPage.vue'
 import MyPayoutsPage from './components/MyPayoutsPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
@@ -62,6 +63,7 @@ type PageKey =
   | 'projectRefunds'
   | 'procurementFailure'
   | 'ruleParameters'
+  | 'notifications'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -253,6 +255,11 @@ const roles: Record<Role, { label: string; account: string; home: PageKey }> = {
 
 const navGroups: Array<{ title: string; pages: NavPage[] }> = [
   {
+    title: '通用', pages: [
+      { key: 'notifications', label: '消息中心', req: 'P1', icon: Tickets, permission: 'crowdfunding:notification:query' }
+    ]
+  },
+  {
     title: '员工端',
     pages: [
       { key: 'projects', label: '项目列表', req: 'P0', icon: Briefcase, permission: 'crowdfunding:project:query' },
@@ -306,6 +313,7 @@ const pageTitleMap: Record<PageKey, string> = {
   projectRefunds: '项目退款',
   procurementFailure: '采购失败终止',
   ruleParameters: '规则参数',
+  notifications: '消息中心',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -628,7 +636,7 @@ const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
 const authorizedPageKeys = computed(() => new Set(allowedPageKeys(authSession.permissionInfo.value)))
 const visibleNavGroups = computed(() => navGroups.map(group => ({
   ...group,
-  pages: group.pages.filter(page => (!limitedAdmin.value || page.key === 'adminProjects' || page.key === 'procurementFailure')
+  pages: group.pages.filter(page => (!limitedAdmin.value || page.key === 'adminProjects' || page.key === 'procurementFailure' || page.key === 'notifications')
     && !hiddenNavPageKeys.has(page.key) && authorizedPageKeys.value.has(page.key as AuthorizedPageKey)
     && canUi(authSession.permissionInfo.value, page.permission))
 })).filter(group => group.pages.length > 0))
@@ -1194,6 +1202,14 @@ function go(page: PageKey) {
     return
   }
   currentPage.value = page
+}
+function openNotificationTarget(page: string) {
+  if (!authorizedPageKeys.value.has(page as AuthorizedPageKey)
+    || !visibleNavGroups.value.some(group => group.pages.some(item => item.key === page))) {
+    ElMessage.warning('您没有权限查看该单据')
+    return
+  }
+  go(page as PageKey)
 }
 
 function requireApiPermission(code: string) {
@@ -3388,6 +3404,8 @@ watch(() => authSession.permissionInfo.value, info => {
           v-if="currentPage === 'ruleParameters' && currentRole === 'super_admin'"
           :can-update="canApi(authSession.permissionInfo.value, 'crowdfunding:rule-parameters:update')"
         />
+
+        <NotificationsPage v-if="currentPage === 'notifications'" @open="openNotificationTarget" />
 
         <DistributionOrdersPage
           v-if="currentPage === 'distributionOrders' && (currentRole === 'finance' || currentRole === 'super_admin')"

@@ -13,7 +13,7 @@ export type PermissionInfoLike = Readonly<{
 
 export const AUTHORIZED_PAGE_KEYS = [
   'projects', 'mine', 'myPayouts', 'adminProjects', 'rules', 'receivingCode', 'payReview',
-  'settlement', 'procurementPayment', 'customerReceipts', 'distributionOrders', 'exceptionFunds', 'projectRefunds', 'procurementFailure', 'ruleParameters', 'takeovers', 'audit', 'risk', 'agreements'
+  'settlement', 'procurementPayment', 'customerReceipts', 'distributionOrders', 'exceptionFunds', 'projectRefunds', 'procurementFailure', 'ruleParameters', 'notifications', 'takeovers', 'audit', 'risk', 'agreements'
 ] as const
 
 export type AuthorizedPageKey = typeof AUTHORIZED_PAGE_KEYS[number]
