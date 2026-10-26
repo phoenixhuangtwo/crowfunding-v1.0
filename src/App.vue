@@ -35,6 +35,7 @@ import { permissionFor, reviewPermissionFor } from '../server/iam/permissions'
 import AuthStateView from './components/AuthStateView.vue'
 import ProcurementPaymentPage from './components/ProcurementPaymentPage.vue'
 import CustomerReceiptsPage from './components/CustomerReceiptsPage.vue'
+import DistributionOrdersPage from './components/DistributionOrdersPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
 type PageKey =
@@ -50,6 +51,7 @@ type PageKey =
   | 'settlement'
   | 'procurementPayment'
   | 'customerReceipts'
+  | 'distributionOrders'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -63,7 +65,7 @@ type Project = {
   offlineSalesOrder?: string
   createdAt?: string
   projectOwner?: string
-  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '已中断' | '部分已结算' | '已完结'
+  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '部分已结算' | '已完结'
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
   remain: number
@@ -260,6 +262,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
       { key: 'payReview', label: '支付复核', req: 'P0', icon: Tickets, permission: 'crowdfunding:payment-review:query' },
       { key: 'procurementPayment', label: '采购付款登记', req: 'P0', icon: Money, permission: 'crowdfunding:procurement-payment:register' },
       { key: 'customerReceipts', label: '客户回款', req: 'P0', icon: Money, permission: 'crowdfunding:receipt:query' },
+      { key: 'distributionOrders', label: '利润分配', req: 'P0', icon: Money, permission: 'crowdfunding:distribution:query' },
       { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money, permission: 'crowdfunding:settlement:query' }
     ]
   }
@@ -278,6 +281,7 @@ const pageTitleMap: Record<PageKey, string> = {
   settlement: '发票凭证核对',
   procurementPayment: '采购付款登记',
   customerReceipts: '客户回款',
+  distributionOrders: '利润分配',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -3238,6 +3242,20 @@ watch(() => authSession.permissionInfo.value, info => {
           :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt:proof-upload')"
           :can-review="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt:review')"
           :can-register-difference="canApi(authSession.permissionInfo.value, 'crowdfunding:receipt:difference-register')"
+          @updated="loadData"
+        />
+
+        <DistributionOrdersPage
+          v-if="currentPage === 'distributionOrders' && (currentRole === 'finance' || currentRole === 'super_admin')"
+          :projects="projects" :role="currentRole"
+          :can-generate="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution:generate')"
+          :can-approve="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution:approve')"
+          :can-reject="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution:reject')"
+          :can-void="canApi(authSession.permissionInfo.value, 'crowdfunding:distribution:void')"
+          :can-query-cost="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:query')"
+          :can-register-cost="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:register')"
+          :can-upload-cost-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:proof-upload')"
+          :can-review-cost="canApi(authSession.permissionInfo.value, 'crowdfunding:cost:review')"
           @updated="loadData"
         />
 

@@ -412,6 +412,45 @@ try {
     { Authorization: 'Bearer smoke-finance-token' })
   assert.equal((finalSummary.body.data as { unresolvedCents: number }).unresolvedCents, 0)
   assert.equal((finalSummary.body.data as { excessCents: number }).excessCents, 1000)
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-COST', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/confirmed-cost-proof/ASSET-IAM-COST.png', originalName: 'cost.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'c'.repeat(64),
+    purpose: 'confirmed-cost-proof', ownerType: 'project', ownerId: 'PRJ-IAM-PAY-READY',
+    status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const costInput = { projectId: 'PRJ-IAM-PAY-READY', amountCents: 100,
+    transactionNo: 'BANK-IAM-COST', paidAt: new Date(Date.now() - 120_000).toISOString(),
+    proofAssetIds: ['ASSET-IAM-COST'], reason: '客户订单额外物流支出' }
+  assert.equal((await postAs('/api/confirmed-costs', 'smoke-employee-token', costInput)).status, 403)
+  const costCreated = await postAs('/api/confirmed-costs', 'smoke-finance-token', costInput)
+  assert.equal(costCreated.status, 201, JSON.stringify(costCreated.body))
+  const costId = (costCreated.body.data as { id: string }).id
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/distribution-orders',
+    'smoke-finance-token', {})).status, 409, '待复核成本阻止生成分配单')
+  assert.equal((await postAs(`/api/confirmed-costs/${costId}/review`, 'smoke-finance-token', {
+    decision: '通过' })).status, 403)
+  assert.equal((await postAs(`/api/confirmed-costs/${costId}/review`, 'smoke-super-admin-token', {
+    decision: '通过' })).status, 200)
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({ type: 'other_confirmed_cost',
+    projectId: 'PRJ-IAM-PAY-READY' }), 1)
+  const distributionCreated = await postAs('/api/projects/PRJ-IAM-PAY-READY/distribution-orders',
+    'smoke-finance-token', {})
+  assert.equal(distributionCreated.status, 201, JSON.stringify(distributionCreated.body))
+  const order = distributionCreated.body.data as { id: string; status: string; payoutTotalCents: number;
+    profitCents: number; lines: Array<{ kind: string; shares: number }> }
+  assert.equal(order.status, '待审批')
+  assert.equal(order.payoutTotalCents, 35900)
+  assert.equal(order.profitCents, 5900)
+  assert.deepEqual(order.lines.map(line => [line.kind, line.shares]), [['employee', 2], ['company', 1]])
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/approve`, 'smoke-finance-token', {})).status, 403,
+    '采购付款登记人不能审批分配单')
+  const distributionApproved = await postAs(`/api/distribution-orders/${order.id}/approve`,
+    'smoke-second-finance-token', {})
+  assert.equal(distributionApproved.status, 200, JSON.stringify(distributionApproved.body))
+  assert.equal((distributionApproved.body.data as { status: string }).status, '已审批')
+  assert.equal((await postAs(`/api/distribution-orders/${order.id}/void`, 'smoke-second-finance-token', {})).status, 409,
+    '审批后不允许作废')
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

@@ -25,6 +25,8 @@ import { createFundLedger } from './finance/fund-ledger.ts'
 import { validateContributionReview } from './finance/contribution-review.ts'
 import { reconcileProcurementFunding, validateProcurementPayment } from './finance/procurement-payment.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
+import { makeDistributionOrder, distributionOrderIsActive, type DistributionOrder } from './finance/distribution-orders.ts'
+import { validateCostRegistration, type ConfirmedCost } from './finance/confirmed-costs.ts'
 import { reviewReceiptBatch, summarizeProjectReceipts, validateReceiptRegistration, type ReceiptBatch } from './finance/customer-receipts.ts'
 import { unresolvedReceiptDifference, validateReceiptDifference, type ReceiptDifference } from './finance/receipt-differences.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
@@ -38,7 +40,7 @@ import { ownershipFrom } from './iam/data-scope.ts'
 import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '已中断' | '部分已结算' | '已完结'
+type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '部分已结算' | '已完结'
 type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资'
 
 type PaymentImage = {
@@ -292,6 +294,8 @@ const fundLedger = createFundLedger(mongo.db, appConfig.mongodb.collectionPrefix
 const procurementPayments = mongo.db.collection<ProcurementPayment>(`${appConfig.mongodb.collectionPrefix}procurement_payments`)
 const receiptBatches = mongo.db.collection<ReceiptBatch>(`${appConfig.mongodb.collectionPrefix}receipt_batches`)
 const receiptDifferences = mongo.db.collection<ReceiptDifference>(`${appConfig.mongodb.collectionPrefix}receipt_differences`)
+const distributionOrders = mongo.db.collection<DistributionOrder>(`${appConfig.mongodb.collectionPrefix}distribution_orders`)
+const confirmedCosts = mongo.db.collection<ConfirmedCost>(`${appConfig.mongodb.collectionPrefix}confirmed_costs`)
 const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
@@ -418,6 +422,53 @@ async function procurementFundingSnapshot(projectId: string, session?: import('m
   }
   const funding = reconcileProcurementFunding(fundingInput)
   return { project, rule, records, funding, fundingInput }
+}
+
+async function distributionSnapshot(projectId: string, session: import('mongodb').ClientSession) {
+  const { project, rule, records, funding } = await procurementFundingSnapshot(projectId, session)
+  const payment = await procurementPayments.findOne({ projectId }, { session })
+  if (!payment || !funding.balanced || !rule.sharePrice || !rule.totalShares) {
+    throw new AppError(409, 'DISTRIBUTION_FUNDING_INVALID', '采购付款或认购份数尚未核对闭合')
+  }
+  const batches = await receiptBatches.find({ 'lines.projectId': projectId }, { session }).toArray()
+  const receivableCents = Math.round(project.salesAmount * 100)
+  if (!Number.isSafeInteger(receivableCents) || receivableCents <= 0) {
+    throw new AppError(409, 'RECEIVABLE_INVALID', '发布时应收金额无效，请先核对众筹单')
+  }
+  const summary = summarizeProjectReceipts(batches, projectId, receivableCents)
+  if (summary.gapCents > 0) throw new AppError(409, 'RECEIPTS_INSUFFICIENT', '累计回款尚未达到应收金额')
+  const differences = await receiptDifferences.find({ projectId }, { session }).toArray()
+  if (unresolvedReceiptDifference(summary.excessCents, differences).unresolvedCents > 0) {
+    throw new AppError(409, 'RECEIPT_DIFFERENCE_PENDING', '存在未处理的回款差异')
+  }
+  const costRecords = await confirmedCosts.find({ projectId }, { session }).toArray()
+  if (costRecords.some(item => item.status === '待公司复核')) {
+    throw new AppError(409, 'COST_REVIEW_PENDING', '存在待公司复核的其他成本')
+  }
+  const confirmedCostsCents = costRecords.filter(item => item.status === '已确认')
+    .reduce((sum, item) => sum + item.amountCents, 0)
+  if (!Number.isSafeInteger(confirmedCostsCents)) throw new AppError(409, 'COST_AMOUNT_INVALID', '已确认成本金额超出安全范围')
+  const employeeShares = new Map<string, number>()
+  let companyShares = 0
+  for (const record of records) {
+    if (record.pay !== '已缴款') continue
+    if (!Number.isSafeInteger(record.shares) || record.shares! <= 0) {
+      throw new AppError(409, 'DISTRIBUTION_SHARES_INVALID', '认购份数无效')
+    }
+    if (record.companyKind === 'front' || record.companyKind === 'backstop') companyShares += record.shares!
+    else employeeShares.set(record.userId, (employeeShares.get(record.userId) ?? 0) + record.shares!)
+  }
+  if (companyShares + [...employeeShares.values()].reduce((sum, shares) => sum + shares, 0) !== rule.totalShares) {
+    throw new AppError(409, 'DISTRIBUTION_SHARES_INVALID', '公司与员工认购份数未闭合')
+  }
+  return { project: project as Project, payment, summary, input: {
+    sharePriceCents: Math.round(rule.sharePrice * 100), totalShares: rule.totalShares,
+    positions: [...[...employeeShares].map(([participantId, shares]) => ({ participantId, kind: 'employee' as const, shares })),
+      { participantId: 'company', kind: 'company' as const, shares: companyShares }],
+    receivableCents, customerReceiptsCents: summary.customerGrossCents,
+    companyTopUpsCents: summary.companyTopUpsCents, companyReturnsCents: summary.companyReturnsCents,
+    procurementPaymentsCents: payment.amountCents, confirmedCostsCents
+  } }
 }
 
 function addHours(datetime: string, hours: number) {
@@ -683,6 +734,27 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, { data: { projectId, receivableCents,
       ...receipts, ...unresolvedReceiptDifference(receipts.excessCents, differences), differences } })
   }
+  if (pathname === '/api/distribution-orders') {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看分配单')
+    const projectId = searchParams.get('projectId')?.trim()
+    const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
+    const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
+    const filter = projectId ? { projectId } : {}
+    const [items, total] = await Promise.all([
+      distributionOrders.find(filter).sort({ createdAt: -1, id: -1 }).skip((page - 1) * pageSize).limit(pageSize).toArray(),
+      distributionOrders.countDocuments(filter)
+    ])
+    return send(res, 200, { data: { items, total, page, pageSize } })
+  }
+  if (pathname === '/api/confirmed-costs') {
+    const role = requestContext(req).role
+    if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '当前角色无权查看其他成本')
+    const projectId = searchParams.get('projectId')?.trim()
+    const filter = projectId ? { projectId } : {}
+    const items = await confirmedCosts.find(filter).sort({ createdAt: -1, id: -1 }).limit(200).toArray()
+    return send(res, 200, { data: items })
+  }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()
@@ -844,6 +916,26 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'customer-receipt-proof',
       ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
     return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '回款凭证已保存，待登记回款' })
+  }
+  const costProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/confirmed-cost-proofs$/)
+  if (costProofMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(costProofMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project || !['待回款', '回款中', '待分配'].includes(project.status)
+      || !await procurementPayments.findOne({ projectId })) {
+      return send(res, 409, { error: 'COST_PROJECT_INVALID', message: '众筹单不允许登记其他成本' })
+    }
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId: projectId,
+      purpose: 'confirmed-cost-proof', status: 'ready' })
+    if (existing >= 50) return send(res, 429, { error: 'COST_PROOF_LIMIT', message: '该众筹单暂存成本凭证已达上限' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'confirmed-cost-proof',
+      ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '成本凭证已保存' })
   }
   const paymentProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-payment\/proofs$/)
   if (paymentProofMatch) {
@@ -1111,6 +1203,109 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  if (pathname === '/api/confirmed-costs') {
+    const actor = financeOperator(req)
+    const projectId = typeof body.projectId === 'string' ? body.projectId.trim() : ''
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'COST_PROOFS_INVALID', message: '请提供已上传的成本凭证编号' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const project = await repositories.projects.getById(projectId, session)
+        if (!project || !['待回款', '回款中', '待分配'].includes(project.status)
+          || !await procurementPayments.findOne({ projectId }, { session })) {
+          throw new AppError(409, 'COST_PROJECT_INVALID', '众筹单不允许登记其他成本')
+        }
+        const record = validateCostRegistration({ id: `COST-${randomUUID()}`, projectId,
+          amountCents: body.amountCents as number,
+          transactionNo: typeof body.transactionNo === 'string' ? body.transactionNo : '',
+          paidAt: body.paidAt as string, proofAssetIds: body.proofAssetIds as string[],
+          reason: typeof body.reason === 'string' ? body.reason : '', registeredBy: actor.userId }, new Date())
+        const occupied = await bankTransactions.findOne({ transactionNo: record.transactionNo }, { session })
+          || await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`)
+            .findOne({ transactionNo: record.transactionNo }, { session })
+        if (occupied) throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '成本付款流水号已被使用')
+        for (const assetId of record.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'confirmed-cost-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== projectId || asset.createdBy !== actor.userId
+            || await confirmedCosts.findOne({ proofAssetIds: assetId }, { session })) {
+            throw new AppError(409, 'COST_PROOF_INVALID', '成本凭证不存在、未留存或已被使用')
+          }
+        }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId }, { $inc: { costRevision: 1 } }, { session })
+        await bankTransactions.insertOne({ transactionNo: record.transactionNo,
+          sourceKey: `confirmed-cost:${record.id}`, projectId, createdAt: record.createdAt }, { session })
+        await confirmedCosts.insertOne(record, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记其他成本并提交公司复核',
+          target: record.id, before: null, after: { projectId, amountCents: record.amountCents,
+            transactionNo: record.transactionNo } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { record, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.record, message: '其他成本已提交公司复核' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'COST_DUPLICATE', message: '成本流水号或单据已存在' })
+      if (error instanceof Error && /成本|金额|时间|流水号|凭证/.test(error.message)) {
+        return send(res, 400, { error: 'COST_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const costReviewMatch = pathname.match(/^\/api\/confirmed-costs\/([^/]+)\/review$/)
+  if (costReviewMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const id = decodeURIComponent(costReviewMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const record = await confirmedCosts.findOne({ id }, { session })
+        if (!record) throw new AppError(404, 'COST_NOT_FOUND', '成本记录不存在')
+        if (record.status !== '待公司复核') throw new AppError(409, 'COST_ALREADY_REVIEWED', '成本已复核')
+        if (record.registeredBy === actor.userId) throw new AppError(403, 'COST_SELF_REVIEW', '登记人不能复核自己的成本')
+        const project = await repositories.projects.getById(record.projectId, session)
+        if (!project || !['待回款', '回款中', '待分配'].includes(project.status)) {
+          throw new AppError(409, 'COST_PROJECT_INVALID', '众筹单状态已变化')
+        }
+        const decision = body.decision
+        const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+        if (decision !== '通过' && decision !== '驳回') throw new AppError(400, 'COST_DECISION_INVALID', '复核结果无效')
+        if (decision === '驳回' && (reason.length < 5 || reason.length > 200)) {
+          throw new AppError(400, 'COST_REJECT_REASON_INVALID', '驳回原因须为 5 至 200 字')
+        }
+        const updated: ConfirmedCost = { ...record, status: decision === '通过' ? '已确认' : '已驳回',
+          reviewedBy: actor.userId, reviewedAt: new Date().toISOString(),
+          ...(decision === '驳回' ? { rejectReason: reason } : {}) }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: record.projectId }, { $inc: { costRevision: 1 } }, { session })
+        await confirmedCosts.replaceOne({ id, status: '待公司复核' }, updated, { session })
+        if (decision === '通过') {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+            id: `LED-${randomUUID()}`, sourceKey: `confirmed-cost:${id}`, type: 'other_confirmed_cost',
+            projectId: record.projectId, amountCents: record.amountCents,
+            transactionNo: record.transactionNo, transactionKey: `confirmed-cost:${id}`,
+            proofAssetIds: record.proofAssetIds, reviewedBy: actor.userId, createdAt: updated.reviewedAt
+          }, { session })
+        } else {
+          await bankTransactions.deleteOne({ transactionNo: record.transactionNo,
+            sourceKey: `confirmed-cost:${id}` }, { session })
+        }
+        const audit = auditRecord({ actor: actor.label, role: 'super_admin',
+          action: decision === '通过' ? '确认其他成本' : '驳回其他成本',
+          target: id, before: { status: record.status }, after: { status: updated.status, reason: updated.rejectReason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { updated, audit }
+      })
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.updated, message: result.updated.status === '已确认' ? '成本已确认' : '成本已驳回' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'COST_DUPLICATE', message: '成本状态已变化' })
+      throw error
+    }
+  }
   if (pathname === '/api/receipt-batches') {
     const actor = financeOperator(req)
     if (body.recognitionFailed !== true) return send(res, 409, { error: 'RECEIPT_OCR_NOT_AVAILABLE', message: '回款凭证尚无可信的金额、流水号和到账时间识别结果，请填写人工核对说明' })
@@ -1328,6 +1523,111 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (isDuplicateKey(error)) return send(res, 409, { error: 'RECEIPT_DIFFERENCE_DUPLICATE', message: '退款流水号或差异单已存在' })
       if (error instanceof Error && /差异|金额|退款流水号|公司/.test(error.message)) {
         return send(res, 400, { error: 'RECEIPT_DIFFERENCE_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const distributionGenerateMatch = pathname.match(/^\/api\/projects\/([^/]+)\/distribution-orders$/)
+  if (distributionGenerateMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(distributionGenerateMatch[1])
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const { project, input } = await distributionSnapshot(projectId, session)
+        if (project.status !== '待分配') throw new AppError(409, 'PROJECT_NOT_DISTRIBUTION_READY', '众筹单尚未进入待分配')
+        const existing = await distributionOrders.find({ projectId }, { session }).toArray()
+        if (existing.some(distributionOrderIsActive)) throw new AppError(409, 'DISTRIBUTION_EXISTS', '该众筹单已有有效分配单')
+        const order = makeDistributionOrder({ ...input, id: `DIST-${randomUUID()}`, projectId,
+          generatedBy: actor.userId, createdAt: new Date().toISOString() })
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+          .updateOne({ id: projectId, status: '待分配' }, { $set: { status: '分配中', statusType: 'warning' },
+            $inc: { distributionRevision: 1 } }, { session })
+        await distributionOrders.insertOne(order, { session })
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '生成分配单',
+          target: order.id, before: null, after: { projectId, profitCents: order.profitCents,
+            payoutTotalCents: order.payoutTotalCents, confirmedCostsCents: order.confirmedCostsCents } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { order, project, audit }
+      })
+      const index = projects.findIndex(project => project.id === projectId)
+      if (index >= 0) projects.splice(index, 1, { ...result.project, status: '分配中', statusType: 'warning' })
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.order, message: '分配单已生成，请审批' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'DISTRIBUTION_DUPLICATE', message: '分配单已存在' })
+      if (error instanceof Error && /分配|份数|金额|回款|成本|利润|采购|认购/.test(error.message)) {
+        return send(res, 409, { error: 'DISTRIBUTION_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
+  const distributionActionMatch = pathname.match(/^\/api\/distribution-orders\/([^/]+)\/(approve|reject|void)$/)
+  if (distributionActionMatch) {
+    const actor = financeOperator(req)
+    const orderId = decodeURIComponent(distributionActionMatch[1])
+    const action = distributionActionMatch[2]
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const order = await distributionOrders.findOne({ id: orderId }, { session })
+        if (!order) throw new AppError(404, 'DISTRIBUTION_NOT_FOUND', '分配单不存在')
+        if (action === 'void' && order.status !== '待审批' && order.status !== '已驳回'
+          || action !== 'void' && order.status !== '待审批') {
+          throw new AppError(409, 'DISTRIBUTION_STATUS_INVALID', '当前分配单状态不允许此操作')
+        }
+        const project = await repositories.projects.getById(order.projectId, session)
+        const rejectedVoid = action === 'void' && order.status === '已驳回'
+        if (!project || (!rejectedVoid && project.status !== '分配中')) {
+          throw new AppError(409, 'PROJECT_DISTRIBUTION_LOCKED', '众筹单状态已变化')
+        }
+        let next: DistributionOrder
+        if (action === 'approve') {
+          const { payment, input } = await distributionSnapshot(order.projectId, session)
+          if (payment.operatorId === actor.userId) {
+            throw new AppError(403, 'DISTRIBUTION_SELF_APPROVAL', '您参与了该众筹单的付款登记，不可审批分配单')
+          }
+          const refreshed = makeDistributionOrder({ ...input, id: order.id, projectId: order.projectId,
+            generatedBy: order.generatedBy, createdAt: order.createdAt })
+          if (JSON.stringify(refreshed.lines) !== JSON.stringify(order.lines)
+            || refreshed.profitCents !== order.profitCents || refreshed.payoutTotalCents !== order.payoutTotalCents) {
+            throw new AppError(409, 'DISTRIBUTION_CHANGED', '分配依据已变化，请先作废并重新生成')
+          }
+          next = { ...order, status: '已审批', approvedBy: actor.userId, approvedAt: new Date().toISOString() }
+        } else if (action === 'reject') {
+          const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+          if (reason.length < 5 || reason.length > 200) throw new AppError(400, 'DISTRIBUTION_REASON_INVALID', '驳回原因须为 5 至 200 字')
+          next = { ...order, status: '已驳回', rejectedBy: actor.userId,
+            rejectedAt: new Date().toISOString(), rejectReason: reason }
+        } else {
+          next = { ...order, status: '已作废', voidedBy: actor.userId, voidedAt: new Date().toISOString() }
+        }
+        await distributionOrders.replaceOne({ id: order.id, status: order.status }, next, { session })
+        if (action !== 'approve' && !rejectedVoid) {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: order.projectId }, { $set: { status: '待分配', statusType: 'success' },
+              $inc: { distributionRevision: 1 } }, { session })
+        } else if (!rejectedVoid) {
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}projects`)
+            .updateOne({ id: order.projectId }, { $inc: { distributionRevision: 1 } }, { session })
+        }
+        const audit = auditRecord({ actor: actor.label, role: 'finance',
+          action: action === 'approve' ? '审批通过分配单' : action === 'reject' ? '驳回分配单' : '作废分配单',
+          target: order.id, before: { status: order.status }, after: { status: next.status,
+            reason: next.rejectReason } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { next, project: project as Project, audit }
+      })
+      if (action !== 'approve' && result.project.status === '分配中') {
+        const index = projects.findIndex(project => project.id === result.project.id)
+        if (index >= 0) projects.splice(index, 1, { ...result.project, status: '待分配', statusType: 'success' })
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 200, { data: result.next, message: action === 'approve' ? '审批通过' : action === 'reject' ? '已驳回' : '已作废' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'DISTRIBUTION_DUPLICATE', message: '分配单状态已变化' })
+      if (error instanceof Error && /分配|份数|金额|回款|成本|利润|采购|认购/.test(error.message)) {
+        return send(res, 409, { error: 'DISTRIBUTION_INVALID', message: error.message })
       }
       throw error
     }

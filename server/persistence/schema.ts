@@ -11,6 +11,8 @@ export const businessCollections = [
   'bank_transactions',
   'receipt_batches',
   'receipt_differences',
+  'distribution_orders',
+  'confirmed_costs',
   'risk_events',
   'file_assets'
 ] as const
@@ -35,6 +37,8 @@ export const legacyImageFields: Record<BusinessCollection, readonly string[]> = 
   bank_transactions: [],
   receipt_batches: [],
   receipt_differences: [],
+  distribution_orders: [],
+  confirmed_costs: [],
   risk_events: [],
   file_assets: []
 }
@@ -101,6 +105,15 @@ export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[
     { name: 'idx_receipt_difference_project', key: { projectId: 1, createdAt: -1 } },
     { name: 'uniq_receipt_difference_refund_transaction', key: { refundTransactionNo: 1 }, unique: true,
       partialFilterExpression: { refundTransactionNo: { $gt: '' } } }
+  ],
+  distribution_orders: [
+    { name: 'uniq_distribution_order_id', key: { id: 1 }, unique: true },
+    { name: 'idx_distribution_order_project_time', key: { projectId: 1, createdAt: -1 } }
+  ],
+  confirmed_costs: [
+    { name: 'uniq_confirmed_cost_id', key: { id: 1 }, unique: true },
+    { name: 'idx_confirmed_cost_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'idx_confirmed_cost_status', key: { status: 1 } }
   ],
   risk_events: [
     { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },

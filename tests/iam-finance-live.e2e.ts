@@ -60,6 +60,21 @@ try {
   assert.ok(info.uiPermissions.includes('crowdfunding:receipt:query'))
   assert.ok(info.menus.some(menu => menu.componentName === 'customerReceipts'
     || menu.children?.some(child => child.componentName === 'customerReceipts')))
+  for (const permission of ['crowdfunding:distribution:query', 'crowdfunding:distribution:generate',
+    'crowdfunding:distribution:approve', 'crowdfunding:distribution:reject',
+    'crowdfunding:distribution:void']) {
+    assert.ok(info.apiPermissions.includes(permission), `${permission} 已授予财务`)
+    assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
+  }
+  assert.ok(info.uiPermissions.includes('crowdfunding:distribution:query'))
+  assert.ok(info.menus.some(menu => menu.componentName === 'distributionOrders'
+    || menu.children?.some(child => child.componentName === 'distributionOrders')))
+  for (const permission of ['crowdfunding:cost:query', 'crowdfunding:cost:register',
+    'crowdfunding:cost:proof-upload']) {
+    assert.ok(info.apiPermissions.includes(permission), `${permission} 已授予财务`)
+    assert.equal(await iam.decideApi(accessToken, permission, claims.tenantId), true)
+  }
+  await assert.rejects(iam.decideApi(accessToken, 'crowdfunding:cost:review', claims.tenantId), /IAM 权限拒绝/)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:register', claims.tenantId), true)
   assert.equal(await iam.decideApi(accessToken, 'crowdfunding:procurement-payment:proof-upload', claims.tenantId), true)
   process.stdout.write('真实 IAM 财务授权联调通过\n')

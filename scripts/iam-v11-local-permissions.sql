@@ -97,6 +97,15 @@ FROM (
   UNION ALL SELECT 'crowdfunding:receipt:proof-upload', '回款凭证上传', 'POST', '/api/projects/*/receipt-proofs'
   UNION ALL SELECT 'crowdfunding:receipt:review', '客户回款及公司补款复核', 'POST', '/api/receipt-batches/*/review'
   UNION ALL SELECT 'crowdfunding:receipt:difference-register', '回款差异去向登记', 'POST', '/api/projects/*/receipt-differences'
+  UNION ALL SELECT 'crowdfunding:distribution:query', '利润分配查询', 'GET', '/api/distribution-orders'
+  UNION ALL SELECT 'crowdfunding:distribution:generate', '生成分配单', 'POST', '/api/projects/*/distribution-orders'
+  UNION ALL SELECT 'crowdfunding:distribution:approve', '审批分配单', 'POST', '/api/distribution-orders/*/approve'
+  UNION ALL SELECT 'crowdfunding:distribution:reject', '驳回分配单', 'POST', '/api/distribution-orders/*/reject'
+  UNION ALL SELECT 'crowdfunding:distribution:void', '作废分配单', 'POST', '/api/distribution-orders/*/void'
+  UNION ALL SELECT 'crowdfunding:cost:query', '其他成本查询', 'GET', '/api/confirmed-costs'
+  UNION ALL SELECT 'crowdfunding:cost:register', '其他成本登记', 'POST', '/api/confirmed-costs'
+  UNION ALL SELECT 'crowdfunding:cost:proof-upload', '其他成本凭证上传', 'POST', '/api/projects/*/confirmed-cost-proofs'
+  UNION ALL SELECT 'crowdfunding:cost:review', '其他成本公司复核', 'POST', '/api/confirmed-costs/*/review'
 ) codes
 WHERE NOT EXISTS (SELECT 1 FROM system_api_resource resource WHERE resource.client_id = 'crowdfunding'
   AND resource.code = codes.code AND resource.deleted = b'0');
@@ -134,5 +143,57 @@ FROM system_role role JOIN system_menu menu ON menu.client_id = 'crowdfunding'
 WHERE role.code IN ('crowdfunding_finance', 'crowdfunding_super_admin') AND role.tenant_id = 0 AND role.deleted = b'0'
   AND NOT EXISTS (SELECT 1 FROM system_role_menu grant_row WHERE grant_row.role_id = role.id
     AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_menu (client_id, parent_id, name, component_name, type, sort, visible, permission, status, tenant_id)
+SELECT 'crowdfunding', parent.id, '利润分配', 'distributionOrders', 2, 60, 0,
+  'crowdfunding:distribution:query', 0, 0
+FROM system_menu parent
+WHERE parent.client_id = 'crowdfunding' AND parent.component_name = 'crowdfunding'
+  AND parent.tenant_id = 0 AND parent.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_menu WHERE client_id = 'crowdfunding'
+    AND permission = 'crowdfunding:distribution:query' AND deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:distribution:query', 'crowdfunding:distribution:generate',
+    'crowdfunding:distribution:approve', 'crowdfunding:distribution:reject',
+    'crowdfunding:distribution:void') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code = 'crowdfunding:distribution:query' AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_menu (role_id, menu_id, tenant_id)
+SELECT role.id, menu.id, 0
+FROM system_role role JOIN system_menu menu ON menu.client_id = 'crowdfunding'
+  AND menu.permission = 'crowdfunding:distribution:query' AND menu.tenant_id = 0 AND menu.deleted = b'0'
+WHERE role.code IN ('crowdfunding_finance', 'crowdfunding_super_admin') AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_menu grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:cost:query', 'crowdfunding:cost:register',
+    'crowdfunding:cost:proof-upload') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:cost:query', 'crowdfunding:cost:review') AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
 
 COMMIT;
