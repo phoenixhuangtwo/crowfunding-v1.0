@@ -145,6 +145,10 @@ textarea {
   border-bottom: 1px solid var(--line);
 }
 
+.mobile-nav {
+  display: none;
+}
+
 .crumb {
   color: var(--muted);
   font-size: 13px;
@@ -1351,6 +1355,23 @@ h2 {
 @media (max-width: 980px) {
   .sidebar {
     display: none;
+  }
+
+  .mobile-nav {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .mobile-nav select {
+    flex: 1;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
   }
 
   .topbar {

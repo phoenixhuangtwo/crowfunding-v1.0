@@ -1207,6 +1207,10 @@ function go(page: PageKey) {
   }
   currentPage.value = page
 }
+function selectMobilePage(event: Event) {
+  const page = (event.target as HTMLSelectElement).value as PageKey
+  if (visibleNavGroups.value.some(group => group.pages.some(item => item.key === page))) go(page)
+}
 function openNotificationTarget(page: string) {
   if (!authorizedPageKeys.value.has(page as AuthorizedPageKey)
     || !visibleNavGroups.value.some(group => group.pages.some(item => item.key === page))) {
@@ -2451,6 +2455,14 @@ watch(() => authSession.permissionInfo.value, info => {
 
     <main class="main">
       <header class="topbar">
+        <label class="mobile-nav" for="mobile-page-nav">
+          <span>页面</span>
+          <select id="mobile-page-nav" :value="currentPage" @change="selectMobilePage">
+            <optgroup v-for="group in visibleNavGroups" :key="group.title" :label="group.title">
+              <option v-for="page in group.pages" :key="page.key" :value="page.key">{{ page.label }}</option>
+            </optgroup>
+          </select>
+        </label>
         <div>
           <div class="crumb">工作台 / <b>{{ pageTitle }}</b></div>
           <div class="top-hint">{{ authSession.permissionInfo.value?.user.nickname || authSession.permissionInfo.value?.user.username }} · 用户 {{ authSession.permissionInfo.value?.user.username }} · 部门 {{ authSession.permissionInfo.value?.user.deptId || '-' }}</div>
