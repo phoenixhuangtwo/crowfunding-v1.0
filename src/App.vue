@@ -81,7 +81,13 @@ type Project = {
   reopenedByProjectId?: string
   createdAt?: string
   projectOwner?: string
-  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
+  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已冻结' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
+  frozenFromStatus?: string
+  frozenFromStatusType?: Project['statusType']
+  procurementDifference?: { fingerprint: string; fields: string[]; publishedCostCents: number;
+    publishedSalesCents: number; currentCostCents: number | null; currentSalesCents: number | null;
+    detectedAt: string }
+  procurementDifferenceResolution?: { differenceDetails: string; reason: string; resolvedAt: string; resolvedBy: string }
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
   remain: number
@@ -1396,6 +1402,34 @@ async function closeProject(project: Project) {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '发起关闭失败') }
 }
 
+async function resolveProcurementDifference(project: Project) {
+  const difference = project.procurementDifference
+  if (!difference) return
+  const amount = (cents: number | null) => cents === null ? '无效' : formatMoney(cents / 100)
+  let differenceDetails = ''
+  let reason = ''
+  try {
+    differenceDetails = (await ElMessageBox.prompt(
+      `发布时采购/销售金额：${amount(difference.publishedCostCents)} / ${amount(difference.publishedSalesCents)}；当前采购系统：${amount(difference.currentCostCents)} / ${amount(difference.currentSalesCents)}。请填写差异内容（5–500 字）。`,
+      '采购单差异确认', { inputType: 'textarea' })).value.trim()
+    if (differenceDetails.length < 5 || differenceDetails.length > 500) {
+      ElMessage.warning('差异内容须为 5 至 500 字'); return
+    }
+    reason = (await ElMessageBox.prompt('请填写按发布时内容继续的处理说明（5–200 字）。',
+      '确认处理方式', { inputType: 'textarea' })).value.trim()
+    if (reason.length < 5 || reason.length > 200) { ElMessage.warning('处理说明须为 5 至 200 字'); return }
+    await ElMessageBox.confirm('确认按发布时金额继续？该采购差异及处理说明将写入审计记录。',
+      '确认解除冻结', { type: 'warning' })
+  } catch { return }
+  try {
+    const result = await api<{ message: string }>(
+      `/api/projects/${encodeURIComponent(project.id)}/procurement-difference/resolve`, {
+        method: 'POST', body: JSON.stringify({ action: 'continue', differenceDetails, reason }) })
+    ElMessage.success(result.message)
+    await loadData()
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '处理采购差异失败') }
+}
+
 async function requestProcurementFailure(project: Project) {
   let reason = ''
   try {
@@ -2523,6 +2557,7 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-table-column label="项目状态" align="center" header-align="center" min-width="220">
                 <template #default="{ row }">
                   <el-tag :type="row.statusType">{{ row.status === '已完结' || row.status === '部分已结算' ? '历史状态（待核实）' : row.status }}</el-tag>
+                  <div v-if="row.status === '已冻结'" class="muted">该众筹单已冻结，请等待处理</div>
                   <el-tooltip
                     v-if="row.status === '已中断'"
                     placement="top-start"
@@ -2606,6 +2641,8 @@ watch(() => authSession.permissionInfo.value, info => {
           </div>
           <div class="detail-grid">
             <div>
+              <el-alert v-if="selectedProject.status === '已冻结'" title="该众筹单已冻结，请等待处理"
+                type="warning" :closable="false" show-icon />
               <section class="panel">
                 <h2>项目基础信息</h2>
                 <dl class="desc">
@@ -3003,6 +3040,10 @@ watch(() => authSession.permissionInfo.value, info => {
                 <template #default="{ row }">
                   <div v-if="!limitedAdmin" class="project-action-group">
                     <el-button
+                      v-if="row.status === '已冻结' && canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-difference:resolve')"
+                      size="small" type="warning" @click="resolveProcurementDifference(row)"
+                    >处理采购差异</el-button>
+                    <el-button
                       v-if="adminProjectActionLayout(row).showPayReview && canApi(authSession.permissionInfo.value, 'crowdfunding:payment-review:query')"
                       size="small"
                       type="primary"
@@ -3027,7 +3068,7 @@ watch(() => authSession.permissionInfo.value, info => {
                       开放
                     </el-button>
                     <el-dropdown
-                      v-if="(adminProjectActionLayout(row).showMore || ['已满额', '已截止', '已关闭', '待回款', '回款中', '待分配', '分配中'].includes(row.status)) && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:close') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen') || canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:request') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
+                      v-if="(adminProjectActionLayout(row).showMore || ['已满额', '已截止', '已关闭', '待回款', '回款中', '待分配', '分配中', '已冻结'].includes(row.status)) && (canApi(authSession.permissionInfo.value, 'crowdfunding:project:terminate') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:close') || canApi(authSession.permissionInfo.value, 'crowdfunding:project:reopen') || canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:request') || canApi(authSession.permissionInfo.value, 'crowdfunding:takeover:force'))"
                       trigger="click"
                       popper-class="project-action-menu"
                       @command="handleAdminProjectMoreCommand($event, row)"
@@ -3045,7 +3086,7 @@ watch(() => authSession.permissionInfo.value, info => {
                             停止未开放项目
                           </el-dropdown-item>
                           <el-dropdown-item
-                            v-if="['未满额', '已满额', '已截止'].includes(row.status) && canApi(authSession.permissionInfo.value, 'crowdfunding:project:close')"
+                            v-if="(['未满额', '已满额', '已截止'].includes(row.status) || (row.status === '已冻结' && ['未满额', '已满额', '已截止'].includes(row.frozenFromStatus ?? ''))) && canApi(authSession.permissionInfo.value, 'crowdfunding:project:close')"
                             command="close"
                             class="danger-menu-item"
                           >关闭众筹单</el-dropdown-item>
@@ -3054,7 +3095,7 @@ watch(() => authSession.permissionInfo.value, info => {
                             command="reopen"
                           >重开众筹单</el-dropdown-item>
                           <el-dropdown-item
-                            v-if="['待回款', '回款中', '待分配', '分配中'].includes(row.status) && canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:request')"
+                            v-if="(['待回款', '回款中', '待分配', '分配中'].includes(row.status) || (row.status === '已冻结' && ['待回款', '回款中', '待分配', '分配中'].includes(row.frozenFromStatus ?? ''))) && canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-failure:request')"
                             command="procurementFailure"
                             class="danger-menu-item"
                           >申请采购失败终止</el-dropdown-item>

@@ -35,6 +35,7 @@ import { validateProjectRefundProxy, type ProjectRefundProxyRequest } from './fi
 import type { DistributionPayoutProxyRequest } from './finance/distribution-payout-proxy.ts'
 import { defaultRuleParameters, validateRuleParameters, type RuleParameters, type StoredRuleParameters } from './rule-parameters.ts'
 import { paymentReminderDue, procurementReadyReminderDue, proxyConfirmationReminderDue, recipientNotification, roleNotification, subscriptionNotification, type Notification } from './notifications.ts'
+import { procurementAmountDifference, type ProcurementAmountDifference } from './procurement-difference.ts'
 import { planEscalationNotifications } from './notification-escalations.ts'
 import { validateOverdueResolution, type ReceiptOverdueCase } from './finance/receipt-overdue.ts'
 import { confirmExceptionRefund, reserveExceptionRefund, reserveExceptionTransfer, reviewExceptionTransfer,
@@ -52,7 +53,7 @@ import { ownershipFrom } from './iam/data-scope.ts'
 import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
+type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已冻结' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
 type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资' | '待退款' | '待确认退款' | '已退款'
 
 type PaymentImage = {
@@ -103,6 +104,11 @@ type Project = {
   purchasePaidAmount?: number
   proxyConfirmDays?: number
   ruleParametersSnapshot?: RuleParameters
+  frozenFromStatus?: ProjectStatus
+  frozenFromStatusType?: Project['statusType']
+  procurementDifference?: ProcurementAmountDifference & { detectedAt: string }
+  procurementAcceptedFingerprint?: string
+  procurementDifferenceResolution?: { differenceDetails: string; reason: string; resolvedAt: string; resolvedBy: string }
   closedAt?: string
   closedBy?: string
   settlementInvoices?: SettlementInvoiceRecord[]
@@ -1547,6 +1553,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = fields.subscriptionId?.trim()
     const current = subscriptionId ? await repositories.subscriptions.getById(subscriptionId) : null
     if (!current) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    if ((await repositories.projects.getById(current.projectId))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
     if ((await repositories.projects.getById(current.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     if (context.role !== 'employee' || current.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能上传本人认购的支付截图')
     if (['已缴款', '已收款', '已释放', '公司待出资', '待退款', '待确认退款', '已退款'].includes(current.pay)) return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
@@ -1583,6 +1590,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const updated = await mongo.withTransaction(async session => {
         const latest = await repositories.subscriptions.getById(current.id, session)
         if (!latest) throw new Error('认购记录不存在')
+        if ((await repositories.projects.getById(latest.projectId, session))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
         if ((latest.paymentImages?.length ?? 0) >= maxPaymentImagesPerSubscription) throw new Error('支付截图数量已达上限')
         const uploadedAt = now()
         const imageRecord = {
@@ -2211,7 +2219,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const project = await repositories.projects.getById(projectId, session)
         if (!project) throw new AppError(404, 'PROJECT_NOT_FOUND', '众筹单不存在')
         requireAdminOwned(req, project)
-        if (!['待回款', '回款中', '待分配', '分配中'].includes(project.status)
+        if (!(project.status === '已冻结'
+          ? ['待回款', '回款中', '待分配', '分配中'].includes(project.frozenFromStatus ?? '')
+          : ['待回款', '回款中', '待分配', '分配中'].includes(project.status))
           || !await procurementPayments.findOne({ projectId }, { session })) {
           throw new AppError(409, 'PROCUREMENT_FAILURE_STATE_INVALID', '采购付款后且分配审批前方可申请采购失败终止')
         }
@@ -2253,7 +2263,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const request = await procurementFailureRequests.findOne({ id }, { session })
         if (!request || request.status !== '待公司复核') throw new AppError(409, 'PROCUREMENT_FAILURE_CHANGED', '申请不存在或已复核')
         const project = await repositories.projects.getById(request.projectId, session)
-        if (!project || !['待回款', '回款中', '待分配', '分配中'].includes(project.status)) {
+        if (!project || !(project.status === '已冻结'
+          ? ['待回款', '回款中', '待分配', '分配中'].includes(project.frozenFromStatus ?? '')
+          : ['待回款', '回款中', '待分配', '分配中'].includes(project.status))) {
           throw new AppError(409, 'PROCUREMENT_FAILURE_STATE_INVALID', '众筹单状态已变化')
         }
         if (await distributionOrders.findOne({ projectId: project.id,
@@ -2294,6 +2306,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             } else updatedRecords.push({ ...record, pay: '已释放', action: '认购已作废' })
           }
           updatedProject = { ...project, status: '采购失败终止中', statusType: 'warning',
+            frozenFromStatus: undefined, frozenFromStatusType: undefined,
             interruptReason: request.reason, interruptedAt: reviewedAt } as Project
           await repositories.projects.replace(updatedProject, session)
           await distributionOrders.updateMany({ projectId: project.id,
@@ -2334,6 +2347,51 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       throw error
     }
   }
+  const procurementDifferenceResolveMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-difference\/resolve$/)
+  if (procurementDifferenceResolveMatch) {
+    const actor = managementActor(req, ['super_admin'])
+    const projectId = decodeURIComponent(procurementDifferenceResolveMatch[1])
+    const differenceDetails = typeof body.differenceDetails === 'string' ? body.differenceDetails.trim() : ''
+    const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+    if (body.action !== 'continue' || differenceDetails.length < 5 || differenceDetails.length > 500
+      || reason.length < 5 || reason.length > 200) {
+      return send(res, 400, { error: 'PROCUREMENT_DIFFERENCE_RESOLUTION_INVALID',
+        message: '请选择按发布时内容继续，并填写 5 至 500 字差异内容和 5 至 200 字处理说明' })
+    }
+    const result = await mongo.withTransaction(async session => {
+      const project = await repositories.projects.getById(projectId, session)
+      if (!project || project.status !== '已冻结' || !project.frozenFromStatus
+        || !project.procurementDifference) {
+        throw new AppError(409, 'PROCUREMENT_DIFFERENCE_NOT_FROZEN', '众筹单未处于采购差异冻结状态')
+      }
+      const resolvedAt = new Date().toISOString()
+      const updated: Project = { ...project, status: project.frozenFromStatus,
+        statusType: project.frozenFromStatusType ?? 'warning',
+        procurementAcceptedFingerprint: project.procurementDifference.fingerprint,
+        procurementDifferenceResolution: { differenceDetails, reason, resolvedAt, resolvedBy: actor.userId },
+        frozenFromStatus: undefined, frozenFromStatusType: undefined } as Project
+      await repositories.projects.replace(updated, session)
+      const audit = auditRecord({ actor: actor.label, role: actor.role, action: '确认采购单差异并继续',
+        target: projectId, before: { status: project.status, difference: project.procurementDifference },
+        after: { status: updated.status, differenceDetails, reason,
+          acceptedFingerprint: updated.procurementAcceptedFingerprint } }) as AuditLog
+      await repositories.auditLogs.insert(audit as never, session)
+      const content = `众筹单【${projectId}】冻结已处理，处理结果：【以发布时内容为准继续】`
+      const sourceId = `${projectId}:${project.procurementDifference.fingerprint}`
+      const notices = [roleNotification({ type: '众筹解冻', sourceId, role: 'finance',
+        projectId, content, targetPage: 'adminProjects', createdAt: resolvedAt }),
+      ...(project.ownerUserId ? [recipientNotification({ type: '众筹解冻', sourceId,
+        recipientId: project.ownerUserId, projectId, content,
+        targetPage: 'adminProjects', createdAt: resolvedAt })] : [])]
+      for (const notice of notices) await notifications.updateOne({ id: notice.id },
+        { $setOnInsert: notice }, { upsert: true, session })
+      return { updated, audit }
+    })
+    const index = projects.findIndex(project => project.id === projectId)
+    if (index >= 0) projects.splice(index, 1, result.updated)
+    auditLogs.unshift(result.audit)
+    return send(res, 200, { data: result.updated, message: '采购差异已确认，众筹单按发布时内容继续' })
+  }
   const projectCloseMatch = pathname.match(/^\/api\/projects\/([^/]+)\/close$/)
   if (projectCloseMatch) {
     const actor = managementActor(req, ['admin'])
@@ -2347,7 +2405,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const project = await repositories.projects.getById(projectId, session)
         if (!project) throw new AppError(404, 'PROJECT_NOT_FOUND', '众筹单不存在')
         requireAdminOwned(req, project)
-        if (!['未满额', '已满额', '已截止'].includes(project.status)
+        if (!(project.status === '已冻结'
+          ? ['未满额', '已满额', '已截止'].includes(project.frozenFromStatus ?? '')
+          : ['未满额', '已满额', '已截止'].includes(project.status))
           || await procurementPayments.findOne({ projectId }, { session })) {
           throw new AppError(409, 'PROJECT_CLOSE_INVALID', '只有采购付款前的已发布众筹单可以关闭')
         }
@@ -2382,6 +2442,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const status = refundOrders.length || unresolvedExceptions ? '关闭中' as const : '已关闭' as const
         const updatedProject = { ...project, status,
           statusType: status === '关闭中' ? 'warning' : 'info',
+          frozenFromStatus: undefined, frozenFromStatusType: undefined,
           interruptReason: reason, interruptedAt: new Date().toISOString(), refundNotice: undefined,
           ...(status === '已关闭' ? { closedAt: new Date().toISOString(), closedBy: actor.userId } : {}) } as Project
         await repositories.projects.replace(updatedProject, session)
@@ -4021,6 +4082,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     let created = 0
     let updated = 0
     let skipped = 0
+    let frozen = 0
+    const freezeChangedIds = new Set<string>()
+    const freezeNotices: Notification[] = []
     const skippedByReason = {
       missingId: 0,
       missingTitle: 0,
@@ -4028,6 +4092,36 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       protectedUnchanged: 0
     }
     for (const order of result.items) {
+      const externalId = String(order.id ?? '').trim()
+      const published = projects.find(project => project.id === `PRJ-FSY-OFFLINE-${externalId}`
+        && !['未开放', '已中断', '已关闭', '已终止', '已完结'].includes(project.status))
+      if (published) {
+        const difference = procurementAmountDifference(published, order)
+        if (difference && difference.fingerprint !== published.procurementAcceptedFingerprint) {
+          const newlyFrozen = published.status !== '已冻结'
+          if (newlyFrozen) {
+            published.frozenFromStatus = published.status
+            published.frozenFromStatusType = published.statusType
+            published.status = '已冻结'
+            published.statusType = 'danger'
+            frozen += 1
+            freezeChangedIds.add(published.id)
+          }
+          if (published.procurementDifference?.fingerprint !== difference.fingerprint) {
+            published.procurementDifference = { ...difference, detectedAt: new Date().toISOString() }
+            freezeChangedIds.add(published.id)
+          }
+          const noticeSource = `${published.id}:${difference.fingerprint}`
+          const content = `众筹单【${published.id}】已冻结，采购单${difference.fields.join('、')}与发布时不一致`
+          const createdAt = published.procurementDifference.detectedAt
+          if (published.ownerUserId) freezeNotices.push(recipientNotification({
+            type: '众筹冻结', sourceId: noticeSource, recipientId: published.ownerUserId,
+            projectId: published.id, content, targetPage: 'adminProjects', createdAt }))
+          for (const role of ['finance', 'super_admin'] as const) freezeNotices.push(roleNotification({
+            type: '众筹冻结', sourceId: noticeSource, role, projectId: published.id,
+            content, targetPage: 'adminProjects', createdAt }))
+        }
+      }
       const skipReason = procurementOrderSkipReason(order)
       if (skipReason) {
         skippedByReason[skipReason] += 1
@@ -4049,14 +4143,14 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       const hasRule = Boolean(existing.ruleId) || rules.some(rule => rule.projectId === existing.id)
       const hasSubscription = subscriptions.some(subscription => subscription.projectId === existing.id)
       const mergeResult = mergeProcurementProject(existing, mapped, existing.status !== '未开放' || hasRule || hasSubscription)
-      if (mergeResult === 'skipped') {
+      if (mergeResult === 'skipped' && !freezeChangedIds.has(existing.id)) {
         skippedByReason.protectedUnchanged += 1
         skipped += 1
         continue
       }
       updated += 1
     }
-    const summary = { fetched: result.fetched, total: result.total, created, updated, skipped, skippedByReason }
+    const summary = { fetched: result.fetched, total: result.total, created, updated, skipped, frozen, skippedByReason }
     await pushAudit({
       actor: manager!.label,
       role: manager!.role,
@@ -4065,6 +4159,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       before: null,
       after: summary
     })
+    for (const notice of freezeNotices) await notifications.updateOne({ id: notice.id },
+      { $setOnInsert: notice }, { upsert: true })
     return send(res, 200, {
       data: summary,
       message: formatProcurementSyncMessage(summary)
@@ -4175,6 +4271,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     }
     if (body.agreementsConfirmed !== true) return send(res, 409, { error: 'AGREEMENT_REQUIRED', message: '请先确认当前有效协议' })
     await agreementService.requireCurrent(body.agreementVersion)
+    if (project.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
     if (project.status !== '未满额') return send(res, 409, { error: 'PROJECT_NOT_SUBSCRIBABLE', message: '只有未满额项目可以继续认购' })
     let shares: number | undefined
     if (rule?.sharePrice !== undefined) {
@@ -4228,7 +4325,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     await mongo.withTransaction(async session => {
       await agreementService.requireCurrent(body.agreementVersion, session)
       const latest = await repositories.projects.getById(project.id, session)
-      if (!latest || latest.remain !== before.remain || latest.people !== before.people) throw new AppError(409, 'PROJECT_CHANGED', '项目认购额度已变化，请刷新后重试')
+      if (!latest || latest.status !== '未满额' || latest.remain !== before.remain || latest.people !== before.people) throw new AppError(409, 'PROJECT_CHANGED', '项目认购额度或状态已变化，请刷新后重试')
       await repositories.projects.replace(nextProject, session)
       await repositories.subscriptions.insert(record, session)
       const notice = subscriptionNotification(record, '认购成功', new Date().toISOString())
@@ -4248,6 +4345,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = decodeURIComponent(receiptMatch[1])
     const subscription = subscriptions.find(item => item.id === subscriptionId)
     if (!subscription) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    if ((await repositories.projects.getById(subscription.projectId))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
     const context = requestContext(req)
     if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能确认本人认购的收款')
     if (subscription.pay !== '待确认收款') {
@@ -4287,7 +4385,9 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = decodeURIComponent(reviewMatch[1])
     const subscription = subscriptions.find(item => item.id === subscriptionId)
     if (!subscription) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
-    if ((await repositories.projects.getById(subscription.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
+    const reviewProject = await repositories.projects.getById(subscription.projectId)
+    if (reviewProject?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
+    if (reviewProject?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     if (subscription.pay !== '待复核') {
       return send(res, 409, { error: 'SUBSCRIPTION_STATUS_INVALID', message: '仅待复核状态可以执行复核' })
     }
@@ -4305,6 +4405,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const updated = await mongo.withTransaction(async session => {
           const latest = await repositories.subscriptions.getById(subscription.id, session)
           if (!latest || latest.pay !== '待复核' || latest.shares === undefined) throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
+          if ((await repositories.projects.getById(latest.projectId, session))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
           if ((await repositories.projects.getById(latest.projectId, session))?.purchasePaymentId) throw new AppError(409, 'SUBSCRIPTION_LOCKED', '采购付款登记后认购单已锁定')
           const verified = validateContributionReview({
             expectedAmount: latest.amount,
@@ -4389,6 +4490,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       if (!latest || latest.pay !== '待复核' || latest.shares !== undefined) {
         throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
       }
+      if ((await repositories.projects.getById(latest.projectId, session))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
       if ((await repositories.projects.getById(latest.projectId, session))?.purchasePaymentId) {
         throw new AppError(409, 'SUBSCRIPTION_LOCKED', '采购付款登记后认购单已锁定')
       }
@@ -4702,6 +4804,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!subscription) {
       return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
+    if ((await repositories.projects.getById(subscription.projectId))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
     if ((await repositories.projects.getById(subscription.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     const context = requestContext(req)
     if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能删除本人认购的支付截图')
@@ -4717,6 +4820,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const updated = await fileAssetService.deleteBinding(image.assetId, async (_asset, session) => {
       const latest = await repositories.subscriptions.getById(subscription.id, session)
       if (!latest) throw new Error('认购记录不存在')
+      if ((await repositories.projects.getById(latest.projectId, session))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
       if ((await repositories.projects.getById(latest.projectId, session))?.purchasePaymentId) throw new AppError(409, 'SUBSCRIPTION_LOCKED', '采购付款登记后认购单已锁定')
       const remainingImages = (latest.paymentImages ?? []).filter(item => item.id !== imageId)
       const latestImage = remainingImages.at(-1)

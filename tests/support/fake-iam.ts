@@ -46,6 +46,7 @@ const allApiPermissions = [
   'crowdfunding:distribution-payout-proxy:query', 'crowdfunding:distribution-payout-proxy:request',
   'crowdfunding:distribution-payout-proxy:review',
   'crowdfunding:rule-parameters:query', 'crowdfunding:rule-parameters:update',
+  'crowdfunding:procurement-difference:resolve',
   'crowdfunding:notification:query', 'crowdfunding:notification:read',
   'crowdfunding:receipt-overdue:query', 'crowdfunding:receipt-overdue:resolve',
   'crowdfunding:subscription:create', 'crowdfunding:subscription:confirm-receipt',
@@ -108,7 +109,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-super-admin-token', userId: 1004, username: 'superadmin01', nickname: '超级管理员', deptId: 900,
-    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:project:open', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query', 'crowdfunding:receipt:query', 'crowdfunding:receipt:review', 'crowdfunding:distribution:query', 'crowdfunding:cost:query', 'crowdfunding:cost:review', 'crowdfunding:financial-reconciliation:query', 'crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:refund-confirm', 'crowdfunding:exception-fund:transfer-review', 'crowdfunding:project-refund:query', 'crowdfunding:procurement-failure:query', 'crowdfunding:procurement-failure:review', 'crowdfunding:supplier-refund:query', 'crowdfunding:receipt-termination-refund:query', 'crowdfunding:receipt-termination-refund:review', 'crowdfunding:project-refund-proxy:query', 'crowdfunding:project-refund-proxy:review', 'crowdfunding:distribution-payout-proxy:query', 'crowdfunding:distribution-payout-proxy:review', 'crowdfunding:rule-parameters:query', 'crowdfunding:rule-parameters:update', 'crowdfunding:notification:query', 'crowdfunding:notification:read', 'crowdfunding:receipt-overdue:query', 'crowdfunding:receipt-overdue:resolve'],
+    roles: ['crowdfunding_super_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:project:open', 'crowdfunding:takeover:query', 'crowdfunding:takeover:force', 'crowdfunding:audit:query', 'crowdfunding:risk:query', 'crowdfunding:receipt:query', 'crowdfunding:receipt:review', 'crowdfunding:distribution:query', 'crowdfunding:cost:query', 'crowdfunding:cost:review', 'crowdfunding:financial-reconciliation:query', 'crowdfunding:exception-fund:query', 'crowdfunding:exception-fund:refund-confirm', 'crowdfunding:exception-fund:transfer-review', 'crowdfunding:project-refund:query', 'crowdfunding:procurement-failure:query', 'crowdfunding:procurement-failure:review', 'crowdfunding:supplier-refund:query', 'crowdfunding:receipt-termination-refund:query', 'crowdfunding:receipt-termination-refund:review', 'crowdfunding:project-refund-proxy:query', 'crowdfunding:project-refund-proxy:review', 'crowdfunding:distribution-payout-proxy:query', 'crowdfunding:distribution-payout-proxy:review', 'crowdfunding:rule-parameters:query', 'crowdfunding:rule-parameters:update', 'crowdfunding:notification:query', 'crowdfunding:notification:read', 'crowdfunding:receipt-overdue:query', 'crowdfunding:receipt-overdue:resolve', 'crowdfunding:procurement-difference:resolve'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {

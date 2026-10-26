@@ -1,8 +1,9 @@
 import type { SettlementInvoiceRecord } from '../project-settlement.ts'
 import type { RuleParameters } from '../rule-parameters.ts'
+import type { ProcurementAmountDifference } from '../procurement-difference.ts'
 
 export type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-export type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
+export type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '回款中' | '待分配' | '分配中' | '已冻结' | '已中断' | '关闭中' | '已关闭' | '采购失败终止中' | '已终止' | '部分已结算' | '已完结'
 export type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '待确认收款' | '已释放' | '公司待出资' | '待退款' | '待确认退款' | '已退款'
 export type Actor = { userId: string; label: string; role: Role }
 export type RequestContext = Pick<Actor, 'userId' | 'role'>
@@ -54,6 +55,11 @@ export type Project = {
   purchasePaidAmount?: number
   proxyConfirmDays?: number
   ruleParametersSnapshot?: RuleParameters
+  frozenFromStatus?: ProjectStatus
+  frozenFromStatusType?: Project['statusType']
+  procurementDifference?: ProcurementAmountDifference & { detectedAt: string }
+  procurementAcceptedFingerprint?: string
+  procurementDifferenceResolution?: { differenceDetails: string; reason: string; resolvedAt: string; resolvedBy: string }
   settlementInvoices?: SettlementInvoiceRecord[]
 }
 

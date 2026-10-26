@@ -143,6 +143,21 @@ WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.del
   AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
     AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
 
+-- V1.1 公司确认采购单差异后按发布快照继续
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', 'crowdfunding:procurement-difference:resolve', '确认采购单差异', 'POST',
+  '/api/projects/*/procurement-difference/resolve', 0, 'v11-local', 'v11-local'
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource WHERE client_id = 'crowdfunding'
+  AND code = 'crowdfunding:procurement-difference:resolve' AND deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code = 'crowdfunding:procurement-difference:resolve' AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_super_admin' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
 INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
 SELECT role.id, resource.id, 0
 FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
