@@ -70,6 +70,8 @@ export type Subscription = {
   reviewedBy?: string
   reviewedAt?: string
   rejectReason?: string
+  agreementVersion?: number
+  receiptAgreementVersion?: number
 }
 
 export type AuditLog = {

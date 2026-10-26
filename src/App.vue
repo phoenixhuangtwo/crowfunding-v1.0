@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import {
   ArrowDown,
   Briefcase,
@@ -9,7 +9,6 @@ import {
   Grid,
   Lock,
   Money,
-  Operation,
   Tickets,
   Upload,
   User,
@@ -36,6 +35,7 @@ type PageKey =
   | 'payment'
   | 'adminProjects'
   | 'rules'
+  | 'agreements'
   | 'receivingCode'
   | 'payReview'
   | 'settlement'
@@ -43,6 +43,8 @@ type PageKey =
   | 'rbac'
   | 'audit'
 type NavPage = { key: PageKey; label: string; req: 'P0' | 'P1' | 'P2'; icon: unknown }
+type AgreementVersion = { id: string; version: number; title: string; body: string; effectiveAt: string; createdBy: string; status?: string }
+type AgreementConfirmation = { id: string; version: number; userId: string; userName: string; node: string; relatedId: string; confirmedAt: string }
 type Project = {
   id: string
   title: string
@@ -217,6 +219,7 @@ const roles: Record<Role, { label: string; account: string; home: PageKey }> = {
   finance: { label: '财务', account: 'finance01', home: 'receivingCode' },
   super_admin: { label: '公司超级管理员', account: 'superadmin01', home: 'adminProjects' }
 }
+const localIdentityMode = import.meta.env.DEV
 
 const navGroups: Array<{ title: string; pages: NavPage[] }> = [
   {
@@ -231,6 +234,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
     pages: [
       { key: 'adminProjects', label: '项目管理', req: 'P0', icon: Checked },
       { key: 'rules', label: '认购规则配置', req: 'P0', icon: Document },
+      { key: 'agreements', label: '免责协议版本', req: 'P0', icon: Document },
       { key: 'receivingCode', label: '项目收款码管理', req: 'P0', icon: CreditCard },
       { key: 'rbac', label: '权限管理', req: 'P0', icon: Lock },
       { key: 'audit', label: '审计日志', req: 'P0', icon: User }
@@ -252,6 +256,7 @@ const pageTitleMap: Record<PageKey, string> = {
   payment: '支付收款码与 OCR',
   adminProjects: '项目管理',
   rules: '认购规则配置',
+  agreements: '免责协议版本',
   receivingCode: '项目收款码管理',
   payReview: '支付复核',
   settlement: '发票凭证核对',
@@ -263,7 +268,22 @@ const pageTitleMap: Record<PageKey, string> = {
 const currentRole = ref<Role>('employee')
 const currentPage = ref<PageKey>('projects')
 const agreementVisible = ref(false)
-const agreementDrawerVisible = ref(false)
+const currentAgreement = ref<AgreementVersion | null>(null)
+const agreementNode = ref<'提交认购' | '查看缴款码' | '确认收款'>('提交认购')
+const agreementReadToEnd = ref(false)
+const agreementBodyElement = ref<HTMLElement>()
+const acceptedAgreementVersion = ref<number>()
+let agreementResolver: ((accepted: boolean) => void) | undefined
+const agreementVersions = ref<AgreementVersion[]>([])
+const agreementVersionTotal = ref(0)
+const agreementVersionPage = ref(1)
+const agreementFormVisible = ref(false)
+const agreementForm = reactive({ title: '', body: '' })
+const agreementConfirmations = ref<AgreementConfirmation[]>([])
+const agreementConfirmationVersion = ref<number>()
+const agreementConfirmationPage = ref(1)
+const agreementConfirmationTotal = ref(0)
+const agreementConfirmationFilters = reactive({ userId: '', node: '', dates: [] as string[] })
 const subscribeVisible = ref(false)
 const auditVisible = ref(false)
 const selectedAudit = ref<AuditRow | null>(null)
@@ -335,7 +355,6 @@ const editingReceivingCodeId = ref('')
 const editingReceivingCodeImageUrl = ref('')
 const editingReceivingCodeImageName = ref('')
 const editingReceivingCodeImageFile = ref<File>()
-const activeAgreementName = ref('用户协议')
 const projectFilters = reactive({ status: '全部', subscriptionStatus: '全部', subscriptionCount: undefined as number | undefined, keyword: '' })
 const mineFilters = reactive({
   keyword: '',
@@ -365,28 +384,6 @@ const createEmptyRuleForm = (): RuleForm => ({
   endAt: ''
 })
 const ruleForm = reactive<RuleForm>(createEmptyRuleForm())
-const agreements = reactive([
-  { name: '用户协议', checked: false },
-  { name: '安全协议', checked: false },
-  { name: '风险提示', checked: false }
-])
-const agreementContents: Record<string, string[]> = {
-  用户协议: [
-    '员工确认参与内部认购前，已了解项目来源、开放认购金额、认购时间、最低认购金额、项目截止规则和收益分配规则。',
-    '员工提交认购后，应按页面提示完成线下转账并上传支付凭证；系统将通过 OCR 识别与财务复核共同确认缴款状态。',
-    '认购记录一经提交，会进入个人认购台账。项目未满额期间如规则允许，可继续发起多次认购；项目切换为已截止、已满额、已中断或已完结后，不可继续认购。'
-  ],
-  安全协议: [
-    '员工应使用本人账号操作，不得代他人提交认购、上传凭证或确认收款信息。',
-    '支付凭证、收款码、合同发票和 OCR 识别结果仅用于本次内部认购业务处理，相关操作会记录审计日志。',
-    '如发现支付金额、收款主体、项目编号或 OCR 结果异常，应停止提交并联系财务或项目管理员复核。'
-  ],
-  风险提示: [
-    '内部认购项目存在采购交付、截止未满额、收益不及预期、供应条件变化等风险，页面展示收益不构成固定收益承诺。',
-    '项目中断时，管理端需填写中断原因；已缴款金额将在 48h 内原路返款到账，期间员工不可继续发起认购。',
-    '公司兜底金额仅为截止未满额部分的预估接管金额，最终以项目结算和财务复核结果为准。'
-  ]
-}
 
 const projects = reactive<Project[]>([
   {
@@ -571,13 +568,11 @@ const auditRows = reactive<AuditRow[]>([
 ])
 const rules = reactive<SubscriptionRule[]>([])
 
-const allAgreed = computed(() => agreements.every(item => item.checked))
-const activeAgreementContent = computed(() => agreementContents[activeAgreementName.value] ?? [])
 const pageTitle = computed(() => pageTitleMap[currentPage.value])
 const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
 const visibleNavGroups = computed(() => navGroups.map(group => ({
   ...group,
-  pages: group.pages.filter(page => !hiddenNavPageKeys.has(page.key))
+  pages: group.pages.filter(page => !hiddenNavPageKeys.has(page.key) && (page.key !== 'agreements' || currentRole.value === 'super_admin'))
 })).filter(group => group.pages.length > 0))
 const selectedProject = computed(() => projects.find(project => project.id === selectedProjectId.value) ?? projects[0])
 const selectedProjectRule = computed(() => {
@@ -966,9 +961,12 @@ async function loadData() {
 }
 
 watch(currentRole, () => {
+  for (const url of privateImageCache.values()) URL.revokeObjectURL(url)
+  privateImageCache.clear()
   replaceRows(subscriptions, [])
   replaceRows(receivingCodes, [])
   replaceRows(auditRows, [])
+  currentPage.value = roles[currentRole.value].home
   void loadData()
 })
 
@@ -1002,7 +1000,21 @@ function paymentRemaining(subscription: Subscription) {
   return `${hours}时${minutes}分`
 }
 
-function openPayment(subscription: Subscription) {
+async function openPayment(subscription: Subscription) {
+  if (!await requestAgreement('查看缴款码')) return
+  try {
+    const payload = await api<{ data: { codeId: string; imageAssetId: string } }>('/api/agreements/confirm-view-code', {
+      method: 'POST', body: JSON.stringify({ subscriptionId: subscription.id, agreementVersion: acceptedAgreementVersion.value, agreementsConfirmed: true })
+    })
+    const code = receivingCodes.find(item => item.id === payload.data.codeId)
+    if (code) {
+      code.imageAssetId = payload.data.imageAssetId
+      code.imageUrl = await privateImageUrl(payload.data.imageAssetId) || undefined
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '缴款码暂不可查看')
+    return
+  }
   activePaymentSubscriptionId.value = subscription.id
   localPaymentImageUrl.value = ''
   lastOcrResult.value = undefined
@@ -1027,15 +1039,11 @@ function handleSubscriptionAction(subscription: Subscription) {
 }
 
 async function confirmReceipt(subscription: Subscription) {
+  if (!await requestAgreement('确认收款')) return
   try {
-    await ElMessageBox.confirm('确认后状态将从“待确认收款”更新为“已收款”。', '确认收款', {
-      confirmButtonText: '确认收款',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
     const payload = await api<{ data: Subscription; message: string }>(`/api/subscriptions/${encodeURIComponent(subscription.id)}/confirm-receipt`, {
       method: 'POST',
-      body: JSON.stringify({ operator: `${roleMeta.value.account} · ${roleMeta.value.label}` })
+      body: JSON.stringify({ agreementVersion: acceptedAgreementVersion.value, agreementsConfirmed: true })
     })
     if (mineFilters.pay === '待确认收款') mineFilters.pay = '已收款'
     await loadData()
@@ -1774,22 +1782,107 @@ async function disableReceivingCode(row: ReceivingCode) {
   }
 }
 
-function startSubscribe() {
-  if (!allAgreed.value) {
-    agreementVisible.value = true
-    return
-  }
+async function startSubscribe() {
   if (!canSubscribe.value) {
     ElMessage.error(selectedProjectShareRule.value ? '认购份数需为正整数，且不能超过剩余份数或个人上限' : '认购金额需不低于 100 元，且不得超过剩余可认购金额')
     return
   }
+  if (!await requestAgreement('提交认购')) return
   subscribeVisible.value = true
 }
 
-function openAgreementDrawer(name: string) {
-  activeAgreementName.value = name
-  agreementDrawerVisible.value = true
+async function requestAgreement(node: '提交认购' | '查看缴款码' | '确认收款') {
+  try {
+    const payload = await api<{ data: AgreementVersion | null }>('/api/agreements/current')
+    if (!payload.data) { ElMessage.error('协议尚未配置，请联系公司'); return false }
+    currentAgreement.value = payload.data
+    agreementNode.value = node
+    acceptedAgreementVersion.value = undefined
+    agreementReadToEnd.value = false
+    agreementVisible.value = true
+    await nextTick()
+    const element = agreementBodyElement.value
+    if (element && element.scrollHeight <= element.clientHeight + 2) agreementReadToEnd.value = true
+    return await new Promise<boolean>(resolve => { agreementResolver = resolve })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '协议加载失败')
+    return false
+  }
 }
+
+function onAgreementScroll(event: Event) {
+  const element = event.target as HTMLElement
+  if (element.scrollTop + element.clientHeight >= element.scrollHeight - 3) agreementReadToEnd.value = true
+}
+
+function onAgreementOpened() {
+  const element = agreementBodyElement.value
+  if (element && element.scrollHeight <= element.clientHeight + 2) agreementReadToEnd.value = true
+}
+
+function finishAgreement(accepted: boolean) {
+  if (accepted && !agreementReadToEnd.value) return
+  if (accepted) acceptedAgreementVersion.value = currentAgreement.value?.version
+  const resolve = agreementResolver
+  agreementResolver = undefined
+  agreementVisible.value = false
+  resolve?.(accepted)
+  if (!accepted) ElMessage.info('需确认免责协议后方可继续')
+}
+
+watch(agreementVisible, visible => { if (!visible && agreementResolver) finishAgreement(false) })
+
+async function loadAgreementVersions() {
+  const payload = await api<{ data: { items: AgreementVersion[]; total: number } }>(`/api/agreements?page=${agreementVersionPage.value}&pageSize=10`)
+  agreementVersions.value = payload.data.items
+  agreementVersionTotal.value = payload.data.total
+}
+
+async function createAgreementVersion() {
+  try {
+    await ElMessageBox.confirm('新版本提交后立即生效且不可修改，确认提交？', '新增免责协议版本', { type: 'warning' })
+    await api('/api/agreements', { method: 'POST', body: JSON.stringify(agreementForm) })
+    agreementFormVisible.value = false
+    agreementForm.title = ''
+    agreementForm.body = ''
+    agreementVersionPage.value = 1
+    await loadAgreementVersions()
+    ElMessage.success('新版本已生效')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '协议保存失败')
+  }
+}
+
+async function showAgreementConfirmations(version: number) {
+  agreementConfirmationVersion.value = version
+  agreementConfirmationPage.value = 1
+  agreementConfirmationFilters.userId = ''
+  agreementConfirmationFilters.node = ''
+  agreementConfirmationFilters.dates = []
+  await loadAgreementConfirmations()
+}
+
+async function loadAgreementConfirmations() {
+  const version = agreementConfirmationVersion.value
+  if (version === undefined) return
+  try {
+    const params = new URLSearchParams({ page: String(agreementConfirmationPage.value), pageSize: '10' })
+    if (agreementConfirmationFilters.userId.trim()) params.set('userId', agreementConfirmationFilters.userId.trim())
+    if (agreementConfirmationFilters.node) params.set('node', agreementConfirmationFilters.node)
+    if (agreementConfirmationFilters.dates.length === 2) {
+      params.set('from', `${agreementConfirmationFilters.dates[0]}T00:00:00.000Z`)
+      params.set('to', `${agreementConfirmationFilters.dates[1]}T23:59:59.999Z`)
+    }
+    const payload = await api<{ data: { items: AgreementConfirmation[]; total: number } }>(`/api/agreements/${version}/confirmations?${params}`)
+    agreementConfirmations.value = payload.data.items
+    agreementConfirmationTotal.value = payload.data.total
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '确认记录加载失败') }
+}
+
+watch(agreementVersionPage, () => { if (currentPage.value === 'agreements') void loadAgreementVersions() })
+watch(currentPage, page => { if (page === 'agreements') void loadAgreementVersions() })
+watch(agreementConfirmationPage, () => { void loadAgreementConfirmations() })
 
 async function confirmSubscribe() {
   const amount = effectiveSubscribeAmount.value
@@ -1801,7 +1894,8 @@ async function confirmSubscribe() {
         userId: roleMeta.value.account,
         amount,
         ...(selectedProjectShareRule.value ? { shares: subscribeShares.value } : {}),
-        agreementsConfirmed: allAgreed.value,
+        agreementsConfirmed: true,
+        agreementVersion: acceptedAgreementVersion.value,
         idempotencyKey: `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`
       })
     })
@@ -2209,7 +2303,9 @@ onMounted(loadData)
           <div class="top-hint">账号 {{ roleMeta.account }} · 当前视角：{{ roleMeta.label }}</div>
         </div>
         <div class="top-actions">
-          <el-button :icon="Operation">登出</el-button>
+          <el-select v-if="localIdentityMode" v-model="currentRole" aria-label="本地测试身份" style="width: 180px">
+            <el-option v-for="(role, key) in roles" :key="key" :label="`本地测试：${role.label}`" :value="key" />
+          </el-select>
         </div>
       </header>
 
@@ -2393,22 +2489,10 @@ onMounted(loadData)
                 <el-form-item v-else label="认购金额">
                   <el-input-number v-model="subscribeAmount" :min="selectedProjectMinAmount" :max="subscribeAmountMax" :step="100" controls-position="right" />
                 </el-form-item>
-                <el-form-item>
-                  <template #label>
-                    <span>协议状态</span>
-                    <span class="form-label-note">（勾选即代表已阅读已同意）</span>
-                  </template>
-                  <div class="agreement-options">
-                    <el-checkbox v-for="item in agreements" :key="item.name" v-model="item.checked">
-                      <el-button class="agreement-link" link type="primary" @click.stop.prevent="openAgreementDrawer(item.name)">
-                        {{ item.name }}
-                      </el-button>
-                    </el-checkbox>
-                  </div>
-                </el-form-item>
+                <el-alert type="info" :closable="false">提交前将展示当前生效的免责协议，阅读至末尾并确认后才能认购。</el-alert>
               </el-form>
               <el-button class="wide" type="primary" :disabled="!canSubscribe" @click="startSubscribe">立即认购</el-button>
-              <p class="muted">提交前需逐项确认《用户协议》《安全协议》《风险提示》；项目中断后不可继续认购。</p>
+              <p class="muted">每次提交均需重新确认当前生效的免责协议；项目中断后不可继续认购。</p>
             </section>
           </div>
         </template>
@@ -3313,6 +3397,24 @@ onMounted(loadData)
           </section>
         </template>
 
+        <template v-if="currentPage === 'agreements'">
+          <div class="page-head"><div><h1>免责协议版本</h1><p>新版本提交后立即生效，历史版本与确认记录只读留存</p></div><el-button type="primary" @click="agreementFormVisible = true">新增版本</el-button></div>
+          <section class="panel">
+            <el-table :data="agreementVersions" empty-text="暂无协议版本">
+              <el-table-column prop="version" label="版本号" width="100" />
+              <el-table-column prop="title" label="协议标题" min-width="230" />
+              <el-table-column prop="status" label="状态" width="110" />
+              <el-table-column prop="effectiveAt" label="生效时间" width="220" />
+              <el-table-column prop="createdBy" label="创建人" width="180" />
+              <el-table-column label="操作" width="190"><template #default="{ row }">
+                <el-button link type="primary" @click="ElMessageBox.alert(row.body, `协议 V${row.version} · ${row.title}`, { confirmButtonText: '关闭' })">查看</el-button>
+                <el-button link type="primary" @click="showAgreementConfirmations(row.version)">确认记录</el-button>
+              </template></el-table-column>
+            </el-table>
+            <el-pagination v-model:current-page="agreementVersionPage" :page-size="10" :total="agreementVersionTotal" layout="total, prev, pager, next" />
+          </section>
+        </template>
+
         <template v-if="currentPage === 'rbac'">
           <div class="page-head"><div><h1>权限管理</h1><p>角色与资金敏感权限矩阵</p></div></div>
           <section class="panel">
@@ -3396,33 +3498,40 @@ onMounted(loadData)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="agreementVisible" title="协议确认（3 / 3 项必须逐项确认）" width="620px">
-      <el-alert type="warning" :closable="false">请阅读并确认用户协议、安全协议、风险提示。协议版本更新后需要重新确认。</el-alert>
-      <div class="agreement-text">
-        本协议用于确认员工了解内部认购项目的资金风险、收益规则、公司兜底规则、线下转账和 OCR 复核限制。员工未确认当前有效版本时不得发起认购。
-      </div>
-      <el-checkbox v-for="item in agreements" :key="item.name" v-model="item.checked">{{ item.name }}</el-checkbox>
+    <el-dialog v-model="agreementVisible" :title="`免责协议确认 · ${agreementNode}`" width="620px" :close-on-click-modal="false" @opened="onAgreementOpened">
+      <el-alert type="warning" :closable="false">本次操作须重新阅读并确认当前生效版本，历史确认不能沿用。</el-alert>
+      <h3>{{ currentAgreement?.title }} · V{{ currentAgreement?.version }}</h3>
+      <div ref="agreementBodyElement" class="agreement-text" style="max-height: 280px; overflow-y: auto; white-space: pre-wrap; margin: 16px 0" @scroll="onAgreementScroll">{{ currentAgreement?.body }}</div>
       <template #footer>
-        <el-button @click="agreementVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!allAgreed" @click="agreementVisible = false">已逐项确认</el-button>
+        <el-button @click="finishAgreement(false)">取消</el-button>
+        <el-button type="primary" :disabled="!agreementReadToEnd" @click="finishAgreement(true)">我已阅读并同意</el-button>
       </template>
     </el-dialog>
 
-    <el-drawer
-      v-model="agreementDrawerVisible"
-      :title="activeAgreementName"
-      direction="ltr"
-      size="420px"
-    >
-      <div class="agreement-drawer-content">
-        <el-alert type="info" :closable="false">
-          以下内容为当前项目认购前需阅读的有效协议文本。
-        </el-alert>
-        <ol>
-          <li v-for="paragraph in activeAgreementContent" :key="paragraph">{{ paragraph }}</li>
-        </ol>
+    <el-dialog v-model="agreementFormVisible" title="新增免责协议版本" width="700px">
+      <el-form label-position="top">
+        <el-form-item label="协议标题"><el-input v-model="agreementForm.title" maxlength="50" show-word-limit /></el-form-item>
+        <el-form-item label="协议正文"><el-input v-model="agreementForm.body" type="textarea" :rows="12" maxlength="5000" show-word-limit /></el-form-item>
+      </el-form>
+      <template #footer><el-button @click="agreementFormVisible = false">取消</el-button><el-button type="primary" @click="createAgreementVersion">提交并立即生效</el-button></template>
+    </el-dialog>
+
+    <el-dialog :model-value="agreementConfirmationVersion !== undefined" :title="`V${agreementConfirmationVersion} 确认记录`" width="820px" @close="agreementConfirmationVersion = undefined">
+      <div class="actions-row">
+        <el-input v-model="agreementConfirmationFilters.userId" placeholder="确认人账号" style="width: 160px" />
+        <el-select v-model="agreementConfirmationFilters.node" placeholder="确认节点" style="width: 160px"><el-option label="全部节点" value="" /><el-option label="提交认购" value="提交认购" /><el-option label="查看缴款码" value="查看缴款码" /><el-option label="确认收款" value="确认收款" /></el-select>
+        <el-date-picker v-model="agreementConfirmationFilters.dates" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" />
+        <el-button type="primary" @click="agreementConfirmationPage = 1; loadAgreementConfirmations()">查询</el-button>
       </div>
-    </el-drawer>
+      <el-table :data="agreementConfirmations" empty-text="暂无确认记录">
+        <el-table-column prop="userName" label="确认人" width="140" />
+        <el-table-column prop="version" label="版本号" width="90" />
+        <el-table-column prop="node" label="确认节点" width="130" />
+        <el-table-column prop="relatedId" label="关联单据" min-width="180" />
+        <el-table-column prop="confirmedAt" label="确认时间" width="210" />
+      </el-table>
+      <el-pagination v-model:current-page="agreementConfirmationPage" :page-size="10" :total="agreementConfirmationTotal" layout="total, prev, pager, next" />
+    </el-dialog>
 
     <el-dialog v-model="subscribeVisible" title="确认认购" width="520px">
       <dl class="desc">

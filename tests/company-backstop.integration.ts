@@ -12,7 +12,7 @@ const prefix = `__test_backstop_${randomBytes(6).toString('hex')}_`
 const client = new MongoClient(uri)
 await client.connect()
 const db = client.db('crowfunding')
-const names = businessCollections.map(name => `${prefix}${name}`)
+const names = [...businessCollections, 'agreement_versions', 'agreement_confirmations'].map(name => `${prefix}${name}`)
 if ((await db.listCollections({ name: { $in: names } }, { nameOnly: true }).toArray()).length) throw new Error('测试前缀已存在')
 
 async function freePort() {
