@@ -33,6 +33,7 @@ import { useAuthSession } from './auth/use-auth-session'
 import { allowedPageKeys, canApi, canUi, type AuthorizedPageKey } from './auth/permissions'
 import { permissionFor, reviewPermissionFor } from '../server/iam/permissions'
 import AuthStateView from './components/AuthStateView.vue'
+import ProcurementPaymentPage from './components/ProcurementPaymentPage.vue'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin'
 type PageKey =
@@ -46,6 +47,7 @@ type PageKey =
   | 'receivingCode'
   | 'payReview'
   | 'settlement'
+  | 'procurementPayment'
   | 'takeovers'
   | 'rbac'
   | 'audit'
@@ -59,7 +61,7 @@ type Project = {
   offlineSalesOrder?: string
   createdAt?: string
   projectOwner?: string
-  status: '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
+  status: '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '已中断' | '部分已结算' | '已完结'
   statusType: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   progress: number
   remain: number
@@ -254,6 +256,7 @@ const navGroups: Array<{ title: string; pages: NavPage[] }> = [
     title: '财务端',
     pages: [
       { key: 'payReview', label: '支付复核', req: 'P0', icon: Tickets, permission: 'crowdfunding:payment-review:query' },
+      { key: 'procurementPayment', label: '采购付款登记', req: 'P0', icon: Money, permission: 'crowdfunding:procurement-payment:register' },
       { key: 'settlement', label: '发票凭证核对', req: 'P0', icon: Money, permission: 'crowdfunding:settlement:query' }
     ]
   }
@@ -270,6 +273,7 @@ const pageTitleMap: Record<PageKey, string> = {
   receivingCode: '项目收款码管理',
   payReview: '支付复核',
   settlement: '发票凭证核对',
+  procurementPayment: '采购付款登记',
   takeovers: '公司兜底管理',
   rbac: '权限管理',
   audit: '审计日志'
@@ -3214,6 +3218,14 @@ watch(() => authSession.permissionInfo.value, info => {
             </section>
           </div>
         </template>
+
+        <ProcurementPaymentPage
+          v-if="currentPage === 'procurementPayment'"
+          :projects="projects"
+          :can-register="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-payment:register')"
+          :can-upload-proof="canApi(authSession.permissionInfo.value, 'crowdfunding:procurement-payment:proof-upload')"
+          @registered="loadData"
+        />
 
         <template v-if="currentPage === 'settlement'">
           <div class="page-head">

@@ -53,4 +53,40 @@ WHERE role.code = 'crowdfunding_employee' AND role.tenant_id = 0 AND role.delete
       AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0'
   );
 
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', 'crowdfunding:procurement-payment:register', '采购付款登记', 'POST', '/api/projects/*/procurement-payment', 0, 'v11-local', 'v11-local'
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource WHERE client_id = 'crowdfunding'
+  AND code = 'crowdfunding:procurement-payment:register' AND deleted = b'0');
+
+INSERT INTO system_api_resource (client_id, code, name, method, path, status, creator, updater)
+SELECT 'crowdfunding', 'crowdfunding:procurement-payment:proof-upload', '采购付款凭证上传', 'POST', '/api/projects/*/procurement-payment/proofs', 0, 'v11-local', 'v11-local'
+WHERE NOT EXISTS (SELECT 1 FROM system_api_resource WHERE client_id = 'crowdfunding'
+  AND code = 'crowdfunding:procurement-payment:proof-upload' AND deleted = b'0');
+
+INSERT INTO system_menu (client_id, parent_id, name, component_name, type, sort, visible, permission, status, tenant_id)
+SELECT 'crowdfunding', parent.id, '采购付款登记', 'procurementPayment', 2, 40, 0,
+  'crowdfunding:procurement-payment:register', 0, 0
+FROM system_menu parent
+WHERE parent.client_id = 'crowdfunding' AND parent.component_name = 'crowdfunding'
+  AND parent.tenant_id = 0 AND parent.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_menu WHERE client_id = 'crowdfunding'
+    AND permission = 'crowdfunding:procurement-payment:register' AND deleted = b'0');
+
+INSERT INTO system_role_api (role_id, api_resource_id, tenant_id)
+SELECT role.id, resource.id, 0
+FROM system_role role JOIN system_api_resource resource ON resource.client_id = 'crowdfunding'
+  AND resource.code IN ('crowdfunding:procurement-payment:register', 'crowdfunding:procurement-payment:proof-upload')
+  AND resource.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_api grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.api_resource_id = resource.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
+INSERT INTO system_role_menu (role_id, menu_id, tenant_id)
+SELECT role.id, menu.id, 0
+FROM system_role role JOIN system_menu menu ON menu.client_id = 'crowdfunding'
+  AND menu.permission = 'crowdfunding:procurement-payment:register' AND menu.tenant_id = 0 AND menu.deleted = b'0'
+WHERE role.code = 'crowdfunding_finance' AND role.tenant_id = 0 AND role.deleted = b'0'
+  AND NOT EXISTS (SELECT 1 FROM system_role_menu grant_row WHERE grant_row.role_id = role.id
+    AND grant_row.menu_id = menu.id AND grant_row.tenant_id = 0 AND grant_row.deleted = b'0');
+
 COMMIT;

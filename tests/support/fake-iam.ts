@@ -12,6 +12,7 @@ const allApiPermissions = [
   'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:takeover:query',
   'crowdfunding:audit:query', 'crowdfunding:risk:query', 'crowdfunding:procurement:sync',
   'crowdfunding:project:open', 'crowdfunding:project:terminate', 'crowdfunding:project:interrupt',
+  'crowdfunding:procurement-payment:register', 'crowdfunding:procurement-payment:proof-upload',
   'crowdfunding:subscription:create', 'crowdfunding:subscription:confirm-receipt',
   'crowdfunding:payment-proof:upload', 'crowdfunding:payment-proof:delete', 'crowdfunding:payment-proof:ocr',
   'crowdfunding:rule:create', 'crowdfunding:rule:update', 'crowdfunding:rule:change-status',
@@ -62,7 +63,7 @@ const fixtures: readonly ActiveFixture[] = [
   },
   {
     token: 'smoke-finance-token', userId: 1003, username: 'finance01', nickname: '财务', deptId: 200,
-    roles: ['crowdfunding_finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice'],
+    roles: ['crowdfunding_finance'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:payment-review:query', 'crowdfunding:settlement:query', 'crowdfunding:settlement:upload-invoice', 'crowdfunding:procurement-payment:register', 'crowdfunding:procurement-payment:proof-upload'],
     dataScope: { all: true, self: false, deptIds: [] }
   },
   {

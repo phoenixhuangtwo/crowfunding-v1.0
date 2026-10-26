@@ -23,7 +23,7 @@ import { AppError, isDuplicateKey } from './errors.ts'
 import { calculateShareSubscription, prepareShareRule } from './share-subscription.ts'
 import { createFundLedger } from './finance/fund-ledger.ts'
 import { validateContributionReview } from './finance/contribution-review.ts'
-import { reconcileProcurementFunding } from './finance/procurement-payment.ts'
+import { reconcileProcurementFunding, validateProcurementPayment } from './finance/procurement-payment.ts'
 import { calculateSettlementProfit } from './finance/settlement-profit.ts'
 import { planCompanyBackstop, paymentCutoffTime } from './company-backstop.ts'
 import { AgreementError, AgreementService, type AgreementNode } from './agreements.ts'
@@ -36,7 +36,7 @@ import { ownershipFrom } from './iam/data-scope.ts'
 import { employeePaymentDeadline, validatePublishSchedule } from './publish-schedule.ts'
 
 type Role = 'employee' | 'admin' | 'finance' | 'super_admin' | 'system'
-type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '已中断' | '部分已结算' | '已完结'
+type ProjectStatus = '未开放' | '未满额' | '已满额' | '已截止' | '待回款' | '已中断' | '部分已结算' | '已完结'
 type PaymentStatus = '未缴款' | '部分缴款' | '已缴款' | '待复核' | '复核驳回' | '已收款' | '已释放' | '公司待出资'
 
 type PaymentImage = {
@@ -80,6 +80,9 @@ type Project = {
   refundNotice?: string
   ruleId?: string
   settledAmount?: number
+  purchasePaymentId?: string
+  purchasePaidAt?: string
+  purchasePaidAmount?: number
   settlementInvoices?: SettlementInvoiceRecord[]
 }
 
@@ -181,6 +184,20 @@ type AppState = {
   receivingCodes: ReceivingCode[]
 }
 
+type ProcurementPayment = {
+  id: string
+  projectId: string
+  amountCents: number
+  transactionNo: string
+  paidAt: string
+  proofAssetIds: string[]
+  operatorId: string
+  companyFundsConfirmed: true
+  recognitionStatus: '凭证识别未通过' | '凭证已核对'
+  note: string
+  createdAt: string
+}
+
 function normalizeProjectAmounts(project: Project) {
   const employeeSubscribedAmount = Number(project.employeeSubscribedAmount)
   const normalizedEmployee = Number.isFinite(employeeSubscribedAmount)
@@ -270,6 +287,8 @@ const mongo = await connectMongo(appConfig.mongodb)
 await ensureSchema(mongo.db, appConfig.mongodb.collectionPrefix)
 const repositories = createRepositories(mongo.db, appConfig.mongodb.collectionPrefix)
 const fundLedger = createFundLedger(mongo.db, appConfig.mongodb.collectionPrefix)
+const procurementPayments = mongo.db.collection<ProcurementPayment>(`${appConfig.mongodb.collectionPrefix}procurement_payments`)
+const bankTransactions = mongo.db.collection<{ transactionNo: string; sourceKey: string; projectId: string; createdAt: string }>(`${appConfig.mongodb.collectionPrefix}bank_transactions`)
 const agreementService = new AgreementService(mongo.db, appConfig.mongodb.collectionPrefix)
 await agreementService.ensureIndexes()
 const queryService = new QueryService(repositories)
@@ -363,6 +382,38 @@ function parseDateTime(datetime?: string) {
 
 function now() {
   return formatDateTime()
+}
+
+async function procurementFundingSnapshot(projectId: string, session?: import('mongodb').ClientSession) {
+  const project = await repositories.projects.getById(projectId, session)
+  if (!project) throw new AppError(404, 'PROJECT_NOT_FOUND', '项目不存在')
+  const rule = project.ruleId ? await repositories.rules.getById(project.ruleId, session) : null
+  if (!rule?.sharePrice) throw new AppError(409, 'SHARE_RULE_REQUIRED', '该项目尚无 V1.1 按份认购规则')
+  const [records, ledger] = await Promise.all([
+    repositories.subscriptions.list({ projectId }, {}, session), fundLedger.listProjectContributions(projectId, session)
+  ])
+  const approved = new Map(records.filter(record => record.userId !== 'company' && record.pay === '已缴款')
+    .map(record => [record.id, record]))
+  if (ledger.some(entry => !approved.has(entry.subscriptionId) || entry.amountCents !== Math.round(approved.get(entry.subscriptionId)!.amount * 100))
+    || [...approved.keys()].some(id => ledger.filter(entry => entry.subscriptionId === id).length !== 1)) {
+    throw new AppError(409, 'FUNDING_LEDGER_INCONSISTENT', '已生效缴款与资金台账不一致，请先核对')
+  }
+  const cents = (value: number, name: string) => {
+    const amount = Math.round(value * 100)
+    if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(amount) || Math.abs(value * 100 - amount) > 0.000001) {
+      throw new AppError(409, 'FUNDING_AMOUNT_INVALID', `${name}金额无效，请先核对`)
+    }
+    return amount
+  }
+  const fundingInput = {
+    purchaseCents: cents(project.costAmount, '采购'),
+    approvedEmployeeCents: ledger.reduce((sum, entry) => sum + entry.amountCents, 0),
+    companyFrontCents: records.filter(record => record.companyKind === 'front').reduce((sum, record) => sum + cents(record.amount, '公司前置'), 0),
+    companyBackstopCents: records.filter(record => record.companyKind === 'backstop').reduce((sum, record) => sum + cents(record.amount, '公司兜底'), 0),
+    pendingReviewCount: records.filter(record => record.pay === '待复核' || record.pay === '部分缴款').length
+  }
+  const funding = reconcileProcurementFunding(fundingInput)
+  return { project, rule, records, funding, fundingInput }
 }
 
 function addHours(datetime: string, hours: number) {
@@ -588,35 +639,10 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const role = requestContext(req).role
     if (role !== 'finance' && role !== 'super_admin') throw new AppError(403, 'FORBIDDEN', '只有财务或公司管理员可以查看付款前对账')
     const projectId = decodeURIComponent(fundingMatch[1])
-    const project = await repositories.projects.getById(projectId)
-    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
-    const rule = project.ruleId ? await repositories.rules.getById(project.ruleId) : null
-    if (!rule?.sharePrice) return send(res, 409, { error: 'SHARE_RULE_REQUIRED', message: '该项目尚无 V1.1 按份认购规则' })
-    const [records, ledger] = await Promise.all([
-      repositories.subscriptions.list({ projectId }), fundLedger.listProjectContributions(projectId)
-    ])
-    const approved = new Map(records.filter(record => record.userId !== 'company' && record.pay === '已缴款')
-      .map(record => [record.id, record]))
-    if (ledger.some(entry => !approved.has(entry.subscriptionId) || entry.amountCents !== Math.round(approved.get(entry.subscriptionId)!.amount * 100))
-      || [...approved.keys()].some(id => ledger.filter(entry => entry.subscriptionId === id).length !== 1)) {
-      return send(res, 409, { error: 'FUNDING_LEDGER_INCONSISTENT', message: '已生效缴款与资金台账不一致，请先核对' })
-    }
-    const cents = (value: number, name: string) => {
-      const amount = Math.round(value * 100)
-      if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(amount) || Math.abs(value * 100 - amount) > 0.000001) {
-        throw new AppError(409, 'FUNDING_AMOUNT_INVALID', `${name}金额无效，请先核对`)
-      }
-      return amount
-    }
-    const funding = reconcileProcurementFunding({
-      purchaseCents: cents(project.costAmount, '采购'),
-      approvedEmployeeCents: ledger.reduce((sum, entry) => sum + entry.amountCents, 0),
-      companyFrontCents: records.filter(record => record.companyKind === 'front').reduce((sum, record) => sum + cents(record.amount, '公司前置'), 0),
-      companyBackstopCents: records.filter(record => record.companyKind === 'backstop').reduce((sum, record) => sum + cents(record.amount, '公司兜底'), 0),
-      pendingReviewCount: records.filter(record => record.pay === '待复核' || record.pay === '部分缴款').length
-    })
+    const { funding } = await procurementFundingSnapshot(projectId)
+    const payment = await procurementPayments.findOne({ projectId })
     return send(res, 200, { data: { projectId, ...funding,
-      companyContributionIsCommitment: true, companyFundsConfirmed: false, checkedAt: new Date().toISOString() } })
+      companyContributionIsCommitment: !payment, companyFundsConfirmed: Boolean(payment), checkedAt: new Date().toISOString() } })
   }
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
@@ -760,6 +786,24 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '新增免责协议版本', target: created.id, before: null, after: { version: created.version, title: created.title } }) as never)
     return send(res, 201, { data: created, message: '新版本已生效' })
   }
+  const paymentProofMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-payment\/proofs$/)
+  if (paymentProofMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(paymentProofMatch[1])
+    const project = await repositories.projects.getById(projectId)
+    if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
+    if (await procurementPayments.findOne({ projectId })) return send(res, 409, { error: 'PROCUREMENT_PAYMENT_EXISTS', message: '该众筹单已登记采购付款' })
+    const multipart = await readSingleImageMultipart(req, { maxFileBytes: 10 * 1024 * 1024,
+      maxFieldBytes: 1024, allowedFields: [] })
+    const image = validateImageFile({ ...multipart.file, maxBytes: 10 * 1024 * 1024,
+      allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp'] })
+    const existing = await repositories.fileAssets.count({ ownerType: 'project', ownerId: projectId,
+      purpose: 'procurement-payment-proof', status: 'ready' })
+    if (existing >= 5) return send(res, 429, { error: 'PAYMENT_PROOF_LIMIT', message: '每张众筹单最多上传 5 张采购付款凭证' })
+    const asset = await fileAssetService.uploadUnbound({ ...image, purpose: 'procurement-payment-proof',
+      ownerType: 'project', ownerId: projectId, createdBy: actor.userId })
+    return send(res, 201, { data: { id: asset.id, fileName: asset.originalName }, message: '付款凭证已保存，待登记采购付款' })
+  }
   const settlementOperator = pathname === '/api/invoices/ocr' || pathname === '/api/invoices/pending/delete'
     || /^\/api\/projects\/[^/]+\/settlements\/confirm$/.test(pathname)
     ? financeOperator(req) : undefined
@@ -870,6 +914,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = fields.subscriptionId?.trim()
     const current = subscriptionId ? await repositories.subscriptions.getById(subscriptionId) : null
     if (!current) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    if ((await repositories.projects.getById(current.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     if (context.role !== 'employee' || current.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能上传本人认购的支付截图')
     if (['已缴款', '已收款', '已释放', '公司待出资'].includes(current.pay)) return send(res, 409, { error: 'PAYMENT_NOT_UPLOADABLE', message: '该认购状态不允许上传支付截图' })
     if (current.shares !== undefined && Date.now() > new Date(current.paymentDeadlineAt.replace(' ', 'T')).getTime()) {
@@ -970,7 +1015,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const projectId = fields.projectId?.trim()
     const project = projectId ? await repositories.projects.getById(projectId) : null
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
-    if (!['已满额', '已截止', '部分已结算'].includes(project.status)) {
+    if (!['已满额', '已截止', '待回款', '部分已结算'].includes(project.status)) {
       return send(res, 409, { error: 'PROJECT_NOT_SETTLEMENT_ELIGIBLE', message: '项目当前状态不允许发起结算识别' })
     }
     const asset = await fileAssetService.uploadUnbound({
@@ -1007,6 +1052,95 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)
+  const procurementPaymentMatch = pathname.match(/^\/api\/projects\/([^/]+)\/procurement-payment$/)
+  if (procurementPaymentMatch) {
+    const actor = financeOperator(req)
+    const projectId = decodeURIComponent(procurementPaymentMatch[1])
+    if (body.recognitionFailed !== true) return send(res, 409, { error: 'PAYMENT_OCR_NOT_AVAILABLE', message: '付款凭证尚无可信识别结果，请按识别失败路径填写情况说明' })
+    if (!Array.isArray(body.proofAssetIds) || body.proofAssetIds.some(id => typeof id !== 'string')) {
+      return send(res, 400, { error: 'PAYMENT_PROOFS_INVALID', message: '请提供付款凭证文件编号' })
+    }
+    if (typeof body.paidAt !== 'string' || !/(?:Z|[+-]\d{2}:\d{2})$/.test(body.paidAt)) {
+      return send(res, 400, { error: 'PAYMENT_TIME_INVALID', message: '付款时间须包含时区' })
+    }
+    try {
+      const result = await mongo.withTransaction(async session => {
+        const { project, rule, records, funding, fundingInput } = await procurementFundingSnapshot(projectId, session)
+        if (!['已满额', '已截止'].includes(project.status)) throw new AppError(409, 'PROJECT_NOT_PAYMENT_READY', '该众筹单尚未进入付款前阶段')
+        const cutoff = Date.parse(`${rule.paymentCutoffAt?.replace(' ', 'T') ?? ''}+08:00`)
+        if (!Number.isFinite(cutoff) || Date.now() < cutoff) throw new AppError(409, 'PAYMENT_CUTOFF_NOT_REACHED', '缴款截止时间尚未到达')
+        const prior = await procurementPayments.findOne({ projectId }, { session })
+        if (prior) throw new AppError(409, 'PROCUREMENT_PAYMENT_EXISTS', '该众筹单已登记采购付款')
+        const transactionNo = typeof body.transactionNo === 'string' ? body.transactionNo.trim() : ''
+        const priorBank = await bankTransactions.findOne({ transactionNo }, { session })
+        const legacyBank = await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).findOne({ transactionNo }, { session })
+        const validated = validateProcurementPayment({ ...fundingInput, projectId,
+          amountCents: body.amountCents as number, transactionNo, paidAt: body.paidAt as string,
+          proofAssetIds: body.proofAssetIds as string[], recognitionFailed: true,
+          companyFundsConfirmed: body.companyFundsConfirmed === true,
+          note: typeof body.note === 'string' ? body.note : '',
+          operatorId: actor.userId, alreadyRegistered: false
+        }, priorBank || legacyBank ? [transactionNo] : [], new Date())
+        for (const assetId of validated.proofAssetIds) {
+          const asset = await repositories.fileAssets.getById(assetId, session)
+          if (!asset || asset.status !== 'ready' || asset.purpose !== 'procurement-payment-proof'
+            || asset.ownerType !== 'project' || asset.ownerId !== projectId || asset.createdBy !== actor.userId) {
+            throw new AppError(409, 'PAYMENT_PROOF_INVALID', '付款凭证不存在、未留存或不属于当前财务登记人')
+          }
+        }
+        const createdAt = now()
+        const payment: ProcurementPayment = { id: `PPAY-${randomUUID()}`, ...validated, createdAt }
+        await bankTransactions.insertOne({ transactionNo: payment.transactionNo,
+          sourceKey: `procurement-payment:${projectId}`, projectId, createdAt }, { session })
+        await procurementPayments.insertOne(payment, { session })
+        const companyRecords = records.filter(record => record.companyKind === 'front' || record.companyKind === 'backstop')
+        for (const company of companyRecords) {
+          if (company.pay !== '公司待出资') throw new AppError(409, 'COMPANY_CONTRIBUTION_STATUS_INVALID', '公司认购状态异常，请先核对')
+          await repositories.subscriptions.replace({ ...company, pay: '已缴款', action: '查看出资',
+            reviewedBy: actor.label, reviewedAt: createdAt }, session)
+          await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+            id: `LED-${randomUUID()}`, sourceKey: `company-contribution:${company.id}`,
+            type: 'company_contribution', projectId, subscriptionId: company.id,
+            participantId: 'company', shares: company.shares, amountCents: Math.round(company.amount * 100),
+            transactionKey: `company-contribution:${company.id}`, proofAssetIds: [],
+            reviewedBy: actor.label, createdAt
+          }, { session })
+        }
+        await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).insertOne({
+          id: `LED-${randomUUID()}`, sourceKey: `procurement-payment:${projectId}`,
+          type: 'procurement_payment', projectId, amountCents: payment.amountCents,
+          transactionNo: payment.transactionNo, transactionKey: `bank:${payment.transactionNo}`,
+          proofAssetIds: payment.proofAssetIds, reviewedBy: actor.label, createdAt
+        }, { session })
+        const updated = { ...project, status: '待回款' as const, statusType: 'warning' as const,
+          purchasePaymentId: payment.id, purchasePaidAt: payment.paidAt,
+          purchasePaidAmount: payment.amountCents / 100 }
+        await repositories.projects.replace(updated, session)
+        const audit = auditRecord({ actor: actor.label, role: 'finance', action: '登记采购付款并确认公司出资到位',
+          target: projectId, before: { status: project.status }, after: { status: updated.status,
+            paymentId: payment.id, amountCents: payment.amountCents, companyCents: funding.companyCents,
+            companyFundsConfirmed: true, recognitionStatus: payment.recognitionStatus } }) as AuditLog
+        await repositories.auditLogs.insert(audit as never, session)
+        return { payment, updated, companyRecords, audit }
+      })
+      const projectIndex = projects.findIndex(project => project.id === projectId)
+      if (projectIndex >= 0) projects.splice(projectIndex, 1, result.updated as Project)
+      for (const company of result.companyRecords) {
+        const index = subscriptions.findIndex(record => record.id === company.id)
+        if (index >= 0) subscriptions.splice(index, 1, { ...company, pay: '已缴款', action: '查看出资',
+          reviewedBy: actor.label, reviewedAt: result.audit.time } as Subscription)
+      }
+      auditLogs.unshift(result.audit)
+      return send(res, 201, { data: result.payment, message: '采购付款登记成功，公司出资确认与资金台账已同步记录' })
+    } catch (error) {
+      if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })
+      if (isDuplicateKey(error)) return send(res, 409, { error: 'PAYMENT_DUPLICATE', message: '项目付款或银行流水号已登记' })
+      if (error instanceof RangeError || error instanceof Error && /付款|缴款|公司出资|流水号|凭证|金额/.test(error.message)) {
+        return send(res, 400, { error: 'PAYMENT_INVALID', message: error.message })
+      }
+      throw error
+    }
+  }
   if (pathname === '/api/agreements/confirm-view-code') {
     const context = requestContext(req)
     if (context.role !== 'employee' || body.agreementsConfirmed !== true) throw new AppError(403, 'FORBIDDEN', '只有员工本人确认协议后可以查看缴款码')
@@ -1341,6 +1475,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const subscriptionId = decodeURIComponent(reviewMatch[1])
     const subscription = subscriptions.find(item => item.id === subscriptionId)
     if (!subscription) return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
+    if ((await repositories.projects.getById(subscription.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     if (subscription.pay !== '待复核') {
       return send(res, 409, { error: 'SUBSCRIPTION_STATUS_INVALID', message: '仅待复核状态可以执行复核' })
     }
@@ -1358,6 +1493,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
         const updated = await mongo.withTransaction(async session => {
           const latest = await repositories.subscriptions.getById(subscription.id, session)
           if (!latest || latest.pay !== '待复核' || latest.shares === undefined) throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
+          if ((await repositories.projects.getById(latest.projectId, session))?.purchasePaymentId) throw new AppError(409, 'SUBSCRIPTION_LOCKED', '采购付款登记后认购单已锁定')
           const verified = validateContributionReview({
             expectedAmount: latest.amount,
             actualPaidAmount: Number(body.actualPaidAmount),
@@ -1375,6 +1511,11 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
             rejectReason: undefined, actualPaidAmount: verified.amountCents / 100, transactionNo: verified.transactionNo
           }
           await repositories.subscriptions.replace(record, session)
+          if (await mongo.db.collection(`${appConfig.mongodb.collectionPrefix}fund_ledger`).findOne({ transactionNo: verified.transactionNo }, { session })) {
+            throw new AppError(409, 'BANK_TRANSACTION_DUPLICATE', '该银行流水号已被使用')
+          }
+          await bankTransactions.insertOne({ transactionNo: verified.transactionNo, sourceKey: `contribution:${latest.id}`,
+            projectId: latest.projectId, createdAt: reviewedAt }, { session })
           await fundLedger.append({
             id: `LED-${randomUUID()}`, sourceKey: `contribution:${latest.id}`, type: 'employee_contribution',
             projectId: latest.projectId, subscriptionId: latest.id, participantId: latest.userId,
@@ -1736,6 +1877,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     if (!subscription) {
       return send(res, 404, { error: 'SUBSCRIPTION_NOT_FOUND', message: '认购记录不存在' })
     }
+    if ((await repositories.projects.getById(subscription.projectId))?.purchasePaymentId) return send(res, 409, { error: 'SUBSCRIPTION_LOCKED', message: '采购付款登记后认购单已锁定' })
     const context = requestContext(req)
     if (context.role !== 'employee' || subscription.userId !== context.userId) throw new AppError(403, 'FORBIDDEN', '只能删除本人认购的支付截图')
     const imageId = typeof body.imageId === 'string' ? body.imageId.trim() : ''
@@ -1750,6 +1892,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const updated = await fileAssetService.deleteBinding(image.assetId, async (_asset, session) => {
       const latest = await repositories.subscriptions.getById(subscription.id, session)
       if (!latest) throw new Error('认购记录不存在')
+      if ((await repositories.projects.getById(latest.projectId, session))?.purchasePaymentId) throw new AppError(409, 'SUBSCRIPTION_LOCKED', '采购付款登记后认购单已锁定')
       const remainingImages = (latest.paymentImages ?? []).filter(item => item.id !== imageId)
       const latestImage = remainingImages.at(-1)
       const recognizedTotal = Number(remainingImages.filter(item => item.status === '已识别').reduce((sum, item) => sum + item.recognizedAmount, 0).toFixed(2))
@@ -1944,7 +2087,8 @@ const server = createServer(observeRequests(async (req, res) => {
     let reviewPermission: ReturnType<typeof validateReviewAction> | undefined
     if (req.method === 'POST') {
       const contentType = String(req.headers['content-type'] ?? '').toLowerCase()
-      const raw = await readRawBody(req, DEFAULT_JSON_BODY_LIMIT)
+      const raw = await readRawBody(req, contentType.startsWith('multipart/form-data;')
+        ? 12 * 1024 * 1024 : DEFAULT_JSON_BODY_LIMIT)
       if (bodyContainsAccessToken(raw, contentType)) return send(res, 401, { error: 'AUTH_REQUIRED', message: '请求凭证位置无效' })
       if (!contentType.startsWith('multipart/form-data;')) {
         const body = await readJsonBody(req, DEFAULT_JSON_BODY_LIMIT)

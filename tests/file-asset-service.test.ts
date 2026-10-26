@@ -81,6 +81,7 @@ test('deleting an unbound pending invoice removes its exact asset and stored obj
 
 test('object keys reject traversal and encoded separators', () => {
   assert.equal(objectKey('crowfunding', 'payment-proof', 'asset-1', 'png'), 'crowfunding/payment-proof/asset-1.png')
+  assert.equal(objectKey('crowfunding', 'procurement-payment-proof', 'asset-1', 'png'), 'crowfunding/procurement-payment-proof/asset-1.png')
   assert.throws(() => objectKey('../escape', 'payment-proof', 'asset-1', 'png'), /对象键参数不安全/)
   assert.throws(() => objectKey('crowfunding', 'payment-proof', 'asset%2f1', 'png'), /对象键参数不安全/)
 })

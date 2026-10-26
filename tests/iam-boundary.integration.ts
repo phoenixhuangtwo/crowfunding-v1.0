@@ -272,6 +272,73 @@ try {
   const me = await request('/api/auth/me', employee)
   assert.equal(me.status, 200)
   assert.equal((me.body.data as { user: { id: string } }).user.id, '1001')
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-PAY-READY', title: '采购付款隔离测试项目', source: 'integration-test',
+    status: '已满额', statusType: 'success', progress: 100, remain: 0, deadline: '2020-01-01 00:00',
+    total: 200, costAmount: 300, salesAmount: 360, profitAmount: 60,
+    companyFixedAmount: 100, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 200, subscribed: 300, people: 1, ruleId: 'RULE-IAM-PAY-READY'
+  })
+  await db.collection(`${prefix}subscription_rules`).insertOne({
+    id: 'RULE-IAM-PAY-READY', projectId: 'PRJ-IAM-PAY-READY', ruleName: '采购付款隔离规则',
+    sharePrice: 100, totalShares: 3, companyFrontShares: 1, totalAmount: 200,
+    companyFixedAmount: 100, paymentCutoffAt: '2020-01-02 00:00',
+    status: '已启用', updatedAt: '2020-01-01 00:00'
+  })
+  for (const record of [
+    { id: 'SUB-IAM-PAY-COMPANY', userId: 'company', companyKind: 'front', amount: 100, shares: 1, pay: '公司待出资' },
+    { id: 'SUB-IAM-PAY-EMPLOYEE', userId: '1001', amount: 200, shares: 2, pay: '已缴款' }
+  ]) await db.collection(`${prefix}subscriptions`).insertOne({ ...record, projectId: 'PRJ-IAM-PAY-READY',
+    project: '采购付款隔离测试项目', action: '查看支付', idempotencyKey: record.id,
+    createdAt: '2020-01-01 00:00', paymentDeadlineAt: '2020-01-02 00:00' })
+  await db.collection(`${prefix}fund_ledger`).insertOne({
+    id: 'LED-IAM-PAY-EMPLOYEE', sourceKey: 'contribution:SUB-IAM-PAY-EMPLOYEE', type: 'employee_contribution',
+    projectId: 'PRJ-IAM-PAY-READY', subscriptionId: 'SUB-IAM-PAY-EMPLOYEE', participantId: '1001',
+    shares: 2, amountCents: 20000, transactionNo: 'BANK-IAM-EMPLOYEE',
+    transactionKey: 'BANK-IAM-EMPLOYEE', proofAssetIds: [], reviewedBy: '1003', createdAt: '2020-01-01 00:00'
+  })
+  await db.collection(`${prefix}file_assets`).insertOne({
+    id: 'ASSET-IAM-PAY', provider: 'tencent-cos', bucket: 'test', region: 'test',
+    objectKey: 'test/procurement-payment-proof/ASSET-IAM-PAY.png', originalName: 'payment.png',
+    extension: 'png', mimeType: 'image/png', sizeBytes: 8, sha256: 'a'.repeat(64),
+    purpose: 'procurement-payment-proof', ownerType: 'project', ownerId: 'PRJ-IAM-PAY-READY',
+    status: 'ready', createdBy: '1003', createdAt: '2020-01-01 00:00', updatedAt: '2020-01-01 00:00'
+  })
+  const paymentInput = { amountCents: 30000, transactionNo: 'BANK-IAM-PURCHASE',
+    paidAt: new Date(Date.now() - 60_000).toISOString(), proofAssetIds: ['ASSET-IAM-PAY'],
+    recognitionFailed: true, companyFundsConfirmed: true, note: '凭证识别未通过，财务已线下核对银行流水' }
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-employee-token', paymentInput)).status, 403)
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-finance-token', { ...paymentInput, companyFundsConfirmed: false })).status, 400)
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-finance-token', { ...paymentInput, proofAssetIds: ['ASSET-OTHER'] })).status, 409)
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-finance-token', { ...paymentInput, transactionNo: 'BANK-IAM-EMPLOYEE' })).status, 400)
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-finance-token', { ...paymentInput, recognitionFailed: false })).status, 409)
+  assert.equal(await db.collection(`${prefix}procurement_payments`).countDocuments(), 0)
+  const paid = await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-finance-token', paymentInput)
+  assert.equal(paid.status, 201, JSON.stringify(paid.body))
+  assert.equal((await db.collection(`${prefix}projects`).findOne({ id: 'PRJ-IAM-PAY-READY' }))?.status, '待回款')
+  assert.equal((await db.collection(`${prefix}subscriptions`).findOne({ id: 'SUB-IAM-PAY-COMPANY' }))?.pay, '已缴款')
+  assert.equal(await db.collection(`${prefix}fund_ledger`).countDocuments({ projectId: 'PRJ-IAM-PAY-READY' }), 3)
+  const lockedImage = new FormData()
+  lockedImage.set('subscriptionId', 'SUB-IAM-PAY-EMPLOYEE')
+  lockedImage.set('image', new Blob([Buffer.from('89504e470d0a1a0a', 'hex')], { type: 'image/png' }), 'locked.png')
+  const lockedUpload = await fetch(`${base}/api/payments/ocr`, {
+    method: 'POST', headers: { Authorization: 'Bearer smoke-employee-token' }, body: lockedImage
+  })
+  const lockedPayload = await lockedUpload.json() as { error: string; message?: string }
+  assert.equal(lockedUpload.status, 409, JSON.stringify(lockedPayload))
+  assert.equal(lockedPayload.error, 'SUBSCRIPTION_LOCKED')
+  assert.equal((await postAs('/api/projects/PRJ-IAM-PAY-READY/procurement-payment',
+    'smoke-finance-token', paymentInput)).status, 409)
+  assert.equal(await db.collection(`${prefix}procurement_payments`).countDocuments(), 1)
+  const paidFunding = await request('/api/projects/PRJ-IAM-PAY-READY/funding-reconciliation',
+    { Authorization: 'Bearer smoke-finance-token' })
+  assert.equal((paidFunding.body.data as { companyFundsConfirmed: boolean }).companyFundsConfirmed, true)
   assert.ok(fake.calls.some(call => call.path.includes('check-token')))
   console.log('IAM boundary integration passed in isolated collections')
 } finally {

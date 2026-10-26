@@ -88,6 +88,8 @@ export function readSingleImageMultipart(
     })
     req.once('aborted', () => fail(new Error('图片上传请求已中断')))
     req.once('error', () => fail(new Error('图片上传请求读取失败')))
-    req.pipe(parser)
+    const buffered = (req as IncomingMessage & { rawBody?: Buffer }).rawBody
+    if (buffered) parser.end(buffered)
+    else req.pipe(parser)
   })
 }

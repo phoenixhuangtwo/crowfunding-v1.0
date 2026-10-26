@@ -15,6 +15,10 @@ type ReconcileDependencies = {
 const invoiceCleanupSafetyMs = 5 * 60 * 1000
 
 function settlementInvoiceReadyForCleanup(asset: FileAsset, now: number) {
+  if (asset.purpose === 'procurement-payment-proof' && asset.status === 'ready') {
+    const createdAt = Date.parse(asset.createdAt)
+    return Number.isFinite(createdAt) && now - createdAt >= 24 * 60 * 60 * 1000
+  }
   if (asset.purpose !== 'settlement-invoice' || asset.status !== 'ready') return true
   const createdAt = Date.parse(asset.createdAt)
   return Number.isFinite(createdAt) && now - createdAt >= DEFAULT_OCR_PROOF_TTL_MS + invoiceCleanupSafetyMs

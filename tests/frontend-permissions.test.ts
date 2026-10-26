@@ -21,6 +21,10 @@ test('allowedPageKeys returns no local defaults when IAM menus are empty or unkn
   assert.deepEqual(allowedPageKeys(null), [])
 })
 
+test('finance procurement payment page requires an IAM menu entry', () => {
+  assert.deepEqual(allowedPageKeys({ menus: [{ componentName: 'procurementPayment' }] }), ['procurementPayment'])
+})
+
 test('canApi and canUi require explicit IAM permission codes', () => {
   const info = {
     permissions: ['crowdfunding:access'],

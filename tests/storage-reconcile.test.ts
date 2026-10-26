@@ -82,3 +82,23 @@ test('reconciliation rechecks business references before deleting one asset', as
   await assert.rejects(() => reconcile({ dryRun: false, apply: true, assetId: invoice.id }, deps), /已被业务记录引用/)
   assert.equal(deleted, false)
 })
+
+test('unbound procurement payment proof has a 24 hour review window', async () => {
+  const createdAt = Date.parse('2026-10-23T00:00:00.000Z')
+  const proof = { ...asset('purchase-1'), purpose: 'procurement-payment-proof' as const,
+    ownerType: 'project' as const, ownerId: 'PRJ-1', status: 'ready' as const,
+    createdAt: new Date(createdAt).toISOString() }
+  const deps = {
+    assets: { async list() { return [proof] }, async findOne() { return null },
+      async getById() { return proof }, async insert() {}, async replace() {},
+      async deleteById() { return true }, async count() { return 1 } } as EntityRepository<FileAsset>,
+    storage: { async headObject() { return { sizeBytes: 8 } }, async deleteObject() {},
+      async putObject() {}, getObjectStream() { throw new Error('unused') },
+      async checkHealth() { return 'up' as const } },
+    referenceCount: async () => 0,
+    now: () => createdAt + 23 * 60 * 60 * 1000
+  }
+  await assert.rejects(() => reconcile({ dryRun: false, apply: true, assetId: proof.id }, deps), /状态不允许/)
+  deps.now = () => createdAt + 24 * 60 * 60 * 1000
+  assert.equal((await reconcile({ dryRun: true, apply: false, assetId: proof.id }, deps)).report[0].proofWindowElapsed, true)
+})

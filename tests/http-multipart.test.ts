@@ -3,6 +3,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import type { IncomingMessage } from 'node:http'
 import { readSingleImageMultipart } from '../server/http-multipart.ts'
+import { readRawBody } from '../server/http-json-body.ts'
 
 function request(body: Buffer, boundary: string) {
   const stream = Readable.from([body]) as IncomingMessage
@@ -50,4 +51,13 @@ test('multipart parser rejects duplicate fields and multiple files', async () =>
     }),
     /只能上传一个图片文件/
   )
+})
+
+test('multipart parser reuses the body buffered by authentication', async () => {
+  const boundary = 'buffered-boundary'
+  const png = Buffer.from('89504e470d0a1a0a', 'hex')
+  const req = request(multipart(boundary, [], [{ name: 'payment.png', bytes: png }]), boundary)
+  await readRawBody(req)
+  const parsed = await readSingleImageMultipart(req, { maxFileBytes: 1024, maxFieldBytes: 100, allowedFields: [] })
+  assert.deepEqual(parsed.file.bytes, png)
 })

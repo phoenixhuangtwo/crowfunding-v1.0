@@ -35,3 +35,14 @@ test('employee reads only a payment asset owned by their subscription', async ()
   await assert.doesNotReject(() => authorizeAssetRead({ userId: 'employee01', role: 'employee' }, asset, repositories))
   await assert.rejects(() => authorizeAssetRead({ userId: 'employee02', role: 'employee' }, asset, repositories), /无权访问/)
 })
+
+test('procurement payment proof is readable only by finance and company administrator', async () => {
+  const proof = { ...asset, purpose: 'procurement-payment-proof' as const,
+    ownerType: 'project' as const, ownerId: 'PRJ-1' }
+  const repositories = repos({ id: 'SUB-1', projectId: 'PRJ-1', project: '项目', userId: 'employee01',
+    amount: 100, pay: '已缴款', profit: 0, action: '查看支付', idempotencyKey: 'idem',
+    createdAt: '2026-08-28', paymentDeadlineAt: '2026-08-29' })
+  await assert.doesNotReject(() => authorizeAssetRead({ userId: 'finance01', role: 'finance' }, proof, repositories))
+  await assert.doesNotReject(() => authorizeAssetRead({ userId: 'admin01', role: 'super_admin' }, proof, repositories))
+  await assert.rejects(() => authorizeAssetRead({ userId: 'employee01', role: 'employee' }, proof, repositories), /无权访问/)
+})

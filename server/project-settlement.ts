@@ -58,7 +58,7 @@ export function confirmProjectSettlement(
   }
   if (project.status === '已完结') throw new Error('历史项目状态待核实，不能继续上传凭证')
   if (remainingAmount <= 0) throw new Error('发票凭证金额已达到预计销售额，不能继续上传')
-  if (!['已满额', '已截止', '部分已结算'].includes(project.status)) throw new Error('项目当前状态不允许确认结算')
+  if (!['已满额', '已截止', '待回款', '部分已结算'].includes(project.status)) throw new Error('项目当前状态不允许确认结算')
   if (!input.idempotencyKey.trim()) throw new Error('结算幂等键不能为空')
   if (!Number.isFinite(input.amount) || input.amount <= 0) throw new Error('交易金额必须大于 0')
   if (!Number.isSafeInteger(Math.round(input.amount * 100)) || Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 0.000001) {

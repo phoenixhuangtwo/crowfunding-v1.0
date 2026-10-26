@@ -25,6 +25,8 @@ test('maps every protected route to an exact permission', () => {
     ['POST', '/api/agreements/confirm-view-code', 'crowdfunding:receiving-code:query'],
     ['POST', '/api/invoices/pending/delete', 'crowdfunding:settlement:upload-invoice'],
     ['POST', '/api/projects/P1/open', 'crowdfunding:project:open'],
+    ['POST', '/api/projects/P1/procurement-payment', 'crowdfunding:procurement-payment:register'],
+    ['POST', '/api/projects/P1/procurement-payment/proofs', 'crowdfunding:procurement-payment:proof-upload'],
     ['POST', '/api/projects/P1/terminate', 'crowdfunding:project:terminate'],
     ['POST', '/api/projects/P1/interrupt', 'crowdfunding:project:interrupt'],
     ['POST', '/api/subscriptions', 'crowdfunding:subscription:create'],

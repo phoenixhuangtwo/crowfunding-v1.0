@@ -14,7 +14,7 @@ export type AdminProjectActionLayout = {
 
 export function getAdminProjectActionLayout(project: AdminProjectActionTarget): AdminProjectActionLayout {
   const isUnopened = project.status === '未开放'
-  const isSettlementEligible = ['已满额', '已截止', '部分已结算'].includes(project.status)
+  const isSettlementEligible = ['已满额', '已截止', '待回款', '部分已结算'].includes(project.status)
   const showTerminate = isUnopened || project.status === '未满额'
   const showTakeover = project.status === '未满额' && project.remain > 0
   return {
