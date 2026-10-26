@@ -548,7 +548,7 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     if (context.role === 'employee') throw new AppError(403, 'FORBIDDEN', '员工不能访问全量业务状态')
     return send(res, 200, { data: await queryService.state(), persistence: 'mongodb' })
   }
-  if (pathname === '/api/projects') return send(res, 200, { data: await queryService.listProjects() })
+  if (pathname === '/api/projects') return send(res, 200, { data: await queryService.listProjects(requestContext(req)) })
   if (pathname === '/api/receiving-codes') {
     const context = requestContext(req)
     const codes = await queryService.listReceivingCodes()

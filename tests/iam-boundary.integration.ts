@@ -44,6 +44,13 @@ try {
     companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
     employeeSubscribedAmount: 0, subscribed: 0, people: 0
   })
+  await db.collection(`${prefix}projects`).insertOne({
+    id: 'PRJ-IAM-EXPIRED', title: '过期认购项目', source: 'integration-test',
+    status: '未满额', statusType: 'primary', progress: 0, remain: 300, deadline: '2020-01-01 00:00',
+    total: 300, costAmount: 300, salesAmount: 360, profitAmount: 60,
+    companyFixedAmount: 0, companyTakeoverAmount: 0, companyForcedTakeoverAmount: 0,
+    employeeSubscribedAmount: 0, subscribed: 0, people: 0
+  })
   await db.collection(`${prefix}subscription_rules`).insertOne({
     id: 'RULE-IAM-PUBLISH', projectId: 'PRJ-IAM-PUBLISH', projectName: '待发布归属测试项目', ruleName: '隔离发布规则',
     totalAmount: 300, companyFixedAmount: 0, minAmount: 100, minParticipants: 1,
@@ -74,7 +81,9 @@ try {
   assert.equal((await request('/api/projects')).status, 401)
   assert.equal((await request('/api/projects', { 'X-User-Id': 'superadmin01', 'X-User-Role': 'super_admin' })).status, 401)
   const employee = { Authorization: 'Bearer smoke-employee-token' }
-  assert.equal((await request('/api/projects', employee)).status, 200)
+  const employeeProjects = await request('/api/projects', employee)
+  assert.equal(employeeProjects.status, 200)
+  assert.deepEqual((employeeProjects.body.data as Array<{ id: string }>).map(project => project.id), ['PRJ-IAM-TEST'])
   const departmentAdmin = await request('/api/projects', { Authorization: 'Bearer smoke-admin-token' })
   assert.equal(departmentAdmin.status, 403)
   assert.equal(departmentAdmin.body.error, 'DATA_SCOPE_MIGRATION_REQUIRED')
