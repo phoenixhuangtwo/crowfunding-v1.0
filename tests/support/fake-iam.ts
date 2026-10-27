@@ -83,6 +83,11 @@ const fixtures: readonly ActiveFixture[] = [
     dataScope: { all: false, self: true, deptIds: [] }
   },
   {
+    token: 'smoke-second-employee-token', userId: 1009, username: 'employee02', nickname: '员工乙', deptId: 100,
+    roles: ['crowdfunding_employee'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:subscription:query', 'crowdfunding:subscription:create', 'crowdfunding:notification:query'],
+    dataScope: { all: false, self: true, deptIds: [] }
+  },
+  {
     token: 'smoke-admin-token', userId: 1002, username: 'admin01', nickname: '部门管理员', deptId: 200,
     roles: ['crowdfunding_admin'], apiPermissions: ['crowdfunding:access', 'crowdfunding:project:query', 'crowdfunding:rule:query', 'crowdfunding:subscription:query', 'crowdfunding:receiving-code:query', 'crowdfunding:takeover:query', 'crowdfunding:procurement-failure:request', 'crowdfunding:procurement-failure:query'],
     dataScope: { all: false, self: false, deptIds: [200] }

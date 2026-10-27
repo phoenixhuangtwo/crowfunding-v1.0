@@ -66,3 +66,40 @@ test('excludes excess receipts and company top-up returns from distributable pro
   assert.equal(returned.profitCents, 301)
   assert.equal(returned.distributableCents, 30301)
 })
+
+test('preserves every cent across 1000 deterministic multi-participant distributions', () => {
+  let seed = 20261027
+  const next = (limit: number) => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    return seed % limit
+  }
+  for (let caseNo = 0; caseNo < 1000; caseNo += 1) {
+    const totalShares = 1 + next(50)
+    const sharePriceCents = 1 + next(100000)
+    const profitCents = next(100000)
+    const confirmedCostsCents = next(10000)
+    const principalCents = totalShares * sharePriceCents
+    const positions: DistributionInput['positions'] = Array.from({ length: 4 }, (_, index) => ({
+      participantId: `employee-${index}`, kind: 'employee', shares: 0
+    }))
+    positions.push({ participantId: 'company', kind: 'company', shares: 0 })
+    for (let share = 0; share < totalShares; share += 1) positions[next(positions.length)].shares += 1
+    const result = calculateDistribution({ sharePriceCents, totalShares, positions,
+      receivableCents: principalCents + profitCents + confirmedCostsCents,
+      customerReceiptsCents: principalCents + profitCents + confirmedCostsCents,
+      companyTopUpsCents: 0, companyReturnsCents: 0,
+      procurementPaymentsCents: principalCents, confirmedCostsCents })
+    assert.equal(result.profitCents, profitCents)
+    assert.equal(result.lines.reduce((sum, line) => sum + line.principalCents, 0), principalCents)
+    assert.equal(result.lines.reduce((sum, line) => sum + line.profitCents, 0), profitCents)
+    assert.equal(result.lines.reduce((sum, line) => sum + line.payoutCents, 0), principalCents + profitCents)
+    for (const line of result.lines) {
+      assert.equal(line.principalCents, line.shares * sharePriceCents)
+      if (line.kind === 'employee') {
+        assert.equal(line.profitCents, Number(BigInt(profitCents) * BigInt(line.shares) / BigInt(totalShares)))
+      }
+    }
+    assert.ok(result.companyRoundingResidualCents >= 0)
+    assert.ok(result.companyRoundingResidualCents < positions.length)
+  }
+})
