@@ -26,3 +26,7 @@ export function getAdminProjectActionLayout(project: AdminProjectActionTarget): 
     showMore: showTerminate || showTakeover
   }
 }
+
+export function isAdminProjectCostVisible(id: string, displayedCost: number, salesAmount?: number): boolean {
+  return !id.startsWith('PRJ-FSY-OFFLINE-') || (displayedCost >= 500 && (salesAmount === undefined || salesAmount >= displayedCost))
+}

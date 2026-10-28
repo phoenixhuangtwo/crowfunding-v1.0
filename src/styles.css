@@ -648,6 +648,40 @@ h2 {
   margin-bottom: 14px;
 }
 
+.payment-review-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.payment-review-detail > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.payment-review-detail .review-project-meta {
+  gap: 16px;
+}
+
+.payment-review-detail .review-project-meta .el-input,
+.payment-review-detail .review-project-meta .el-input-number {
+  margin-top: 8px;
+}
+
+.payment-review-detail > .el-alert {
+  padding: 12px 16px;
+  line-height: 1.7;
+}
+
+.payment-review-detail > .el-textarea .el-textarea__inner {
+  min-height: 80px;
+  line-height: 1.7;
+}
+
+.payment-review-detail > .actions-row {
+  gap: 12px;
+}
+
 .review-project-meta {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(180px, 0.6fr);
@@ -791,6 +825,30 @@ h2 {
 
 .subscribe-panel .remaining-alert {
   margin-bottom: 16px;
+}
+
+.subscribe-panel > .el-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.subscribe-panel > .el-form > .el-form-item {
+  margin-bottom: 0;
+}
+
+.subscribe-panel > .el-form > .el-button {
+  align-self: flex-start;
+}
+
+.subscribe-panel > .wide {
+  margin-top: 20px;
+  margin-bottom: 14px;
+}
+
+.subscribe-panel > p.muted {
+  margin: 0;
+  line-height: 1.7;
 }
 
 .subscribe-deadline-alert {
@@ -1402,4 +1460,13 @@ h2 {
   .stats {
     grid-template-columns: 1fr;
   }
+}
+
+.payment-review-detail > .review-project-meta,
+.payment-review-detail > .stats.compact,
+.payment-review-detail > .payment-image-list,
+.payment-review-detail > .payment-preview,
+.payment-review-detail > .actions-row {
+  margin-top: 0;
+  margin-bottom: 0;
 }

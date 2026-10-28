@@ -69,7 +69,7 @@ function procurementCreatedAt(value: unknown) {
   return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`
 }
 
-export type ProcurementOrderSkipReason = 'missingId' | 'missingTitle' | 'nonPositiveCost'
+export type ProcurementOrderSkipReason = 'missingId' | 'missingTitle' | 'nonPositiveCost' | 'belowMinimumCost' | 'salesBelowCost'
 
 export function procurementOrderSkipReason(order: Record<string, unknown>): ProcurementOrderSkipReason | null {
   const externalId = String(order.id ?? '').trim()
@@ -78,6 +78,10 @@ export function procurementOrderSkipReason(order: Record<string, unknown>): Proc
   if (!externalId) return 'missingId'
   if (!title) return 'missingTitle'
   if (costAmount <= 0) return 'nonPositiveCost'
+  if (costAmount < 500) return 'belowMinimumCost'
+  const transactionAmount = centsToYuan(order.totalTransactionPrice)
+  const salesAmount = transactionAmount > 0 ? transactionAmount : centsToYuan(order.totalSellingPrice)
+  if (salesAmount < costAmount) return 'salesBelowCost'
   return null
 }
 

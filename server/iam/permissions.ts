@@ -105,6 +105,7 @@ const routes: Array<[string, RegExp, ApiPermissionCode]> = [
   ['POST', new RegExp(`^\\/api\\/projects\\/${id}\\/procurement-difference\\/resolve$`), 'crowdfunding:procurement-difference:resolve'],
   ['POST', new RegExp(`^\\/api\\/notifications\\/${id}\\/read$`), 'crowdfunding:notification:read'],
   ['POST', /^\/api\/agreements$/, 'crowdfunding:agreement:manage'],
+  ['POST', /^\/api\/agreements\/\d+\/(revise|delete)$/, 'crowdfunding:agreement:manage'],
   ['POST', /^\/api\/agreements\/confirm-view-code$/, 'crowdfunding:receiving-code:query'],
   ['POST', /^\/api\/invoices\/pending\/delete$/, 'crowdfunding:settlement:upload-invoice'],
   ['POST', new RegExp(`^\\/api\\/projects\\/${id}\\/open$`), 'crowdfunding:project:open'],

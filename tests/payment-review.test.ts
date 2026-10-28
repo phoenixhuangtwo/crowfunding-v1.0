@@ -26,3 +26,12 @@ test('payment review queue stays empty instead of falling back to unpaid or anot
 
   assert.deepEqual(result, [])
 })
+
+test('review project selection replaces a stale draft with a project having pending records', async () => {
+  const { selectPaymentReviewProject } = await import('../src/payment-review.ts')
+  const projects = [{ id: 'old', title: '旧采购单' }, { id: 'done', title: '已审核项目' }, { id: 'current', title: '当前项目' }]
+  const rows = [{ projectId: 'done', project: '已审核项目', pay: '已收款' }, { projectId: 'current', project: '当前项目', pay: '待复核' }]
+  assert.equal(selectPaymentReviewProject(projects, rows, 'old'), 'current')
+  assert.equal(selectPaymentReviewProject(projects, rows, 'done'), 'done')
+  assert.equal(selectPaymentReviewProject(projects, [], 'old'), '')
+})

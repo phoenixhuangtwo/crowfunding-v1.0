@@ -16,11 +16,12 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile, UploadInstance } from 'element-plus'
-import { getAdminProjectActionLayout } from './admin-project-actions'
+import { getAdminProjectActionLayout, isAdminProjectCostVisible } from './admin-project-actions'
 import { validateInvoiceImage } from './invoice-image'
-import { filterTargetProjectPaymentReviews } from './payment-review'
+import { filterTargetProjectPaymentReviews, selectPaymentReviewProject } from './payment-review'
 import { projectSettlementStatus } from './project-settlement-status'
 import { sortProjectsByCreatedAtDesc } from './project-sort'
+import { isCrowdfundingListProject } from './project-list-visibility'
 import { filterSubscriptionRules } from './subscription-rule-filter'
 import { settlementPaymentTime, settlementSubscriberLabel } from './settlement-detail'
 import { beginSettlement } from './settlement-flow'
@@ -30,7 +31,7 @@ import { validatePublishSchedule } from '../server/publish-schedule'
 import { apiRequest } from './auth/api-client'
 import { readAccessToken } from './auth/session'
 import { useAuthSession } from './auth/use-auth-session'
-import { allowedPageKeys, canApi, canUi, type AuthorizedPageKey } from './auth/permissions'
+import { allowedPageKeys, canApi, canSyncProcurement, canUi, type AuthorizedPageKey } from './auth/permissions'
 import { permissionFor, reviewPermissionFor } from '../server/iam/permissions'
 import AuthStateView from './components/AuthStateView.vue'
 import ProcurementPaymentPage from './components/ProcurementPaymentPage.vue'
@@ -333,6 +334,9 @@ const currentRole = ref<Role>('employee')
 const currentPage = ref<PageKey | ''>('')
 const authSession = useAuthSession()
 const agreementVisible = ref(false)
+const agreementPreviewVisible = ref(false)
+const agreementPreviewLoading = ref(false)
+const previewAgreement = ref<AgreementVersion | null>(null)
 const currentAgreement = ref<AgreementVersion | null>(null)
 const agreementNode = ref<'提交认购' | '查看缴款码' | '确认收款'>('提交认购')
 const agreementReadToEnd = ref(false)
@@ -343,6 +347,7 @@ const agreementVersions = ref<AgreementVersion[]>([])
 const agreementVersionTotal = ref(0)
 const agreementVersionPage = ref(1)
 const agreementFormVisible = ref(false)
+const editingAgreementVersion = ref<number>()
 const agreementForm = reactive({ title: '', body: '' })
 const agreementConfirmations = ref<AgreementConfirmation[]>([])
 const agreementConfirmationVersion = ref<number>()
@@ -702,6 +707,7 @@ const roleMeta = computed(() => ({ ...roles[currentRole.value], account: authSes
 const ruleDialogTitle = computed(() => ruleReadonly.value ? '查看认购规则配置' : editingRuleId.value ? '修改认购规则' : '创建认购规则')
 const openRuleOptions = computed(() => rules.filter(rule => rule.status === '已启用'))
 const selectedOpenRule = computed(() => openRuleOptions.value.find(rule => rule.id === selectedOpenRuleId.value))
+const eligibleProcurementProjects = computed(() => projects.filter(project => isAdminProjectCostVisible(project.id, projectCostAmount(project), projectSalesAmount(project))))
 const selectedRuleProject = computed(() => projects.find(project => project.id === ruleForm.projectId))
 const enabledReceivingCodes = computed(() => receivingCodes.filter(code => code.status === '启用'))
 const selectedRuleReceivingCode = computed(() => receivingCodes.find(code => code.id === ruleForm.receivingCodeId))
@@ -735,6 +741,7 @@ const ruleTimeRange = computed<[string, string] | []>({
   }
 })
 const subscriptionProjectOptions = computed(() => Array.from(new Set(subscriptions.map(item => item.project))))
+const paymentReviewProjectOptions = computed(() => projects.filter(project => filterTargetProjectPaymentReviews(subscriptions, project).length > 0))
 const paymentReviewSubscriptions = computed(() => {
   const project = selectedProject.value
   if (!project) return []
@@ -791,7 +798,7 @@ const activeReviewProject = computed(() => {
 const activeReviewProjectName = computed(() => activeReviewProject.value?.title ?? activeReviewSubscription.value?.project ?? '-')
 const activeReviewProjectCode = computed(() => activeReviewProject.value?.id ?? activeReviewSubscription.value?.projectId ?? '-')
 const paymentReviewTargetLabel = computed(() => selectedProject.value ? `${selectedProject.value.title}（${selectedProject.value.id}）` : '未选择目标项目')
-const activeReviewAmount = computed(() => activeReviewSubscription.value?.amount ?? 12000)
+const activeReviewAmount = computed(() => activeReviewSubscription.value?.amount ?? 0)
 const activeReviewRecognizedAmount = computed(() => Number((activeReviewSubscription.value?.recognizedPaidAmount
   ?? activeReviewPaymentImages.value.filter(image => image.status === '已识别').reduce((sum, image) => sum + image.recognizedAmount, 0)).toFixed(2)))
 const pendingPaymentReviewCount = computed(() => paymentReviewSubscriptions.value.filter(item => subscriptionDisplayPay(item) === '待复核').length)
@@ -799,17 +806,18 @@ const activeReviewIsPending = computed(() => activeReviewSubscription.value ? su
 const activeReviewReadOnlyText = computed(() => activeReviewSubscription.value
   ? `当前记录状态为“${subscriptionPayLabel(activeReviewSubscription.value)}”，仅供查看，不能重复复核。`
   : '当前没有可查看的缴款记录。')
-const activeReviewPaymentId = computed(() => activeReviewSubscription.value ? reviewPaymentId(activeReviewSubscription.value) : 'PAY-20260705-0092')
+const activeReviewPaymentId = computed(() => activeReviewSubscription.value ? reviewPaymentId(activeReviewSubscription.value) : '-')
 const employeeNameMap: Record<string, string> = {
   employee01: '张明',
   employee02: '赵倩'
 }
 const activeReviewEmployeeLabel = computed(() => {
-  const userId = activeReviewSubscription.value?.userId ?? 'employee01'
+  const userId = activeReviewSubscription.value?.userId
+  if (!userId) return '-'
   return `${userId} · ${employeeNameMap[userId] ?? '员工'}`
 })
-const activeReviewUploadedAt = computed(() => activeReviewSubscription.value?.paymentUploadedAt ?? '2026-07-05 10:32:01')
-const activeReviewPaymentSuccessAt = computed(() => activeReviewSubscription.value?.paymentSuccessAt ?? '2026-07-05 10:30:18')
+const activeReviewUploadedAt = computed(() => activeReviewSubscription.value?.paymentUploadedAt ?? '')
+const activeReviewPaymentSuccessAt = computed(() => activeReviewSubscription.value?.paymentSuccessAt ?? '')
 const activeReviewReviewedBy = computed(() => activeReviewSubscription.value?.reviewedBy ?? '-')
 const activeReviewReviewedAt = computed(() => activeReviewSubscription.value?.reviewedAt ?? '-')
 const filteredSubscriptions = computed(() => subscriptions.filter(subscription => {
@@ -863,6 +871,7 @@ function handleProjectSortChange({ prop, order }: { prop: string; order: 'ascend
 }
 
 const filteredProjects = computed(() => projects.filter(project => {
+  if (!isCrowdfundingListProject(project)) return false
   const keyword = projectFilters.keyword.trim()
   const statusMatched = projectFilters.status === '全部' || project.status === projectFilters.status
   const subscriptionStatusMatched = projectFilters.subscriptionStatus === '全部' || getProjectSubscriptionStatus(project.id) === projectFilters.subscriptionStatus
@@ -895,7 +904,7 @@ const pagedRules = computed(() => {
 })
 const filteredAdminProjects = computed(() => {
   const keyword = adminProjectKeyword.value.trim()
-  const matchedProjects = projects.filter(project => {
+  const matchedProjects = eligibleProcurementProjects.value.filter(project => {
     const statusMatched = adminProjectStatus.value === '全部' || project.status === adminProjectStatus.value
     const settlementStatusMatched = adminSettlementStatus.value === '全部' || projectSettlementStatus(project.status) === adminSettlementStatus.value
     const keywordMatched = !keyword || [
@@ -1038,6 +1047,14 @@ function applyRuleFilters() {
   rulePage.value = 1
 }
 
+watch([currentPage, paymentReviewProjectOptions], () => {
+  if (currentPage.value !== 'payReview') return
+  const next = selectPaymentReviewProject(projects, subscriptions, selectedProjectId.value)
+  if (next !== selectedProjectId.value) {
+    selectedProjectId.value = next
+    activePaymentSubscriptionId.value = ''
+  }
+})
 watch(ruleFilters, applyRuleFilters)
 watch(() => activeReviewSubscription.value?.id, () => {
   reviewActualPaidAmount.value = undefined
@@ -1119,12 +1136,12 @@ async function confirmReceipt(subscription: Subscription) {
 }
 
 function projectCostAmount(project: Project) {
-  return project.costAmount && project.costAmount >= project.total ? project.costAmount : Math.ceil(project.total * 1.2)
+  return project.costAmount ?? Math.ceil(project.total * 1.2)
 }
 
 function projectSalesAmount(project: Project) {
   const cost = projectCostAmount(project)
-  return project.salesAmount && project.salesAmount >= cost ? project.salesAmount : Math.ceil(cost * 1.18)
+  return project.salesAmount ?? Math.ceil(cost * 1.18)
 }
 
 function projectProfitAmount(project: Project) {
@@ -1978,6 +1995,21 @@ async function startSubscribe() {
   subscribeVisible.value = true
 }
 
+async function previewCurrentAgreement() {
+  if (agreementPreviewLoading.value) return
+  agreementPreviewLoading.value = true
+  try {
+    const payload = await api<{ data: AgreementVersion | null }>('/api/agreements/current')
+    if (!payload.data) { ElMessage.error('协议尚未配置，请联系公司'); return }
+    previewAgreement.value = payload.data
+    agreementPreviewVisible.value = true
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '协议加载失败')
+  } finally {
+    agreementPreviewLoading.value = false
+  }
+}
+
 async function requestAgreement(node: '提交认购' | '查看缴款码' | '确认收款') {
   try {
     const payload = await api<{ data: AgreementVersion | null }>('/api/agreements/current')
@@ -2025,10 +2057,30 @@ async function loadAgreementVersions() {
   agreementVersionTotal.value = payload.data.total
 }
 
+function openAgreementForm(version?: AgreementVersion) {
+  editingAgreementVersion.value = version?.version
+  agreementForm.title = version?.title ?? ''
+  agreementForm.body = version?.body ?? ''
+  agreementFormVisible.value = true
+}
+
+async function deleteAgreementVersion(version: AgreementVersion) {
+  try {
+    await ElMessageBox.confirm(`确认删除V${version.version}？历史原文与确认记录保留。删除当前生效版本后，需新增版本才能继续认购等操作，旧版本不会自动恢复生效。`, '删除免责协议', { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' })
+    await api(`/api/agreements/${version.version}/delete`, { method: 'POST', body: '{}' })
+    agreementVersionPage.value = 1
+    await loadAgreementVersions()
+    ElMessage.success('协议已删除')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '协议删除失败')
+  }
+}
+
 async function createAgreementVersion() {
   try {
-    await ElMessageBox.confirm('新版本提交后立即生效且不可修改，确认提交？', '新增免责协议版本', { type: 'warning' })
-    await api('/api/agreements', { method: 'POST', body: JSON.stringify(agreementForm) })
+    await ElMessageBox.confirm('保存后生成新的生效版本，原版本和历史确认记录保留。确认提交？', editingAgreementVersion.value ? '修改免责协议' : '新增免责协议版本', { type: 'warning' })
+    await api(editingAgreementVersion.value ? `/api/agreements/${editingAgreementVersion.value}/revise` : '/api/agreements', { method: 'POST', body: JSON.stringify(agreementForm) })
     agreementFormVisible.value = false
     agreementForm.title = ''
     agreementForm.body = ''
@@ -2343,15 +2395,20 @@ async function confirmSettlementInvoice() {
 }
 
 async function syncMcp() {
-  ElMessageBox.confirm('将从 MCP 适配层同步可认购项目，失败不会覆盖已有有效项目。确认执行？', '同步采购系统（MCP）', {
-    confirmButtonText: '确认同步',
-    cancelButtonText: '取消',
-    type: 'warning'
-  }).then(async () => {
+  try {
+    await ElMessageBox.confirm('将只读查询采购系统数据库并同步项目；已发布项目保留快照，金额变化时冻结待处理。确认执行？', '同步采购数据', {
+      confirmButtonText: '确认同步',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch { return }
+  try {
     const payload = await api<{ message: string }>('/api/mcp/sync', { method: 'POST', body: JSON.stringify({}) })
     await loadData()
     ElMessage.success(payload.message)
-  })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '采购订单同步失败')
+  }
 }
 
 async function startSettlement() {
@@ -2672,7 +2729,7 @@ watch(() => authSession.permissionInfo.value, info => {
                 <h2>项目基础信息</h2>
                 <dl class="desc">
                   <dt>采购内容</dt><dd><el-button link type="primary" @click="openProcurementOrderDetail">查看详情</el-button></dd>
-                  <dt>项目来源</dt><dd>采购系统 MCP 同步 · 2026-07-01 09:20</dd>
+                  <dt>项目来源</dt><dd>{{ selectedProject.source || '采购系统' }}</dd>
                   <dt>总开放认购金额</dt><dd>{{ formatMoney(selectedProject.total) }}</dd>
                   <template v-if="selectedProjectShareRule">
                     <dt>份额规则</dt><dd>每份 {{ formatMoney(selectedProjectShareRule.sharePrice!) }} · 总 {{ selectedProjectShareRule.totalShares }} 份 · 公司前置 {{ selectedProjectShareRule.companyFrontShares }} 份 · 每人最多 {{ selectedProjectShareRule.maxSharesPerEmployee }} 份</dd>
@@ -2725,6 +2782,7 @@ watch(() => authSession.permissionInfo.value, info => {
                   <el-input-number v-model="subscribeAmount" :min="selectedProjectMinAmount" :max="subscribeAmountMax" :step="100" controls-position="right" />
                 </el-form-item>
                 <el-alert type="info" :closable="false">提交前将展示当前生效的免责协议，阅读至末尾并确认后才能认购。</el-alert>
+                <el-button link type="primary" :loading="agreementPreviewLoading" @click="previewCurrentAgreement">阅读免责协议</el-button>
               </el-form>
               <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:subscription:create')" class="wide" type="primary" :disabled="!canSubscribe" @click="startSubscribe">立即认购</el-button>
               <p class="muted">每次提交均需重新确认当前生效的免责协议；项目中断后不可继续认购。</p>
@@ -2925,7 +2983,7 @@ watch(() => authSession.permissionInfo.value, info => {
         </template>
 
         <template v-if="currentPage === 'adminProjects'">
-          <div class="page-head"><div><h1>项目管理</h1><p>{{ limitedAdmin ? '当前可查看待发布采购项目和本人已发布项目' : 'MCP 同步、发布与规则配置入口' }}</p></div><el-button v-if="!limitedAdmin && canApi(authSession.permissionInfo.value, 'crowdfunding:procurement:sync')" type="primary" @click="syncMcp">同步采购系统（MCP）</el-button></div>
+          <div class="page-head"><div><h1>项目管理</h1><p>{{ limitedAdmin ? '当前可查看待发布采购项目和本人已发布项目' : '采购数据同步、发布与规则配置入口' }}</p></div><el-button v-if="canSyncProcurement(currentRole, authSession.permissionInfo.value)" type="primary" @click="syncMcp">同步采购数据</el-button></div>
           <section class="panel filter-panel">
             <el-input v-model="adminProjectKeyword" clearable placeholder="搜索项目、线下销售单号、创建时间、状态、金额" />
             <el-select v-model="adminProjectStatus" placeholder="项目状态" style="width: 150px">
@@ -3165,7 +3223,7 @@ watch(() => authSession.permissionInfo.value, info => {
               <span class="filter-label">所属项目</span>
               <el-select v-model="ruleFilters.projectId" placeholder="所属项目" style="width: 240px">
                 <el-option label="项目：全部" value="全部" />
-                <el-option v-for="project in projects" :key="project.id" :label="project.title" :value="project.id" />
+                <el-option v-for="project in eligibleProcurementProjects" :key="project.id" :label="project.title" :value="project.id" />
               </el-select>
             </label>
             <label class="filter-field">
@@ -3200,12 +3258,14 @@ watch(() => authSession.permissionInfo.value, info => {
                 <template #default="{ row }">{{ formatMoney(row.totalAmount) }}</template>
               </el-table-column>
               <el-table-column label="份额规则" min-width="220">
-                <template #default="{ row }">{{ row.sharePrice ? `${formatMoney(row.sharePrice)}/份 · 总 ${row.totalShares} 份 · 公司前置 ${row.companyFrontShares} 份` : '旧版金额规则' }}</template>
+                <template #default="{ row }">{{ row.sharePrice ? `${formatMoney(row.sharePrice)}/份 · 总 ${row.totalShares} 份 · 公司前置 ${row.companyFrontShares} 份 · 员工可认购 ${row.totalShares - row.companyFrontShares} 份` : '旧版金额规则' }}</template>
               </el-table-column>
               <el-table-column label="单次认购最低金额" align="left" width="160">
                 <template #default="{ row }">{{ formatMoney(row.minAmount) }}</template>
               </el-table-column>
-              <el-table-column prop="minParticipants" label="开放参与人数" width="120" />
+              <el-table-column label="开放参与人数" width="160">
+                <template #default="{ row }">{{ row.sharePrice ? '不按人数限制' : `${row.minParticipants} 人` }}</template>
+              </el-table-column>
               <el-table-column label="允许多次" width="100">
                 <template #default="{ row }"><el-tag :type="row.allowMultiple ? 'success' : 'info'">{{ row.allowMultiple ? '是' : '否' }}</el-tag></template>
               </el-table-column>
@@ -3333,7 +3393,7 @@ watch(() => authSession.permissionInfo.value, info => {
             </div>
             <div class="page-head-actions">
               <el-select v-model="selectedProjectId" aria-label="支付复核项目" style="width: 240px" placeholder="选择复核项目" @change="activePaymentSubscriptionId = ''">
-                <el-option v-for="project in projects" :key="project.id" :label="project.title" :value="project.id" />
+                <el-option v-for="project in paymentReviewProjectOptions" :key="project.id" :label="project.title" :value="project.id" />
               </el-select>
               <el-button @click="backToAdminProjects">{{ authorizedPageKeys.has('adminProjects') ? '返回项目管理' : '返回项目列表' }}</el-button>
             </div>
@@ -3355,7 +3415,7 @@ watch(() => authSession.permissionInfo.value, info => {
               </div>
               <el-empty v-if="!paymentReviewSubscriptions.length" :description="`${selectedProject?.title ?? '当前项目'}暂无缴款记录`" />
             </section>
-            <section class="panel">
+            <section v-if="activeReviewSubscription" class="panel payment-review-detail">
               <h2>复核详情</h2>
               <div class="review-project-meta">
                 <div><span>项目名称</span><strong>{{ activeReviewProjectName }}</strong></div>
@@ -3399,7 +3459,7 @@ watch(() => authSession.permissionInfo.value, info => {
               <div class="stats compact">
                 <div><span>应付金额</span><strong>{{ formatMoney(activeReviewAmount) }}</strong></div>
                 <div><span>累计 OCR 金额</span><strong>{{ formatMoney(activeReviewRecognizedAmount) }}</strong></div>
-                <div v-if="activeReviewSubscription?.shares === undefined"><span>置信度</span><strong class="ok">98%</strong></div>
+
               </div>
               <div v-if="activeReviewSubscription?.shares !== undefined" class="review-project-meta">
                 <div><span>认购份数</span><strong>{{ activeReviewSubscription.shares }} 份</strong></div>
@@ -3421,6 +3481,7 @@ watch(() => authSession.permissionInfo.value, info => {
               </div>
               <el-alert v-else :title="activeReviewReadOnlyText" type="info" :closable="false" show-icon />
             </section>
+            <section v-else class="panel"><h2>复核详情</h2><el-empty description="暂无可复核的缴款记录" /></section>
           </div>
         </template>
 
@@ -3528,7 +3589,7 @@ watch(() => authSession.permissionInfo.value, info => {
             <div class="page-head-actions">
               <el-tag v-if="selectedProject" :type="projectSettlementTagType(selectedProject)">{{ projectSettlementStatus(selectedProject.status) }}</el-tag>
               <el-select v-model="selectedProjectId" aria-label="发票核对项目" style="width: 240px" placeholder="选择核对项目" :disabled="invoiceOcrState === 'loading' || invoiceDeleting || settlementSubmitting || Boolean(invoiceOcrResult?.assetId)" @change="selectSettlementProject">
-                <el-option v-for="project in projects" :key="project.id" :label="project.title" :value="project.id" />
+                <el-option v-for="project in eligibleProcurementProjects" :key="project.id" :label="project.title" :value="project.id" />
               </el-select>
               <el-button @click="backToAdminProjects">{{ authorizedPageKeys.has('adminProjects') ? '返回项目管理' : '返回项目列表' }}</el-button>
             </div>
@@ -3758,7 +3819,7 @@ watch(() => authSession.permissionInfo.value, info => {
         </template>
 
         <template v-if="currentPage === 'agreements'">
-          <div class="page-head"><div><h1>免责协议版本</h1><p>新版本提交后立即生效，历史版本与确认记录只读留存</p></div><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:agreement:manage')" type="primary" @click="agreementFormVisible = true">新增版本</el-button></div>
+          <div class="page-head"><div><h1>免责协议版本</h1><p>支持修改生成新版本、删除停用；历史原文与确认记录保留</p></div><el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:agreement:manage')" type="primary" @click="openAgreementForm()">新增版本</el-button></div>
           <section class="panel">
             <el-table :data="agreementVersions" empty-text="暂无协议版本">
               <el-table-column prop="version" label="版本号" width="100" />
@@ -3766,9 +3827,11 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-table-column prop="status" label="状态" width="110" />
               <el-table-column prop="effectiveAt" label="生效时间" width="220" />
               <el-table-column prop="createdBy" label="创建人" width="180" />
-              <el-table-column label="操作" width="190"><template #default="{ row }">
+              <el-table-column label="操作" width="290"><template #default="{ row }">
                 <el-button link type="primary" @click="ElMessageBox.alert(row.body, `协议 V${row.version} · ${row.title}`, { confirmButtonText: '关闭' })">查看</el-button>
                 <el-button link type="primary" @click="showAgreementConfirmations(row.version)">确认记录</el-button>
+                <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:agreement:manage')" link type="primary" @click="openAgreementForm(row)">修改</el-button>
+                <el-button v-if="canApi(authSession.permissionInfo.value, 'crowdfunding:agreement:manage')" link type="danger" @click="deleteAgreementVersion(row)">删除</el-button>
               </template></el-table-column>
             </el-table>
             <el-pagination v-model:current-page="agreementVersionPage" :page-size="10" :total="agreementVersionTotal" layout="total, prev, pager, next" />
@@ -3858,6 +3921,13 @@ watch(() => authSession.permissionInfo.value, info => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="agreementPreviewVisible" title="阅读免责协议" width="620px">
+      <el-alert type="info" :closable="false">此处仅供阅读，不代表已同意；认购等操作仍需重新确认当前生效协议。</el-alert>
+      <h3>{{ previewAgreement?.title }} · V{{ previewAgreement?.version }}</h3>
+      <div class="agreement-text" style="max-height: 400px; overflow-y: auto; white-space: pre-wrap; margin: 16px 0">{{ previewAgreement?.body }}</div>
+      <template #footer><el-button @click="agreementPreviewVisible = false">关闭</el-button></template>
+    </el-dialog>
+
     <el-dialog v-model="agreementVisible" :title="`免责协议确认 · ${agreementNode}`" width="620px" :close-on-click-modal="false" @opened="onAgreementOpened">
       <el-alert type="warning" :closable="false">本次操作须重新阅读并确认当前生效版本，历史确认不能沿用。</el-alert>
       <h3>{{ currentAgreement?.title }} · V{{ currentAgreement?.version }}</h3>
@@ -3868,7 +3938,7 @@ watch(() => authSession.permissionInfo.value, info => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="agreementFormVisible" title="新增免责协议版本" width="700px">
+    <el-dialog v-model="agreementFormVisible" :title="editingAgreementVersion ? `修改免责协议 · 基于V${editingAgreementVersion}` : '新增免责协议版本'" width="700px">
       <el-form label-position="top">
         <el-form-item label="协议标题"><el-input v-model="agreementForm.title" maxlength="50" show-word-limit /></el-form-item>
         <el-form-item label="协议正文"><el-input v-model="agreementForm.body" type="textarea" :rows="12" maxlength="5000" show-word-limit /></el-form-item>
@@ -4019,7 +4089,7 @@ watch(() => authSession.permissionInfo.value, info => {
         <el-form-item label="所属项目" required>
           <el-select v-model="ruleForm.projectId" filterable placeholder="请选择尚未配置认购规则的项目" style="width: 100%">
             <el-option
-              v-for="project in projects"
+              v-for="project in eligibleProcurementProjects"
               :key="project.id"
               :label="project.title"
               :value="project.id"
@@ -4172,7 +4242,8 @@ watch(() => authSession.permissionInfo.value, info => {
           <div><span>规则编号</span><strong>{{ selectedOpenRule.id }}</strong></div>
           <div><span>开放认购金额</span><strong>{{ formatMoney(selectedOpenRule.totalAmount) }}</strong></div>
           <div><span>单次认购最低金额</span><strong>{{ formatMoney(selectedOpenRule.minAmount) }}</strong></div>
-          <div><span>开放参与人数</span><strong>{{ selectedOpenRule.minParticipants }} 人</strong></div>
+          <div><span>开放参与人数</span><strong>{{ selectedOpenRule.sharePrice ? '不按人数限制' : `${selectedOpenRule.minParticipants} 人` }}</strong></div>
+          <div v-if="selectedOpenRule.sharePrice"><span>员工可认购份数</span><strong>{{ (selectedOpenRule.totalShares ?? 0) - (selectedOpenRule.companyFrontShares ?? 0) }} 份</strong></div>
           <div><span>开放时间</span><strong>{{ selectedOpenRule.startAt || '-' }}</strong></div>
           <div><span>截止时间</span><strong>{{ selectedOpenRule.endAt || '-' }}</strong></div>
           <div><span>允许多次认购</span><strong>{{ selectedOpenRule.allowMultiple ? '允许' : '不允许' }}</strong></div>

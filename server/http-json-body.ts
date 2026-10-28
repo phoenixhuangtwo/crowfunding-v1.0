@@ -1,4 +1,6 @@
-import { parseIamJson } from './iam/json.ts'
+import JSONBig from 'json-bigint'
+
+const businessJson = JSONBig({ strict: true, useNativeBigInt: true })
 
 export const DEFAULT_JSON_BODY_LIMIT = 8 * 1024 * 1024
 
@@ -98,7 +100,7 @@ class JsonKeyScanner {
 
 function parseStrictJson(raw: string): unknown {
   new JsonKeyScanner(raw).scan()
-  return parseIamJson(raw)
+  return businessJson.parse(raw)
 }
 
 function businessValue(value: unknown): unknown {

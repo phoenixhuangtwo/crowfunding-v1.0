@@ -56,7 +56,7 @@ try {
   const port = await freePort()
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     cwd: process.cwd(),
-    env: { ...process.env, ...iamTestEnv, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix },
+    env: { ...process.env, ...iamTestEnv, API_PORT: String(port), NODE_ENV: 'test', PROCUREMENT_SOURCE: 'http', MONGODB_COLLECTION_PREFIX: prefix },
     stdio: 'ignore'
   })
   let ready = false
@@ -81,7 +81,7 @@ try {
   })
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     cwd: process.cwd(),
-    env: { ...process.env, ...iamTestEnv, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix },
+    env: { ...process.env, ...iamTestEnv, API_PORT: String(port), NODE_ENV: 'test', PROCUREMENT_SOURCE: 'http', MONGODB_COLLECTION_PREFIX: prefix },
     stdio: 'ignore'
   })
   let settled = false

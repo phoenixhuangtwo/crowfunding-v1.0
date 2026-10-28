@@ -141,3 +141,23 @@ test('finance invoice OCR aborts a stalled upstream request at the configured ti
     /发票识别服务请求超时/
   )
 })
+
+async function paymentRecognition(content: string, documentType: 'payment' | 'receipt' = 'payment') {
+  return recognizeFinanceBill({ imageDataUrl: 'data:image/png;base64,aGVsbG8=', appCode: 'test', documentType,
+    fetchImpl: async () => new Response(JSON.stringify({ content }), { status: 200 }) })
+}
+
+test('payment bill recognizes a standalone outgoing amount on a successful payment', async () => {
+  for (const amount of ['-29.90', '− 29.90', '－￥29.90']) {
+    const result = await paymentRecognition(`抖音电商商家\n${amount}\n当前状态\n支付成功\n支付时间\n2026年8月25日 21:15:26\n交易单号\n4500000372202608251656145661`)
+    assert.equal(result.amount, 29.9)
+    assert.equal(result.fields.find(item => item.key === 'transactionAmount')?.value, 'CNY 29.90')
+  }
+})
+
+test('standalone payment fallback rejects refunds, failed payments, incoming and ambiguous amounts', async () => {
+  for (const content of ['退款成功 -29.90', '支付失败 -29.90', '收款成功 +29.90', '支付成功 -29.90 -10.00', '支付成功 4500000372202608251656145661']) {
+    assert.equal((await paymentRecognition(content)).amount, undefined)
+  }
+  assert.equal((await paymentRecognition('支付成功\n-29.90', 'receipt')).amount, undefined)
+})

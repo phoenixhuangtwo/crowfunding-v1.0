@@ -1,7 +1,9 @@
 import { observeRequests, logFailure, currentRequestId } from './observability.ts'
 import { createServer, IncomingMessage, ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { fetchAllProcurementPages, fetchProcurementPage, formatProcurementSyncMessage } from './procurement.ts'
+import { formatProcurementSyncMessage } from './procurement.ts'
+import { loadProcurementOrders, loadProcurementOrder, procurementSourceMode } from './procurement-source.ts'
+import { ProcurementDatabaseError } from './procurement-mysql.ts'
 import { mapProcurementOrderToDetail, mapProcurementOrderToProject, mergeProcurementProject, procurementOrderSkipReason } from './procurement-project.ts'
 import { recognizeFinanceBill } from './invoice-ocr.ts'
 import { confirmProjectSettlement, type SettlementInvoiceRecord } from './project-settlement.ts'
@@ -900,7 +902,8 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const page = Math.max(1, Math.min(100000, Number(searchParams.get('page')) || 1))
     const pageSize = Math.max(1, Math.min(100, Number(searchParams.get('pageSize')) || 10))
     const result = await agreementService.list(page, pageSize)
-    return send(res, 200, { data: { ...result, items: result.items.map((item, index) => ({ ...item, status: page === 1 && index === 0 ? '生效中' : '已失效' })) } })
+    const current = await agreementService.current()
+    return send(res, 200, { data: { ...result, items: result.items.map(item => ({ ...item, status: item.version === current?.version ? '生效中' : '已失效' })) } })
   }
   const agreementConfirmationsMatch = pathname.match(/^\/api\/agreements\/(\d+)\/confirmations$/)
   if (agreementConfirmationsMatch) {
@@ -1152,17 +1155,15 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     const project = projects.find(item => item.id === projectId)
     if (!project) return send(res, 404, { error: 'PROJECT_NOT_FOUND', message: '项目不存在' })
     if (requestContext(req).role === 'admin' && project.status !== '未开放') requireAdminOwned(req, project)
+    if (requestContext(req).role === 'employee' && !(await queryService.listProjects(requestContext(req))).some(item => item.id === project.id)) {
+      throw new AppError(404, 'PROJECT_NOT_FOUND', '项目不存在或无权访问')
+    }
 
     const externalId = project.id.match(/^PRJ-FSY-OFFLINE-(.+)$/)?.[1]
     if (!externalId) return send(res, 400, { error: 'PROCUREMENT_PROJECT_REQUIRED', message: '该项目不是采购系统同步项目，无法查询采购订单详情' })
 
     const projectName = searchParams.get('projectName')?.trim() || project.title
-    const result = await fetchProcurementPage({
-      baseUrl: process.env.PROCUREMENT_API_URL ?? 'https://prod-api-admin.fushangyunfu.com/admin-api/erp/offline-order/page',
-      token: process.env.PROCUREMENT_TOKEN ?? '',
-      projectName
-    })
-    const order = result.items.find(item => String(item.id ?? '').trim() === externalId)
+    const order = await loadProcurementOrder(externalId, projectName)
     if (!order) return send(res, 404, { error: 'PROCUREMENT_ORDER_NOT_FOUND', message: '未找到与当前项目匹配的采购订单' })
     return send(res, 200, { data: mapProcurementOrderToDetail(order) })
   }
@@ -1278,6 +1279,21 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     const created = await agreementService.create({ title: body.title, body: body.body, createdBy: actor.label })
     await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '新增免责协议版本', target: created.id, before: null, after: { version: created.version, title: created.title } }) as never)
     return send(res, 201, { data: created, message: '新版本已生效' })
+  }
+  const agreementMutation = pathname.match(/^\/api\/agreements\/(\d+)\/(revise|delete)$/)
+  if (agreementMutation) {
+    const actor = managementActor(req, ['super_admin'])
+    const version = Number(agreementMutation[1])
+    if (!Number.isSafeInteger(version) || version < 1) throw new AppError(400, 'AGREEMENT_VERSION_INVALID', '协议版本无效')
+    const body = await readJsonBody(req, 16 * 1024)
+    if (agreementMutation[2] === 'revise') {
+      const created = await agreementService.revise(version, { title: body.title, body: body.body, createdBy: actor.label })
+      await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '修改免责协议并生成新版本', target: created.id, before: { version }, after: { version: created.version, title: created.title } }) as never)
+      return send(res, 201, { data: created, message: '修改已生成新版本并生效' })
+    }
+    await agreementService.remove(version, actor.label)
+    await repositories.auditLogs.insert(auditRecord({ actor: actor.label, role: actor.role, action: '删除免责协议版本', target: String(version), before: { version }, after: { deleted: true } }) as never)
+    return send(res, 200, { message: '协议已删除，历史原文与确认记录保留' })
   }
   const exceptionProofMatch = pathname.match(/^\/api\/exception-funds\/proofs$/)
   if (exceptionProofMatch) {
@@ -1587,6 +1603,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       ocrQuota.take('ocr')
       const recognized = await recognizeFinanceBill({
         imageDataUrl: ephemeralDataUrl(image),
+        documentType: 'payment',
         appCode: process.env.INVOICE_OCR_APPCODE ?? '',
         endpoint: process.env.INVOICE_OCR_API_URL
       })
@@ -4102,10 +4119,17 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
   }
 
   if (pathname === '/api/mcp/sync') {
-    const result = await fetchAllProcurementPages({
-      baseUrl: process.env.PROCUREMENT_API_URL ?? 'https://prod-api-admin.fushangyunfu.com/admin-api/erp/offline-order/page',
-      token: process.env.PROCUREMENT_TOKEN ?? ''
-    })
+    let result: Awaited<ReturnType<typeof loadProcurementOrders>>
+    try {
+      result = await loadProcurementOrders()
+    } catch (error) {
+      if (error instanceof ProcurementDatabaseError) throw error
+      const message = error instanceof Error ? error.message : ''
+      if (message.includes('采购系统认证失败') || message.includes('未配置采购系统认证信息')) {
+        throw new AppError(502, 'PROCUREMENT_AUTH_REQUIRED', '采购系统登录已失效，请更新服务端令牌')
+      }
+      throw new AppError(502, 'PROCUREMENT_SYNC_FAILED', '采购系统读取失败，请检查服务端日志')
+    }
     let created = 0
     let updated = 0
     let skipped = 0
@@ -4116,6 +4140,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
       missingId: 0,
       missingTitle: 0,
       nonPositiveCost: 0,
+      belowMinimumCost: 0,
+      salesBelowCost: 0,
       protectedUnchanged: 0
     }
     for (const order of result.items) {
@@ -4181,8 +4207,8 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     await pushAudit({
       actor: manager!.label,
       role: manager!.role,
-      action: '采购订单分页拉取',
-      target: 'procurement-offline-order-page',
+      action: procurementSourceMode() === 'mysql' ? '采购数据库全量读取' : '采购订单分页拉取',
+      target: procurementSourceMode() === 'mysql' ? 'procurement-mysql-offline-order' : 'procurement-offline-order-page',
       before: null,
       after: summary
     })
@@ -5109,6 +5135,7 @@ const server = createServer(observeRequests(async (req, res) => {
     if (req.method === 'POST') return await routePost(url.pathname, req, res)
     return send(res, 405, { error: 'METHOD_NOT_ALLOWED' })
   } catch (error) {
+    if (error instanceof ProcurementDatabaseError) return send(res, 502, { error: error.code, message: error.message })
     if (error instanceof AgreementError) return send(res, error.status, { error: error.code, message: error.message })
     if (error instanceof RequestBodyError) return send(res, error.status, { error: error.code, message: error.message })
     if (error instanceof AppError) return send(res, error.status, { error: error.code, message: error.message })

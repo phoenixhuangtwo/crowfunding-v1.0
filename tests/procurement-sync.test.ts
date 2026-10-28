@@ -187,6 +187,14 @@ test('fetchProcurementPage reports an expired or invalid upstream token', async 
   )
 })
 
+test('fetchProcurementPage treats HTTP 200 login-expired business response as authentication failure', async () => {
+  await assert.rejects(fetchProcurementPage({
+    baseUrl: 'https://procurement.example.test/admin-api/erp/offline-order/page',
+    token: 'Bearer expired-token',
+    fetchImpl: async () => new Response(JSON.stringify({ code: 401, data: null, msg: '账号未登录' }), { status: 200 })
+  }), /采购系统认证失败/)
+})
+
 test('fetchProcurementPage rejects an upstream business error instead of reporting success', async () => {
   await assert.rejects(
     fetchProcurementPage({
@@ -316,4 +324,21 @@ test('fetchProcurementPage aborts a stalled upstream request at the configured t
     }),
     /采购系统请求超时/
   )
+})
+
+test('procurement import excludes costs below 500 yuan and includes the boundary', async () => {
+  const { procurementOrderSkipReason } = await import('../server/procurement-project.ts')
+  const order = { id: 'threshold', projectName: '成本门槛', totalSellingPrice: 100000 }
+  assert.equal(procurementOrderSkipReason({ ...order, totalCostPrice: 49999 }), 'belowMinimumCost')
+  assert.equal(mapProcurementOrderToProject({ ...order, totalCostPrice: 49999 }), null)
+  assert.equal(procurementOrderSkipReason({ ...order, totalCostPrice: 50000 }), null)
+  assert.equal(mapProcurementOrderToProject({ ...order, totalCostPrice: 50000 })?.costAmount, 500)
+  assert.equal(procurementOrderSkipReason({ ...order, totalCostPrice: 50001 }), null)
+})
+
+test('procurement import excludes loss-making orders but keeps equal sales and cost', () => {
+  const order = { id: 'margin', projectName: '销售成本过滤', totalCostPrice: 60000 }
+  assert.equal(mapProcurementOrderToProject({ ...order, totalTransactionPrice: 59999 }), null)
+  assert.equal(mapProcurementOrderToProject({ ...order, totalTransactionPrice: 60000 })?.salesAmount, 600)
+  assert.equal(mapProcurementOrderToProject({ ...order, totalTransactionPrice: 0, totalSellingPrice: 59999 }), null)
 })

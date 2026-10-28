@@ -79,6 +79,16 @@ test('IAM 503 preserves access token and maps to IAM_UNAVAILABLE', async () => {
   assert.equal(readAccessToken(), 'outage-token')
 })
 
+test('procurement upstream failure surfaces its actionable server message', async () => {
+  installStorage(); saveAccessToken('valid-token'); __resetApiClientForTests()
+  Object.defineProperty(globalThis, 'fetch', { configurable: true, value: async () => response(502, {
+    error: 'PROCUREMENT_AUTH_REQUIRED', message: '采购系统登录已失效，请更新服务端令牌'
+  }) })
+  await assert.rejects(apiRequest('/api/mcp/sync', { method: 'POST', body: '{}' }),
+    (error: unknown) => error instanceof ApiError && error.status === 502
+      && error.message === '采购系统登录已失效，请更新服务端令牌')
+})
+
 test('refresh 401 clears token and redirects to login', async () => {
   installStorage(); saveAccessToken('expired-token'); __resetApiClientForTests()
   const location = { pathname: '/projects', href: 'http://local.test/projects', assign(value: string) { this.href = value } }

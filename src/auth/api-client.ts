@@ -30,7 +30,9 @@ async function responseBody(response: Response): Promise<unknown> {
 function errorForStatus(status: number, body?: unknown): ApiError {
   if (status === 401) return new ApiError('AUTH_REQUIRED', status, '需要有效的登录凭证')
   if (status === 403) return new ApiError('FORBIDDEN', status, '暂无访问该资源的权限')
-  if (status === 503 || status >= 500) return new ApiError('IAM_UNAVAILABLE', status, '统一身份服务暂不可用')
+  if (status === 503 && (!body || typeof body !== 'object' || (body as { error?: unknown }).error === 'IAM_UNAVAILABLE')) {
+    return new ApiError('IAM_UNAVAILABLE', status, '统一身份服务暂不可用')
+  }
   const message = body && typeof body === 'object' && typeof (body as { message?: unknown }).message === 'string'
     ? (body as { message: string }).message : '接口请求失败'
   return new ApiError('API_INVALID_RESPONSE', status, message)

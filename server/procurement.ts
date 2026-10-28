@@ -16,6 +16,8 @@ export type ProcurementSyncSummary = {
     missingId: number
     missingTitle: number
     nonPositiveCost: number
+    belowMinimumCost?: number
+    salesBelowCost?: number
     protectedUnchanged: number
   }
 }
@@ -79,6 +81,9 @@ async function fetchProcurementPageImpl({
 
   const body = payload as { code?: unknown; msg?: unknown; data?: unknown }
   if (body.code !== 0) {
+    if (body.code === 401 || body.code === 403 || body.msg === '账号未登录') {
+      throw new Error('采购系统认证失败，请更新服务端令牌')
+    }
     throw new Error(typeof body.msg === 'string' && body.msg ? body.msg : '采购系统返回业务错误')
   }
   if (!body.data || typeof body.data !== 'object') throw new Error('采购系统返回数据结构异常')
@@ -109,7 +114,7 @@ export async function fetchAllProcurementPages(options: FetchProcurementPageOpti
 
 export function formatProcurementSyncMessage(summary: ProcurementSyncSummary) {
   const reasons = summary.skippedByReason
-  return `采购订单同步完成：拉取 ${summary.fetched}/${summary.total} 条，新增 ${summary.created} 条，更新 ${summary.updated} 条，跳过 ${summary.skipped} 条（缺少编号 ${reasons.missingId}、缺少名称 ${reasons.missingTitle}、成本无效 ${reasons.nonPositiveCost}、受保护且无变化 ${reasons.protectedUnchanged}）${summary.frozen ? `，新冻结 ${summary.frozen} 条` : ''}`
+  return `采购订单同步完成：拉取 ${summary.fetched}/${summary.total} 条，新增 ${summary.created} 条，更新 ${summary.updated} 条，跳过 ${summary.skipped} 条（缺少编号 ${reasons.missingId}、缺少名称 ${reasons.missingTitle}、成本无效 ${reasons.nonPositiveCost}${reasons.belowMinimumCost ? `、成本低于500元 ${reasons.belowMinimumCost}` : ''}${reasons.salesBelowCost ? `、销售低于成本 ${reasons.salesBelowCost}` : ''}、受保护且无变化 ${reasons.protectedUnchanged}）${summary.frozen ? `，新冻结 ${summary.frozen} 条` : ''}`
 }
 
 export function fetchProcurementPage(options: FetchProcurementPageOptions) {

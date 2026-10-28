@@ -9,6 +9,7 @@ export type PermissionInfoLike = Readonly<{
   permissions?: readonly unknown[]
   apiPermissions?: readonly unknown[]
   uiPermissions?: readonly unknown[]
+  dataScope?: { all?: boolean }
 }>
 
 export const AUTHORIZED_PAGE_KEYS = [
@@ -26,6 +27,11 @@ function permissionSet(info: PermissionInfoLike | null | undefined, key: 'permis
 export function canApi(info: PermissionInfoLike | null | undefined, code: string): boolean {
   if (!code || !info) return false
   return permissionSet(info, 'apiPermissions').has(code)
+}
+
+export function canSyncProcurement(role: string, info: PermissionInfoLike | null | undefined): boolean {
+  return role === 'admin' && info?.dataScope?.all === true
+    && canApi(info, 'crowdfunding:procurement:sync')
 }
 
 export function canUi(info: PermissionInfoLike | null | undefined, code: string): boolean {

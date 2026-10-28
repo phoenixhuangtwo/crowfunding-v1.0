@@ -21,6 +21,7 @@ type RecognizeFinanceBillOptions = {
   endpoint?: string
   fetchImpl?: typeof fetch
   timeoutMs?: number
+  documentType?: 'payment' | 'receipt'
 }
 
 function normalizedReceiptText(content: string) {
@@ -38,17 +39,27 @@ function extractReceiptAmount(content: string) {
   return Number.isFinite(amount) ? amount : undefined
 }
 
+function extractSuccessfulPaymentAmount(content: string) {
+  if (!/(?:支付成功|付款成功|转账成功)/.test(content)
+    || /(?:退款|退回|支付失败|付款失败|交易关闭|收款成功|收入)/.test(content)) return undefined
+  // Require an explicit outgoing sign and two decimal places; never treat order IDs as amounts.
+  const matches = [...content.matchAll(/(?:^|\s)[-−–－]\s*(?:[¥￥]\s*)?(\d{1,3}(?:,\d{3})+|\d+)\.([0-9]{2})(?=\s|$)/g)]
+  if (matches.length !== 1) return undefined
+  const amount = Number(`${matches[0]![1]!.replace(/,/g, '')}.${matches[0]![2]}`)
+  return Number.isFinite(amount) && amount > 0 ? amount : undefined
+}
+
 function formatReceiptAmount(amount: number) {
   const [integer, decimal] = amount.toFixed(2).split('.')
   return `CNY ${integer.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${decimal}`
 }
 
-function extractReceiptFields(content: string): InvoiceOcrField[] {
+function extractReceiptFields(content: string, recognizedAmount?: number): InvoiceOcrField[] {
   const normalized = normalizedReceiptText(content)
   const transactionDate = normalized.match(/交易日期\s*[：:]\s*(\d{4}(?:年\d{1,2}月\d{1,2}日|[-/.]\d{1,2}[-/.]\d{1,2}))/)?.[1]
   const payer = normalized.match(/付款人\s*[：:]\s*(.+?)(?=\s*(?:付款开户行|付款方开户行|收款账号|收款人|交易金额|金额[（(]小写)\s*[：:]|$)/)?.[1]
   const payee = normalized.match(/收款人\s*[：:]\s*(.+?)(?=\s*(?:收款方?开户行|交易金额|金额[（(]小写)\s*[：:]|$)/)?.[1]
-  const amount = extractReceiptAmount(normalized)
+  const amount = recognizedAmount ?? extractReceiptAmount(normalized)
   return [
     { key: 'transactionDate', label: '交易日期', value: transactionDate?.trim() || '未识别' },
     { key: 'payer', label: '付款人', value: payer?.trim() || '未识别' },
@@ -73,7 +84,8 @@ async function recognizeFinanceBillImpl({
   appCode,
   endpoint = defaultEndpoint,
   fetchImpl = fetch,
-  timeoutMs = 10_000
+  timeoutMs = 10_000,
+  documentType = 'receipt'
 }: RecognizeFinanceBillOptions): Promise<InvoiceOcrResult> {
   if (!appCode.trim()) throw new Error('未配置发票 OCR 服务端认证信息')
   if (imageDataUrl.length > maxImageDataUrlLength) throw new Error('发票图片大小不能超过 5MB')
@@ -116,11 +128,13 @@ async function recognizeFinanceBillImpl({
   const content = recognizedContent(result)
   if (!content) throw new Error('发票识别失败：未识别到有效票据内容')
   const normalizedContent = normalizedReceiptText(content)
+  const amount = extractReceiptAmount(normalizedContent)
+    ?? (documentType === 'payment' ? extractSuccessfulPaymentAmount(content) : undefined)
   return {
-    amount: extractReceiptAmount(normalizedContent),
+    amount,
     taskNo: [result.taskNo, result.request_id, result.requestId, result.RequestId]
       .find(value => typeof value === 'string') as string | undefined,
-    fields: extractReceiptFields(normalizedContent)
+    fields: extractReceiptFields(normalizedContent, amount)
   }
 }
 

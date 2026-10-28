@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { allowedPageKeys, canApi, canUi } from '../src/auth/permissions.ts'
+import { allowedPageKeys, canApi, canSyncProcurement, canUi } from '../src/auth/permissions.ts'
+
+test('procurement sync requires project admin role, full scope and IAM grant together', () => {
+  const info = { apiPermissions: ['crowdfunding:procurement:sync'], dataScope: { all: true } }
+  assert.equal(canSyncProcurement('admin', info), true)
+  assert.equal(canSyncProcurement('super_admin', info), false)
+  assert.equal(canSyncProcurement('admin', { ...info, dataScope: { all: false } }), false)
+  assert.equal(canSyncProcurement('admin', { ...info, apiPermissions: [] }), false)
+})
 
 test('allowedPageKeys follows IAM menu order and ignores unknown/duplicate components', () => {
   const info = {

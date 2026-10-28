@@ -16,3 +16,10 @@ export function filterTargetProjectPaymentReviews<T extends PaymentReviewRow>(ro
     return belongsToProject && paymentRecordStatuses.has(row.pay)
   })
 }
+
+export function selectPaymentReviewProject(projects: PaymentReviewProject[], rows: PaymentReviewRow[], currentId: string): string {
+  const available = projects.filter(project => filterTargetProjectPaymentReviews(rows, project).length > 0)
+  if (available.some(project => project.id === currentId)) return currentId
+  return (available.find(project => filterTargetProjectPaymentReviews(rows, project).some(row => row.pay === '待复核'))
+    ?? available[0])?.id ?? ''
+}

@@ -59,7 +59,7 @@ try {
   child = spawn(process.execPath, ['--import', 'tsx', 'server/server.ts'], {
     cwd: process.cwd(),
     env: {
-      ...process.env, API_PORT: String(port), NODE_ENV: 'test', MONGODB_COLLECTION_PREFIX: prefix,
+      ...process.env, API_PORT: String(port), NODE_ENV: 'test', PROCUREMENT_SOURCE: 'http', MONGODB_COLLECTION_PREFIX: prefix,
       IAM_BASE_URL: config.baseUrl.href, IAM_WEB_URL: config.webUrl.href, IAM_CLIENT_ID: config.clientId, IAM_CLIENT_SECRET: clientSecret,
       IAM_REDIRECT_URI: config.redirectUri.href, APP_ALLOWED_ORIGIN: config.allowedOrigin
     },

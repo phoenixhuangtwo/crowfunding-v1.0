@@ -9,6 +9,9 @@ export type AgreementVersion = {
   body: string
   effectiveAt: string
   createdBy: string
+  revisedFromVersion?: number
+  deletedAt?: string
+  deletedBy?: string
 }
 export type AgreementConfirmation = {
   id: string
@@ -55,21 +58,23 @@ export class AgreementService {
   }
 
   async current(session?: ClientSession) {
-    return this.versions.findOne({}, { sort: { version: -1 }, session })
+    const latest = await this.versions.findOne({}, { sort: { version: -1 }, session })
+    return latest?.deletedAt ? null : latest
   }
 
   async list(page = 1, pageSize = 10) {
-    const total = await this.versions.countDocuments()
-    const items = await this.versions.find({}, { sort: { version: -1 }, skip: (page - 1) * pageSize, limit: pageSize }).toArray()
+    const total = await this.versions.countDocuments({ deletedAt: { $exists: false } })
+    const items = await this.versions.find({ deletedAt: { $exists: false } }, { sort: { version: -1 }, skip: (page - 1) * pageSize, limit: pageSize }).toArray()
     return { items, total, page, pageSize }
   }
 
-  async create(input: { title: unknown; body: unknown; createdBy: string }) {
+  async create(input: { title: unknown; body: unknown; createdBy: string; revisedFromVersion?: number }) {
     const fields = validateAgreement(input.title, input.body)
-    const current = await this.current()
+    const current = await this.versions.findOne({}, { sort: { version: -1 } })
     const document: AgreementVersion = {
       id: randomUUID(), version: (current?.version ?? 0) + 1, ...fields,
-      effectiveAt: new Date().toISOString(), createdBy: input.createdBy
+      effectiveAt: new Date().toISOString(), createdBy: input.createdBy,
+      ...(input.revisedFromVersion === undefined ? {} : { revisedFromVersion: input.revisedFromVersion })
     }
     try {
       await this.versions.insertOne(document)
@@ -80,6 +85,18 @@ export class AgreementService {
       throw error
     }
     return document
+  }
+
+  async revise(version: number, input: { title: unknown; body: unknown; createdBy: string }) {
+    const source = await this.versions.findOne({ version, deletedAt: { $exists: false } })
+    if (!source) throw new AgreementError(409, 'AGREEMENT_NOT_AVAILABLE', '协议不存在或已删除，请刷新后重试')
+    return this.create({ ...input, revisedFromVersion: version })
+  }
+
+  async remove(version: number, deletedBy: string) {
+    const result = await this.versions.updateOne({ version, deletedAt: { $exists: false } },
+      { $set: { deletedAt: new Date().toISOString(), deletedBy } })
+    if (!result.matchedCount) throw new AgreementError(409, 'AGREEMENT_NOT_AVAILABLE', '协议不存在或已删除，请刷新后重试')
   }
 
   async requireCurrent(version: unknown, session?: ClientSession) {
