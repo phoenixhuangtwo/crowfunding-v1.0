@@ -642,7 +642,7 @@ auditRows.splice(0)
 
 const pageTitle = computed(() => currentPage.value ? pageTitleMap[currentPage.value] : '暂无可用页面')
 const limitedAdmin = computed(() => currentRole.value === 'admin' && authSession.permissionInfo.value?.dataScope?.all !== true)
-const hiddenNavPageKeys = new Set<PageKey>(['payReview', 'settlement', 'rbac'])
+const hiddenNavPageKeys = new Set<PageKey>(['rbac'])
 const authorizedPageKeys = computed(() => new Set(allowedPageKeys(authSession.permissionInfo.value)))
 const visibleNavGroups = computed(() => navGroups.map(group => ({
   ...group,
@@ -1019,6 +1019,7 @@ async function loadData() {
     ])
     await hydratePrivateImages(projectPayload.data, subscriptionPayload.data, receivingCodePayload.data)
     replaceRows(projects, projectPayload.data)
+    if (!projects.some(project => project.id === selectedProjectId.value)) selectedProjectId.value = projects[0]?.id ?? ''
     replaceRows(subscriptions, subscriptionPayload.data)
     replaceRows(auditRows, auditPayload.data)
     replaceRows(rules, rulePayload.data)
@@ -1038,7 +1039,7 @@ function applyRuleFilters() {
 }
 
 watch(ruleFilters, applyRuleFilters)
-watch(activePaymentSubscriptionId, () => {
+watch(() => activeReviewSubscription.value?.id, () => {
   reviewActualPaidAmount.value = undefined
   reviewTransactionNo.value = ''
 })
@@ -1487,7 +1488,12 @@ function openPayReviewFromProject(project: Project) {
 }
 
 function backToAdminProjects() {
-  currentPage.value = 'adminProjects'
+  go(authorizedPageKeys.value.has('adminProjects') ? 'adminProjects' : 'projects')
+}
+
+function selectSettlementProject(projectId: string) {
+  const project = projects.find(item => item.id === projectId)
+  if (project) goProjectSettlement(project)
 }
 
 function resetReceivingCodeFilters() {
@@ -1952,6 +1958,17 @@ async function disableReceivingCode(row: ReceivingCode) {
   }
 }
 
+async function enableReceivingCode(row: ReceivingCode) {
+  if (!requireApiPermission('crowdfunding:receiving-code:disable')) return
+  try {
+    const payload = await api<{ message: string }>(`/api/receiving-codes/${row.id}/enable`, { method: 'POST', body: '{}' })
+    await loadData()
+    ElMessage.success(payload.message)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '收款码启用失败')
+  }
+}
+
 async function startSubscribe() {
   if (!canSubscribe.value) {
     ElMessage.error(selectedProjectShareRule.value ? '认购份数需为正整数，且不能超过剩余份数或个人上限' : '认购金额需不低于 100 元，且不得超过剩余可认购金额')
@@ -2338,6 +2355,7 @@ async function syncMcp() {
 }
 
 async function startSettlement() {
+  if (!requireApiPermission('crowdfunding:settlement:upload-invoice')) return
   try {
     settlementInvoiceVisible.value = await beginSettlement(() => ElMessageBox.confirm(
       '确认开始核对发票凭证？发票金额不能作为客户回款或分润完成的依据。',
@@ -3061,7 +3079,7 @@ watch(() => authSession.permissionInfo.value, info => {
                       支付复核
                     </el-button>
                     <el-button
-                      v-if="adminProjectActionLayout(row).showSettlement && canApi(authSession.permissionInfo.value, 'crowdfunding:settlement:upload-invoice')"
+                      v-if="adminProjectActionLayout(row).showSettlement && canApi(authSession.permissionInfo.value, 'crowdfunding:settlement:query')"
                       size="small"
                       @click="goProjectSettlement(row)"
                     >
@@ -3299,6 +3317,7 @@ watch(() => authSession.permissionInfo.value, info => {
                   <span v-if="row.status === '启用' && isReceivingCodeImageLocked(row.id)" class="muted">认购后图片已锁定</span>
                   <el-button v-else-if="row.status === '启用' && canApi(authSession.permissionInfo.value, 'crowdfunding:receiving-code:update-image')" size="small" type="primary" plain @click="openReceivingCodeImage(row)">{{ row.imageUrl ? '更换图片' : '上传图片' }}</el-button>
                   <el-button v-if="row.status === '启用' && canApi(authSession.permissionInfo.value, 'crowdfunding:receiving-code:disable')" size="small" type="danger" @click="disableReceivingCode(row)">禁用</el-button>
+                  <el-button v-if="row.status === '已禁用' && canApi(authSession.permissionInfo.value, 'crowdfunding:receiving-code:disable')" size="small" type="primary" @click="enableReceivingCode(row)">启用</el-button>
                   <span v-else class="muted">不可删除</span>
                 </template>
               </el-table-column>
@@ -3313,7 +3332,10 @@ watch(() => authSession.permissionInfo.value, info => {
               <p>目标项目：{{ paymentReviewTargetLabel }} · 缴款记录 {{ paymentReviewSubscriptions.length }} 笔，其中待审核 {{ pendingPaymentReviewCount }} 笔</p>
             </div>
             <div class="page-head-actions">
-              <el-button @click="backToAdminProjects">返回项目管理</el-button>
+              <el-select v-model="selectedProjectId" aria-label="支付复核项目" style="width: 240px" placeholder="选择复核项目" @change="activePaymentSubscriptionId = ''">
+                <el-option v-for="project in projects" :key="project.id" :label="project.title" :value="project.id" />
+              </el-select>
+              <el-button @click="backToAdminProjects">{{ authorizedPageKeys.has('adminProjects') ? '返回项目管理' : '返回项目列表' }}</el-button>
             </div>
           </div>
           <div class="review-grid">
@@ -3501,14 +3523,18 @@ watch(() => authSession.permissionInfo.value, info => {
           <div class="page-head">
             <div>
               <h1>发票凭证核对</h1>
-              <p>{{ selectedProject.title }} · {{ selectedProject.id }} · 核对发票凭证与认购记录</p>
+              <p v-if="selectedProject">{{ selectedProject.title }} · {{ selectedProject.id }} · 核对发票凭证与认购记录</p>
             </div>
             <div class="page-head-actions">
-              <el-tag :type="projectSettlementTagType(selectedProject)">{{ projectSettlementStatus(selectedProject.status) }}</el-tag>
-              <el-button @click="backToAdminProjects">返回项目管理</el-button>
+              <el-tag v-if="selectedProject" :type="projectSettlementTagType(selectedProject)">{{ projectSettlementStatus(selectedProject.status) }}</el-tag>
+              <el-select v-model="selectedProjectId" aria-label="发票核对项目" style="width: 240px" placeholder="选择核对项目" :disabled="invoiceOcrState === 'loading' || invoiceDeleting || settlementSubmitting || Boolean(invoiceOcrResult?.assetId)" @change="selectSettlementProject">
+                <el-option v-for="project in projects" :key="project.id" :label="project.title" :value="project.id" />
+              </el-select>
+              <el-button @click="backToAdminProjects">{{ authorizedPageKeys.has('adminProjects') ? '返回项目管理' : '返回项目列表' }}</el-button>
             </div>
           </div>
-          <section class="panel">
+          <el-empty v-if="!selectedProject" description="暂无可核对的项目" />
+          <section v-else class="panel">
             <section class="settlement-project-info">
               <h2>归属项目信息</h2>
               <dl class="desc">
@@ -3561,13 +3587,13 @@ watch(() => authSession.permissionInfo.value, info => {
               <el-table-column label="有效认购" align="right" min-width="120"><template #default="{ row }">{{ formatMoney(row.amount) }}</template></el-table-column>
               <el-table-column label="预估收益" align="right" min-width="120"><template #default="{ row }">{{ subscriptionEstimatedProfit(row) === null ? '暂无估算' : formatMoney(subscriptionEstimatedProfit(row)!) }}</template></el-table-column>
             </el-table>
-            <div v-if="!selectedProjectSettlementCompleted" class="actions-row">
+            <div v-if="!selectedProjectSettlementCompleted && canApi(authSession.permissionInfo.value, 'crowdfunding:settlement:upload-invoice')" class="actions-row">
               <el-button type="primary" :disabled="settlementInvoiceVisible" @click="startSettlement">
                 {{ settlementInvoiceVisible ? '等待补充发票凭证' : '核对发票凭证' }}
               </el-button>
             </div>
             <section
-              v-if="settlementInvoiceVisible && !selectedProjectSettlementCompleted"
+              v-if="settlementInvoiceVisible && !selectedProjectSettlementCompleted && canApi(authSession.permissionInfo.value, 'crowdfunding:settlement:upload-invoice')"
               data-testid="settlement-invoice-upload"
               class="settlement-invoice"
             >
@@ -3645,7 +3671,7 @@ watch(() => authSession.permissionInfo.value, info => {
               />
               <div v-if="invoiceOcrState === 'ok'" class="actions-row settlement-confirm-actions">
                 <el-button
-                  v-if="currentInvoiceCanConfirm"
+                  v-if="currentInvoiceCanConfirm && canApi(authSession.permissionInfo.value, 'crowdfunding:settlement:confirm')"
                   type="primary"
                   :loading="settlementSubmitting"
                   @click="confirmSettlementInvoice"

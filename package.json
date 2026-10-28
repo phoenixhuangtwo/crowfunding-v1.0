@@ -10,7 +10,7 @@
     "typecheck:server": "tsc --noEmit --allowImportingTsExtensions --module nodenext --moduleResolution nodenext --target es2022 --types node --skipLibCheck server/server.ts",
     "preview": "vite preview",
     "local": "bash scripts/local-processes.sh",
-    "test": "npm run test:unit && npm run test:integration:share",
+    "test": "npm run test:unit && npm run test:integration:share && npm run test:integration:permissions",
     "test:unit": "tsx --test tests/*.test.ts",
     "test:integration:share": "npm run test:integration:iam-boundary && npm run test:integration:share-concurrency",
     "test:integration:share-concurrency": "node --env-file-if-exists=.env.local --import tsx tests/share-concurrency.integration.ts",
@@ -20,7 +20,8 @@
     "test:smoke": "npm run test:integration:share",
     "test:smoke:legacy": "node tests/smoke.mjs",
     "storage:preflight": "node --env-file-if-exists=.env.local --import tsx scripts/storage-preflight.ts",
-    "storage:reconcile": "node --env-file-if-exists=.env.local --import tsx scripts/storage-reconcile.ts"
+    "storage:reconcile": "node --env-file-if-exists=.env.local --import tsx scripts/storage-reconcile.ts",
+    "test:integration:permissions": "node --env-file-if-exists=.env.local --import tsx tests/role-permission-regressions.integration.ts"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

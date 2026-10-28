@@ -957,6 +957,15 @@ async function routeGet(url: URL, req: IncomingMessage, res: ServerResponse) {
     return send(res, 200, { data: listed.filter(project => project.status === '未开放'
       || (project.tenantId === identity.tenantId && project.ownerUserId === identity.userId)) })
   }
+  const projectDetailMatch = pathname.match(/^\/api\/projects\/([^/]+)$/)
+  if (projectDetailMatch) {
+    const context = requestContext(req)
+    const projectId = decodeURIComponent(projectDetailMatch[1])
+    const project = (await queryService.listProjects(context)).find(item => item.id === projectId)
+    if (!project) throw new AppError(404, 'PROJECT_NOT_FOUND', '项目不存在或无权访问')
+    if (project.status !== '未开放') requireAdminOwned(req, project)
+    return send(res, 200, { data: project })
+  }
   const fundingMatch = pathname.match(/^\/api\/projects\/([^/]+)\/funding-reconciliation$/)
   if (fundingMatch) {
     const role = requestContext(req).role
@@ -4250,6 +4259,28 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     return send(res, 200, { data: receivingCode, message: before.imageName ? '收款码图片已更换并保存' : '收款码图片已上传并保存' })
   }
 
+  const receivingCodeEnableMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/enable$/)
+  if (receivingCodeEnableMatch) {
+    const actor = receivingCodeManager(req)
+    const receivingCodeId = decodeURIComponent(receivingCodeEnableMatch[1])
+    const result = await mongo.withTransaction(async session => {
+      const current = await repositories.receivingCodes.getById(receivingCodeId, session)
+      if (!current) throw new AppError(404, 'RECEIVING_CODE_NOT_FOUND', '项目收款码不存在')
+      if (current.status === '启用') return { record: current, audit: undefined }
+      const { disabledReason: _disabledReason, ...retained } = current
+      const record: ReceivingCode = { ...retained, status: '启用', updatedBy: actor.label, updatedAt: now() }
+      const audit = auditRecord({ actor: actor.label, role: actor.role, action: '启用收款码', target: current.id,
+        before: { status: current.status, disabledReason: current.disabledReason }, after: { status: record.status } }) as AuditLog
+      await repositories.receivingCodes.replace(record, session)
+      await repositories.auditLogs.insert(audit as never, session)
+      return { record, audit }
+    })
+    const index = receivingCodes.findIndex(item => item.id === receivingCodeId)
+    if (index >= 0) receivingCodes.splice(index, 1, result.record)
+    if (result.audit) auditLogs.unshift(result.audit)
+    return send(res, 200, { data: presentReceivingCode(result.record), message: '收款码已启用' })
+  }
+
   const receivingCodeDisableMatch = pathname.match(/^\/api\/receiving-codes\/([^/]+)\/disable$/)
   if (receivingCodeDisableMatch) {
     const actor = receivingCodeManager(req)
@@ -4505,7 +4536,7 @@ async function routePost(pathname: string, req: IncomingMessage, res: ServerResp
     })
     await mongo.withTransaction(async session => {
       const latest = await repositories.subscriptions.getById(updated.id, session)
-      if (!latest || latest.pay !== '待复核' || latest.shares !== undefined) {
+      if (!latest || latest.pay !== '待复核' || (latest.shares !== undefined && result === 'pass')) {
         throw new AppError(409, 'SUBSCRIPTION_STATUS_INVALID', '认购状态已变化，请刷新后重试')
       }
       if ((await repositories.projects.getById(latest.projectId, session))?.status === '已冻结') throw new AppError(409, 'PROJECT_FROZEN', '该众筹单已冻结，请等待处理')
@@ -5066,6 +5097,7 @@ const server = createServer(observeRequests(async (req, res) => {
     const adminScopedRead = role === 'admin' && req.method === 'GET'
       && (context.dataScope?.self || context.dataScope?.deptIds.includes(context.user?.deptId ?? ''))
       && (['/api/projects', '/api/rules', '/api/subscriptions', '/api/receiving-codes'].includes(url.pathname)
+        || /^\/api\/projects\/[^/]+$/.test(url.pathname)
         || /^\/api\/procurement\/orders\/[^/]+$/.test(url.pathname)
         || /^\/api\/files\/[^/]+\/content$/.test(url.pathname))
     const personalNotice = /^\/api\/notifications(?:\/read-all|\/[^/]+\/read)?$/.test(url.pathname)
