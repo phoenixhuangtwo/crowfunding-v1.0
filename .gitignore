@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.playwright-cli/
+*.tsbuildinfo
+.DS_Store
+.env.local
+data/*.json
+data/backups/
+output/
+.runtime/

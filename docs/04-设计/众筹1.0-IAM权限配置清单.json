@@ -1,0 +1,1449 @@
+{
+  "clientId": "crowdfunding",
+  "tenantId": 0,
+  "sourceProject": "/Users/phoenix/Documents/众筹v1.0",
+  "apiResources": [
+    {
+      "code": "crowdfunding:access",
+      "name": "基础访问",
+      "routes": [
+        [
+          "GET",
+          "/api/auth/me"
+        ],
+        [
+          "GET",
+          "/api/state"
+        ],
+        [
+          "GET",
+          "/api/rbac"
+        ],
+        [
+          "GET",
+          "/api/agreements/current"
+        ],
+        [
+          "GET",
+          "/api/files/*/content"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:query",
+      "name": "项目·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/projects"
+        ],
+        [
+          "GET",
+          "/api/projects/*"
+        ],
+        [
+          "GET",
+          "/api/projects/*/funding-reconciliation"
+        ],
+        [
+          "GET",
+          "/api/procurement/orders/*"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:subscription:query",
+      "name": "认购·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/subscriptions"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-proof:query",
+      "name": "缴款凭证·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/subscriptions"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule:query",
+      "name": "认购规则·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/rules"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receiving-code:query",
+      "name": "收款码·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/receiving-codes"
+        ],
+        [
+          "POST",
+          "/api/agreements/confirm-view-code"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-review:query",
+      "name": "缴款复核·查询",
+      "routes": [
+        [
+          "POST",
+          "/api/subscriptions/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:settlement:query",
+      "name": "发票结算·查询",
+      "routes": [
+        [
+          "POST",
+          "/api/settlements/calc"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:takeover:query",
+      "name": "公司兜底·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/projects"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:audit:query",
+      "name": "审计日志·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/audit-logs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:risk:query",
+      "name": "风险事件·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/risk-events"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement:sync",
+      "name": "采购数据·同步",
+      "routes": [
+        [
+          "POST",
+          "/api/mcp/sync"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:agreement:manage",
+      "name": "免责协议·管理",
+      "routes": [
+        [
+          "GET",
+          "/api/agreements"
+        ],
+        [
+          "GET",
+          "/api/agreements/*/confirmations"
+        ],
+        [
+          "POST",
+          "/api/agreements"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-payment:register",
+      "name": "采购付款·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/procurement-payment"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-payment:proof-upload",
+      "name": "采购付款·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/procurement-payment/proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt:query",
+      "name": "客户回款·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/receipt-batches"
+        ],
+        [
+          "GET",
+          "/api/projects/*/receipt-summary"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt:register",
+      "name": "客户回款·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/receipt-batches"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt:proof-upload",
+      "name": "客户回款·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/receipt-proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt:review",
+      "name": "客户回款·复核",
+      "routes": [
+        [
+          "POST",
+          "/api/receipt-batches/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt:difference-register",
+      "name": "客户回款·差异去向登记",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/receipt-differences"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution:query",
+      "name": "利润分配·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/distribution-orders"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution:generate",
+      "name": "利润分配·生成",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/distribution-orders"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution:approve",
+      "name": "利润分配·审批通过",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/approve"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution:reject",
+      "name": "利润分配·驳回",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/reject"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution:void",
+      "name": "利润分配·作废",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/void"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution:close",
+      "name": "利润分配·关闭结单",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/close"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:cost:query",
+      "name": "其他成本·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/confirmed-costs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:cost:register",
+      "name": "其他成本·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/confirmed-costs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:cost:proof-upload",
+      "name": "其他成本·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/confirmed-cost-proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:cost:review",
+      "name": "其他成本·复核",
+      "routes": [
+        [
+          "POST",
+          "/api/confirmed-costs/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payout:my-query",
+      "name": "分配打款·本人查询",
+      "routes": [
+        [
+          "GET",
+          "/api/my-distribution-payouts"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payout:register",
+      "name": "分配打款·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/lines/*/payout"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payout:proof-upload",
+      "name": "分配打款·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/lines/*/proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payout:confirm",
+      "name": "分配打款·确认",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/lines/*/confirm"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payout:issue-reply",
+      "name": "分配打款·异议回复",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/lines/*/issue-reply"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:financial-reconciliation:query",
+      "name": "资金对账·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/projects/*/financial-reconciliation"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:query",
+      "name": "异常款项·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/exception-funds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:register",
+      "name": "异常款项·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:proof-upload",
+      "name": "异常款项·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:refund",
+      "name": "异常款项·退款",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/*/refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:refund-proof-upload",
+      "name": "异常款项·退款凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/*/refund-proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:refund-confirm",
+      "name": "异常款项·退款到账确认",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/*/refunds/*/confirm"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:my-refunds",
+      "name": "异常款项·本人退款查询",
+      "routes": [
+        [
+          "GET",
+          "/api/my-exception-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:transfer",
+      "name": "异常款项·转入",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/*/transfers"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:transfer-review",
+      "name": "异常款项·转入复核",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/*/transfers/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:exception-fund:assign-project",
+      "name": "异常款项·归属项目",
+      "routes": [
+        [
+          "POST",
+          "/api/exception-funds/*/assign-project"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:open",
+      "name": "项目·开放",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/open"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:terminate",
+      "name": "项目·终止",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/terminate"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:interrupt",
+      "name": "项目·中断",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/interrupt"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:close",
+      "name": "项目·关闭结单",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/close"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:finish-close",
+      "name": "项目·完成关闭",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/finish-close"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project:reopen",
+      "name": "项目·重开",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/reopen"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-failure:request",
+      "name": "采购失败终止·申请",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/procurement-failure"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-failure:query",
+      "name": "采购失败终止·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/procurement-failure-requests"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-failure:review",
+      "name": "采购失败终止·复核",
+      "routes": [
+        [
+          "POST",
+          "/api/procurement-failure-requests/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-failure:finish",
+      "name": "采购失败终止·完成",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/finish-procurement-failure"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:supplier-refund:query",
+      "name": "供应商退款·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/supplier-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:supplier-refund:proof-upload",
+      "name": "供应商退款·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/supplier-refund-proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:supplier-refund:register",
+      "name": "供应商退款·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/supplier-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt-termination-refund:query",
+      "name": "原回款退回·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/receipt-termination-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt-termination-refund:proof-upload",
+      "name": "原回款退回·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/receipt-termination-refund-proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt-termination-refund:register",
+      "name": "原回款退回·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/receipt-termination-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt-termination-refund:review",
+      "name": "原回款退回·复核",
+      "routes": [
+        [
+          "POST",
+          "/api/receipt-termination-refunds/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund:query",
+      "name": "项目退款·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/project-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund:my-query",
+      "name": "项目退款·本人查询",
+      "routes": [
+        [
+          "GET",
+          "/api/my-project-refunds"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund:proof-upload",
+      "name": "项目退款·凭证上传",
+      "routes": [
+        [
+          "POST",
+          "/api/project-refunds/*/proofs"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund:register",
+      "name": "项目退款·登记",
+      "routes": [
+        [
+          "POST",
+          "/api/project-refunds/*/payment"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund:confirm",
+      "name": "项目退款·确认",
+      "routes": [
+        [
+          "POST",
+          "/api/project-refunds/*/confirm"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund-proxy:query",
+      "name": "退款代确认·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/project-refund-proxy-requests"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund-proxy:request",
+      "name": "退款代确认·申请",
+      "routes": [
+        [
+          "POST",
+          "/api/project-refunds/*/proxy-confirm"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:project-refund-proxy:review",
+      "name": "退款代确认·复核",
+      "routes": [
+        [
+          "POST",
+          "/api/project-refund-proxy-requests/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution-payout-proxy:query",
+      "name": "分配代确认·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/distribution-payout-proxy-requests"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution-payout-proxy:request",
+      "name": "分配代确认·申请",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-orders/*/lines/*/proxy-confirm"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:distribution-payout-proxy:review",
+      "name": "分配代确认·复核",
+      "routes": [
+        [
+          "POST",
+          "/api/distribution-payout-proxy-requests/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule-parameters:query",
+      "name": "规则参数·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/rule-parameters"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule-parameters:update",
+      "name": "规则参数·编辑",
+      "routes": [
+        [
+          "POST",
+          "/api/rule-parameters"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:notification:query",
+      "name": "通知·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/notifications"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:notification:read",
+      "name": "通知·标记已读",
+      "routes": [
+        [
+          "POST",
+          "/api/notifications/read-all"
+        ],
+        [
+          "POST",
+          "/api/notifications/*/read"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt-overdue:query",
+      "name": "回款超期·查询",
+      "routes": [
+        [
+          "GET",
+          "/api/receipt-overdue-cases"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receipt-overdue:resolve",
+      "name": "回款超期·处置",
+      "routes": [
+        [
+          "POST",
+          "/api/receipt-overdue-cases/*/resolve"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:procurement-difference:resolve",
+      "name": "采购差异·处置",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/procurement-difference/resolve"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:subscription:create",
+      "name": "认购·创建",
+      "routes": [
+        [
+          "POST",
+          "/api/subscriptions"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:subscription:confirm-receipt",
+      "name": "认购·确认收款",
+      "routes": [
+        [
+          "POST",
+          "/api/subscriptions/*/confirm-receipt"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-proof:upload",
+      "name": "缴款凭证·上传",
+      "routes": [
+        [
+          "POST",
+          "/api/payments/ocr"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-proof:delete",
+      "name": "缴款凭证·删除",
+      "routes": [
+        [
+          "POST",
+          "/api/payments/images/delete"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-proof:ocr",
+      "name": "缴款凭证·识别",
+      "routes": [
+        [
+          "POST",
+          "/api/payments/ocr"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule:create",
+      "name": "认购规则·创建",
+      "routes": [
+        [
+          "POST",
+          "/api/rules"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule:update",
+      "name": "认购规则·编辑",
+      "routes": [
+        [
+          "POST",
+          "/api/rules/*/update"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule:change-status",
+      "name": "认购规则·启停",
+      "routes": [
+        [
+          "POST",
+          "/api/rules/*/status"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:rule:delete",
+      "name": "认购规则·删除",
+      "routes": [
+        [
+          "POST",
+          "/api/rules/*/delete"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receiving-code:create",
+      "name": "收款码·创建",
+      "routes": [
+        [
+          "POST",
+          "/api/receiving-codes"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receiving-code:update-image",
+      "name": "收款码·更新图片",
+      "routes": [
+        [
+          "POST",
+          "/api/receiving-codes/*/image"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:receiving-code:disable",
+      "name": "收款码·启禁用",
+      "routes": [
+        [
+          "POST",
+          "/api/receiving-codes/*/disable"
+        ],
+        [
+          "POST",
+          "/api/receiving-codes/*/enable"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-review:approve",
+      "name": "缴款复核·审批通过",
+      "routes": [
+        [
+          "POST",
+          "/api/subscriptions/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-review:reject",
+      "name": "缴款复核·驳回",
+      "routes": [
+        [
+          "POST",
+          "/api/subscriptions/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:payment-review:partial",
+      "name": "缴款复核·部分缴款",
+      "routes": [
+        [
+          "POST",
+          "/api/subscriptions/*/review"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:settlement:calculate",
+      "name": "发票结算·试算",
+      "routes": [
+        [
+          "POST",
+          "/api/settlements/calc"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:settlement:confirm",
+      "name": "发票结算·确认",
+      "routes": [
+        [
+          "POST",
+          "/api/projects/*/settlements/confirm"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:settlement:upload-invoice",
+      "name": "发票结算·上传发票",
+      "routes": [
+        [
+          "POST",
+          "/api/invoices/pending/delete"
+        ],
+        [
+          "POST",
+          "/api/invoices/ocr"
+        ]
+      ]
+    },
+    {
+      "code": "crowdfunding:takeover:force",
+      "name": "公司兜底·强制接管",
+      "routes": [
+        [
+          "POST",
+          "/api/takeovers/*/force"
+        ]
+      ]
+    }
+  ],
+  "buttons": [
+    "crowdfunding:procurement:sync",
+    "crowdfunding:procurement-payment:proof-upload",
+    "crowdfunding:receipt:register",
+    "crowdfunding:receipt:proof-upload",
+    "crowdfunding:receipt:review",
+    "crowdfunding:receipt:difference-register",
+    "crowdfunding:distribution:generate",
+    "crowdfunding:distribution:approve",
+    "crowdfunding:distribution:reject",
+    "crowdfunding:distribution:void",
+    "crowdfunding:distribution:close",
+    "crowdfunding:cost:register",
+    "crowdfunding:cost:proof-upload",
+    "crowdfunding:cost:review",
+    "crowdfunding:payout:register",
+    "crowdfunding:payout:proof-upload",
+    "crowdfunding:payout:confirm",
+    "crowdfunding:payout:issue-reply",
+    "crowdfunding:exception-fund:register",
+    "crowdfunding:exception-fund:proof-upload",
+    "crowdfunding:exception-fund:refund",
+    "crowdfunding:exception-fund:refund-proof-upload",
+    "crowdfunding:exception-fund:refund-confirm",
+    "crowdfunding:exception-fund:transfer",
+    "crowdfunding:exception-fund:transfer-review",
+    "crowdfunding:exception-fund:assign-project",
+    "crowdfunding:project:open",
+    "crowdfunding:project:terminate",
+    "crowdfunding:project:interrupt",
+    "crowdfunding:project:close",
+    "crowdfunding:project:finish-close",
+    "crowdfunding:project:reopen",
+    "crowdfunding:procurement-failure:request",
+    "crowdfunding:procurement-failure:review",
+    "crowdfunding:procurement-failure:finish",
+    "crowdfunding:supplier-refund:proof-upload",
+    "crowdfunding:supplier-refund:register",
+    "crowdfunding:receipt-termination-refund:proof-upload",
+    "crowdfunding:receipt-termination-refund:register",
+    "crowdfunding:receipt-termination-refund:review",
+    "crowdfunding:project-refund:proof-upload",
+    "crowdfunding:project-refund:register",
+    "crowdfunding:project-refund:confirm",
+    "crowdfunding:project-refund-proxy:request",
+    "crowdfunding:project-refund-proxy:review",
+    "crowdfunding:distribution-payout-proxy:request",
+    "crowdfunding:distribution-payout-proxy:review",
+    "crowdfunding:rule-parameters:update",
+    "crowdfunding:notification:read",
+    "crowdfunding:receipt-overdue:resolve",
+    "crowdfunding:procurement-difference:resolve",
+    "crowdfunding:subscription:create",
+    "crowdfunding:subscription:confirm-receipt",
+    "crowdfunding:payment-proof:upload",
+    "crowdfunding:payment-proof:delete",
+    "crowdfunding:payment-proof:ocr",
+    "crowdfunding:rule:create",
+    "crowdfunding:rule:update",
+    "crowdfunding:rule:change-status",
+    "crowdfunding:rule:delete",
+    "crowdfunding:receiving-code:create",
+    "crowdfunding:receiving-code:update-image",
+    "crowdfunding:receiving-code:disable",
+    "crowdfunding:payment-review:approve",
+    "crowdfunding:payment-review:reject",
+    "crowdfunding:payment-review:partial",
+    "crowdfunding:settlement:calculate",
+    "crowdfunding:settlement:confirm",
+    "crowdfunding:settlement:upload-invoice",
+    "crowdfunding:takeover:force"
+  ],
+  "pages": [
+    {
+      "key": "notifications",
+      "name": "消息中心",
+      "permission": "notification:query",
+      "roles": "employee admin finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "projects",
+      "name": "项目列表",
+      "permission": "project:query",
+      "roles": "employee admin finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "mine",
+      "name": "我的认购",
+      "permission": "subscription:query",
+      "roles": "employee",
+      "hidden": 0
+    },
+    {
+      "key": "myPayouts",
+      "name": "我的收益",
+      "permission": "payout:my-query",
+      "roles": "employee",
+      "hidden": 0
+    },
+    {
+      "key": "adminProjects",
+      "name": "项目管理",
+      "permission": "project:manage",
+      "roles": "admin super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "rules",
+      "name": "认购规则配置",
+      "permission": "rule:query",
+      "roles": "admin finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "agreements",
+      "name": "免责协议版本",
+      "permission": "agreement:manage",
+      "roles": "super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "ruleParameters",
+      "name": "规则参数",
+      "permission": "rule-parameters:query",
+      "roles": "super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "receiptOverdue",
+      "name": "回款超期处置",
+      "permission": "receipt-overdue:query",
+      "roles": "super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "receivingCode",
+      "name": "项目收款码管理",
+      "permission": "receiving-code:query",
+      "roles": "admin finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "payReview",
+      "name": "支付复核",
+      "permission": "payment-review:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "procurementPayment",
+      "name": "采购付款登记",
+      "permission": "procurement-payment:register",
+      "roles": "finance",
+      "hidden": 0
+    },
+    {
+      "key": "customerReceipts",
+      "name": "客户回款",
+      "permission": "receipt:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "distributionOrders",
+      "name": "利润分配",
+      "permission": "distribution:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "exceptionFunds",
+      "name": "异常款项",
+      "permission": "exception-fund:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "projectRefunds",
+      "name": "项目退款",
+      "permission": "project-refund:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "procurementFailure",
+      "name": "采购失败终止",
+      "permission": "procurement-failure:query",
+      "roles": "admin finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "settlement",
+      "name": "发票凭证核对",
+      "permission": "settlement:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    },
+    {
+      "key": "audit",
+      "name": "审计日志",
+      "permission": "audit:query",
+      "roles": "finance super_admin",
+      "hidden": 0
+    }
+  ],
+  "roles": {
+    "employee": {
+      "id": 33,
+      "code": "crowdfunding_employee",
+      "dataScope": 5,
+      "apiPermissions": [
+        "crowdfunding:access",
+        "crowdfunding:exception-fund:my-refunds",
+        "crowdfunding:exception-fund:refund-confirm",
+        "crowdfunding:notification:query",
+        "crowdfunding:notification:read",
+        "crowdfunding:payment-proof:delete",
+        "crowdfunding:payment-proof:ocr",
+        "crowdfunding:payment-proof:query",
+        "crowdfunding:payment-proof:upload",
+        "crowdfunding:payout:confirm",
+        "crowdfunding:payout:my-query",
+        "crowdfunding:project-refund:confirm",
+        "crowdfunding:project-refund:my-query",
+        "crowdfunding:project:query",
+        "crowdfunding:receiving-code:query",
+        "crowdfunding:rule:query",
+        "crowdfunding:subscription:confirm-receipt",
+        "crowdfunding:subscription:create",
+        "crowdfunding:subscription:query"
+      ]
+    },
+    "admin": {
+      "id": 32,
+      "code": "crowdfunding_admin",
+      "dataScope": 1,
+      "apiPermissions": [
+        "crowdfunding:access",
+        "crowdfunding:notification:query",
+        "crowdfunding:notification:read",
+        "crowdfunding:procurement-failure:query",
+        "crowdfunding:procurement-failure:request",
+        "crowdfunding:procurement:sync",
+        "crowdfunding:project:close",
+        "crowdfunding:project:interrupt",
+        "crowdfunding:project:open",
+        "crowdfunding:project:query",
+        "crowdfunding:project:reopen",
+        "crowdfunding:project:terminate",
+        "crowdfunding:receiving-code:create",
+        "crowdfunding:receiving-code:disable",
+        "crowdfunding:receiving-code:query",
+        "crowdfunding:receiving-code:update-image",
+        "crowdfunding:rule:change-status",
+        "crowdfunding:rule:create",
+        "crowdfunding:rule:delete",
+        "crowdfunding:rule:query",
+        "crowdfunding:rule:update",
+        "crowdfunding:subscription:query"
+      ]
+    },
+    "finance": {
+      "id": 34,
+      "code": "crowdfunding_finance",
+      "dataScope": 1,
+      "apiPermissions": [
+        "crowdfunding:access",
+        "crowdfunding:audit:query",
+        "crowdfunding:cost:proof-upload",
+        "crowdfunding:cost:query",
+        "crowdfunding:cost:register",
+        "crowdfunding:distribution-payout-proxy:query",
+        "crowdfunding:distribution-payout-proxy:request",
+        "crowdfunding:distribution:approve",
+        "crowdfunding:distribution:close",
+        "crowdfunding:distribution:generate",
+        "crowdfunding:distribution:query",
+        "crowdfunding:distribution:reject",
+        "crowdfunding:distribution:void",
+        "crowdfunding:exception-fund:assign-project",
+        "crowdfunding:exception-fund:proof-upload",
+        "crowdfunding:exception-fund:query",
+        "crowdfunding:exception-fund:refund",
+        "crowdfunding:exception-fund:refund-proof-upload",
+        "crowdfunding:exception-fund:register",
+        "crowdfunding:exception-fund:transfer",
+        "crowdfunding:financial-reconciliation:query",
+        "crowdfunding:notification:query",
+        "crowdfunding:notification:read",
+        "crowdfunding:payment-proof:query",
+        "crowdfunding:payment-review:approve",
+        "crowdfunding:payment-review:partial",
+        "crowdfunding:payment-review:query",
+        "crowdfunding:payment-review:reject",
+        "crowdfunding:payout:issue-reply",
+        "crowdfunding:payout:proof-upload",
+        "crowdfunding:payout:register",
+        "crowdfunding:procurement-failure:finish",
+        "crowdfunding:procurement-payment:proof-upload",
+        "crowdfunding:procurement-payment:register",
+        "crowdfunding:project-refund-proxy:query",
+        "crowdfunding:project-refund-proxy:request",
+        "crowdfunding:project-refund:proof-upload",
+        "crowdfunding:project-refund:query",
+        "crowdfunding:project-refund:register",
+        "crowdfunding:project:finish-close",
+        "crowdfunding:project:query",
+        "crowdfunding:receipt-termination-refund:proof-upload",
+        "crowdfunding:receipt-termination-refund:query",
+        "crowdfunding:receipt-termination-refund:register",
+        "crowdfunding:receipt:difference-register",
+        "crowdfunding:receipt:proof-upload",
+        "crowdfunding:receipt:query",
+        "crowdfunding:receipt:register",
+        "crowdfunding:receipt:review",
+        "crowdfunding:receiving-code:create",
+        "crowdfunding:receiving-code:disable",
+        "crowdfunding:receiving-code:query",
+        "crowdfunding:receiving-code:update-image",
+        "crowdfunding:risk:query",
+        "crowdfunding:rule:query",
+        "crowdfunding:settlement:calculate",
+        "crowdfunding:settlement:confirm",
+        "crowdfunding:settlement:query",
+        "crowdfunding:settlement:upload-invoice",
+        "crowdfunding:subscription:query",
+        "crowdfunding:supplier-refund:proof-upload",
+        "crowdfunding:supplier-refund:query",
+        "crowdfunding:supplier-refund:register",
+        "crowdfunding:takeover:query"
+      ]
+    },
+    "super_admin": {
+      "id": 35,
+      "code": "crowdfunding_super_admin",
+      "dataScope": 1,
+      "apiPermissions": [
+        "crowdfunding:access",
+        "crowdfunding:agreement:manage",
+        "crowdfunding:audit:query",
+        "crowdfunding:cost:query",
+        "crowdfunding:cost:review",
+        "crowdfunding:distribution-payout-proxy:query",
+        "crowdfunding:distribution-payout-proxy:review",
+        "crowdfunding:distribution:query",
+        "crowdfunding:exception-fund:query",
+        "crowdfunding:exception-fund:refund-confirm",
+        "crowdfunding:exception-fund:transfer-review",
+        "crowdfunding:financial-reconciliation:query",
+        "crowdfunding:notification:query",
+        "crowdfunding:notification:read",
+        "crowdfunding:payment-proof:query",
+        "crowdfunding:payment-review:query",
+        "crowdfunding:procurement-difference:resolve",
+        "crowdfunding:procurement-failure:query",
+        "crowdfunding:procurement-failure:review",
+        "crowdfunding:project-refund-proxy:query",
+        "crowdfunding:project-refund-proxy:review",
+        "crowdfunding:project-refund:query",
+        "crowdfunding:project:close",
+        "crowdfunding:project:interrupt",
+        "crowdfunding:project:open",
+        "crowdfunding:project:query",
+        "crowdfunding:project:terminate",
+        "crowdfunding:receipt-overdue:query",
+        "crowdfunding:receipt-overdue:resolve",
+        "crowdfunding:receipt-termination-refund:query",
+        "crowdfunding:receipt-termination-refund:review",
+        "crowdfunding:receipt:query",
+        "crowdfunding:receipt:review",
+        "crowdfunding:receiving-code:query",
+        "crowdfunding:risk:query",
+        "crowdfunding:rule-parameters:query",
+        "crowdfunding:rule-parameters:update",
+        "crowdfunding:rule:query",
+        "crowdfunding:settlement:calculate",
+        "crowdfunding:settlement:query",
+        "crowdfunding:subscription:query",
+        "crowdfunding:supplier-refund:query",
+        "crowdfunding:takeover:force",
+        "crowdfunding:takeover:query"
+      ]
+    }
+  }
+}

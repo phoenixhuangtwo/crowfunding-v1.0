@@ -1,0 +1,287 @@
+import type { Db, IndexDescriptionInfo } from 'mongodb'
+
+export const businessCollections = [
+  'projects',
+  'subscriptions',
+  'subscription_rules',
+  'receiving_codes',
+  'audit_logs',
+  'fund_ledger',
+  'procurement_payments',
+  'bank_transactions',
+  'receipt_batches',
+  'receipt_differences',
+  'distribution_orders',
+  'confirmed_costs',
+  'exception_funds',
+  'project_refunds',
+  'procurement_failure_requests',
+  'supplier_refunds',
+  'receipt_termination_refunds',
+  'project_refund_proxy_requests',
+  'distribution_payout_proxy_requests',
+  'rule_parameters',
+  'notifications',
+  'receipt_overdue_cases',
+  'risk_events',
+  'file_assets'
+] as const
+
+export type BusinessCollection = (typeof businessCollections)[number]
+
+export type PlannedIndex = {
+  name: string
+  key: Record<string, 1 | -1>
+  unique?: boolean
+  partialFilterExpression?: Record<string, unknown>
+}
+
+export const legacyImageFields: Record<BusinessCollection, readonly string[]> = {
+  projects: ['settlementInvoices.imageUrl'],
+  subscriptions: ['paymentImageUrl', 'paymentImages.paymentImageUrl'],
+  subscription_rules: [],
+  receiving_codes: ['imageUrl'],
+  audit_logs: [],
+  fund_ledger: [],
+  procurement_payments: [],
+  bank_transactions: [],
+  receipt_batches: [],
+  receipt_differences: [],
+  distribution_orders: [],
+  confirmed_costs: [],
+  exception_funds: [],
+  project_refunds: [],
+  procurement_failure_requests: [],
+  supplier_refunds: [],
+  receipt_termination_refunds: [],
+  project_refund_proxy_requests: [],
+  distribution_payout_proxy_requests: [],
+  rule_parameters: [],
+  notifications: [],
+  receipt_overdue_cases: [],
+  risk_events: [],
+  file_assets: []
+}
+
+export const indexDefinitions: Record<BusinessCollection, readonly PlannedIndex[]> = {
+  projects: [
+    { name: 'uniq_projects_id', key: { id: 1 }, unique: true },
+    { name: 'idx_projects_status', key: { status: 1 } },
+    { name: 'idx_projects_deadline', key: { deadline: 1 } },
+    { name: 'idx_projects_rule_id', key: { ruleId: 1 } },
+    { name: 'uniq_projects_reopened_from', key: { reopenedFromProjectId: 1 }, unique: true,
+      partialFilterExpression: { reopenedFromProjectId: { $exists: true } } }
+  ],
+  subscriptions: [
+    { name: 'uniq_subscriptions_id', key: { id: 1 }, unique: true },
+    {
+      name: 'uniq_subscriptions_idempotency_key',
+      key: { idempotencyKey: 1 },
+      unique: true,
+      partialFilterExpression: { idempotencyKey: { $gt: '' } }
+    },
+    { name: 'idx_subscriptions_project_user', key: { projectId: 1, userId: 1 } },
+    { name: 'idx_subscriptions_status', key: { pay: 1 } }
+  ],
+  subscription_rules: [
+    { name: 'uniq_subscription_rules_id', key: { id: 1 }, unique: true },
+    { name: 'idx_subscription_rules_project_id', key: { projectId: 1 } },
+    { name: 'idx_subscription_rules_status', key: { status: 1 } }
+  ],
+  receiving_codes: [
+    { name: 'uniq_receiving_codes_id', key: { id: 1 }, unique: true },
+    {
+      name: 'uniq_receiving_codes_create_request_id',
+      key: { createRequestId: 1 },
+      unique: true,
+      partialFilterExpression: { createRequestId: { $gt: '' } }
+    },
+    { name: 'idx_receiving_codes_status', key: { status: 1 } }
+  ],
+  audit_logs: [
+    { name: 'uniq_audit_logs_id', key: { id: 1 }, unique: true },
+    { name: 'idx_audit_logs_time', key: { time: -1 } },
+    { name: 'idx_audit_logs_target', key: { target: 1 } }
+  ],
+  fund_ledger: [
+    { name: 'uniq_fund_ledger_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_fund_ledger_source', key: { sourceKey: 1 }, unique: true },
+    { name: 'uniq_fund_ledger_transaction_key', key: { transactionKey: 1 }, unique: true },
+    { name: 'idx_fund_ledger_project_time', key: { projectId: 1, createdAt: -1 } }
+  ],
+  procurement_payments: [
+    { name: 'uniq_procurement_payment_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_procurement_payment_project', key: { projectId: 1 }, unique: true },
+    { name: 'uniq_procurement_payment_transaction', key: { transactionNo: 1 }, unique: true }
+  ],
+  bank_transactions: [
+    { name: 'uniq_bank_transaction_no', key: { transactionNo: 1 }, unique: true }
+  ],
+  receipt_batches: [
+    { name: 'uniq_receipt_batch_id', key: { id: 1 }, unique: true },
+    { name: 'idx_receipt_batch_status_time', key: { status: 1, bookedAt: -1 } },
+    { name: 'idx_receipt_batch_projects', key: { 'lines.projectId': 1 } }
+  ],
+  receipt_differences: [
+    { name: 'uniq_receipt_difference_id', key: { id: 1 }, unique: true },
+    { name: 'idx_receipt_difference_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'uniq_receipt_difference_refund_transaction', key: { refundTransactionNo: 1 }, unique: true,
+      partialFilterExpression: { refundTransactionNo: { $gt: '' } } }
+  ],
+  distribution_orders: [
+    { name: 'uniq_distribution_order_id', key: { id: 1 }, unique: true },
+    { name: 'idx_distribution_order_project_time', key: { projectId: 1, createdAt: -1 } }
+  ],
+  confirmed_costs: [
+    { name: 'uniq_confirmed_cost_id', key: { id: 1 }, unique: true },
+    { name: 'idx_confirmed_cost_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'idx_confirmed_cost_status', key: { status: 1 } }
+  ],
+  exception_funds: [
+    { name: 'uniq_exception_fund_id', key: { id: 1 }, unique: true },
+    { name: 'idx_exception_fund_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'uniq_exception_fund_transaction', key: { transactionNo: 1 }, unique: true }
+  ],
+  project_refunds: [
+    { name: 'uniq_project_refund_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_project_refund_subscription', key: { subscriptionId: 1 }, unique: true },
+    { name: 'idx_project_refund_project_status', key: { projectId: 1, status: 1 } },
+    { name: 'idx_project_refund_participant', key: { participantId: 1, createdAt: -1 } }
+  ],
+  procurement_failure_requests: [
+    { name: 'uniq_procurement_failure_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_procurement_failure_project', key: { projectId: 1 }, unique: true }
+  ],
+  supplier_refunds: [
+    { name: 'uniq_supplier_refund_id', key: { id: 1 }, unique: true },
+    { name: 'idx_supplier_refund_project', key: { projectId: 1, createdAt: -1 } },
+    { name: 'uniq_supplier_refund_transaction', key: { transactionNo: 1 }, unique: true }
+  ],
+  receipt_termination_refunds: [
+    { name: 'uniq_receipt_termination_refund_id', key: { id: 1 }, unique: true },
+    { name: 'idx_receipt_termination_refund_project', key: { projectId: 1, status: 1 } },
+    { name: 'uniq_receipt_termination_refund_transaction', key: { transactionNo: 1 }, unique: true }
+  ],
+  project_refund_proxy_requests: [
+    { name: 'uniq_project_refund_proxy_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_project_refund_proxy_refund', key: { refundId: 1 }, unique: true },
+    { name: 'idx_project_refund_proxy_status', key: { status: 1, requestedAt: -1 } }
+  ],
+  distribution_payout_proxy_requests: [
+    { name: 'uniq_distribution_payout_proxy_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_distribution_payout_proxy_line', key: { orderId: 1, participantId: 1 }, unique: true },
+    { name: 'idx_distribution_payout_proxy_status', key: { status: 1, requestedAt: -1 } }
+  ],
+  rule_parameters: [
+    { name: 'uniq_rule_parameters_id', key: { id: 1 }, unique: true }
+  ],
+  notifications: [
+    { name: 'uniq_notification_id', key: { id: 1 }, unique: true },
+    { name: 'idx_notification_recipient', key: { recipientId: 1, readAt: 1, createdAt: -1 } }
+  ],
+  receipt_overdue_cases: [
+    { name: 'uniq_receipt_overdue_project', key: { projectId: 1 }, unique: true },
+    { name: 'idx_receipt_overdue_status', key: { status: 1, lastWarnedAt: -1 } }
+  ],
+  risk_events: [
+    { name: 'uniq_risk_events_id', key: { id: 1 }, unique: true },
+    { name: 'idx_risk_events_project_status', key: { projectId: 1, status: 1 } },
+    { name: 'idx_risk_events_time', key: { time: -1 } }
+  ],
+  file_assets: [
+    { name: 'uniq_file_assets_id', key: { id: 1 }, unique: true },
+    { name: 'uniq_file_assets_object_key', key: { objectKey: 1 }, unique: true },
+    { name: 'idx_file_assets_owner', key: { ownerType: 1, ownerId: 1 } },
+    { name: 'idx_file_assets_status', key: { status: 1 } }
+  ]
+}
+
+export type SchemaConflict = {
+  collection: string
+  kind: 'duplicate-id' | 'duplicate-idempotency-key' | 'legacy-image-field' | 'index-conflict'
+  detail: string
+}
+
+export class SchemaConflictError extends Error {
+  constructor(readonly conflicts: SchemaConflict[]) {
+    super(`MongoDB 结构预检发现 ${conflicts.length} 个冲突，未执行任何结构变更`)
+    this.name = 'SchemaConflictError'
+  }
+}
+
+export function collectionName(base: BusinessCollection, prefix = '') {
+  return `${prefix}${base}`
+}
+
+export function transactionCapabilityError(hello: Record<string, unknown>) {
+  if (typeof hello.setName === 'string' || hello.msg === 'isdbgrid') return null
+  return 'MongoDB 部署不支持事务：需要副本集或分片集群'
+}
+
+function sameIndexDefinition(existing: IndexDescriptionInfo, expected: PlannedIndex) {
+  return JSON.stringify(existing.key) === JSON.stringify(expected.key) &&
+    Boolean(existing.unique) === Boolean(expected.unique) &&
+    JSON.stringify(existing.partialFilterExpression ?? null) === JSON.stringify(expected.partialFilterExpression ?? null)
+}
+
+export async function inspectSchema(db: Db, prefix = ''): Promise<SchemaConflict[]> {
+  const conflicts: SchemaConflict[] = []
+  const existingNames = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map(item => item.name))
+
+  for (const base of businessCollections) {
+    const name = collectionName(base, prefix)
+    if (!existingNames.has(name)) continue
+    const collection = db.collection(name)
+
+    for (const field of legacyImageFields[base]) {
+      const count = await collection.countDocuments({ [field]: { $exists: true } }, { limit: 1 })
+      if (count > 0) conflicts.push({ collection: name, kind: 'legacy-image-field', detail: field })
+    }
+
+    for (const definition of indexDefinitions[base].filter(item => item.unique)) {
+      const field = Object.keys(definition.key)[0]
+      const duplicate = await collection.aggregate([
+        { $match: definition.partialFilterExpression ?? { [field]: { $exists: true } } },
+        { $group: { _id: `$${field}`, count: { $sum: 1 } } },
+        { $match: { count: { $gt: 1 } } },
+        { $limit: 1 }
+      ]).next()
+      if (duplicate) {
+        conflicts.push({
+          collection: name,
+          kind: field === 'id' ? 'duplicate-id' : 'duplicate-idempotency-key',
+          detail: field
+        })
+      }
+    }
+
+    const existingIndexes = await collection.listIndexes().toArray()
+    for (const definition of indexDefinitions[base]) {
+      const named = existingIndexes.find(item => item.name === definition.name)
+      if (named && !sameIndexDefinition(named, definition)) {
+        conflicts.push({ collection: name, kind: 'index-conflict', detail: definition.name })
+      }
+    }
+  }
+  return conflicts
+}
+
+export async function ensureSchema(db: Db, prefix = '') {
+  const conflicts = await inspectSchema(db, prefix)
+  if (conflicts.length > 0) throw new SchemaConflictError(conflicts)
+
+  const existing = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map(item => item.name))
+  for (const base of businessCollections) {
+    const name = collectionName(base, prefix)
+    if (!existing.has(name)) await db.createCollection(name)
+    for (const definition of indexDefinitions[base]) {
+      await db.collection(name).createIndex(definition.key, {
+        name: definition.name,
+        ...(definition.unique === undefined ? {} : { unique: definition.unique }),
+        ...(definition.partialFilterExpression
+          ? { partialFilterExpression: definition.partialFilterExpression }
+          : {})
+      })
+    }
+  }
+}
